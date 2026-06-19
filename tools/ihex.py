@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Pure-Python Intel HEX utilities — merge + ELF->HEX, so the package build
 needs no `srecord`/`srec_cat`.
 

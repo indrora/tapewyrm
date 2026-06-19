@@ -1,26 +1,28 @@
 # Tapewyrm task runner (DESIGN.md §12.6). `just --list` to see recipes.
+# Python helper scripts carry PEP 723 inline metadata and are run with `uv run`,
+# so their dependencies (e.g. crcmod for .upd) are fetched automatically.
 
 set windows-shell := ["cmd.exe", "/c"]
 
 # regenerate protocol.h + protocol.py from the single source of truth
 gen:
-    python protocol/generate.py
+    uv run protocol/generate.py
 
 # verify the generated protocol artifacts are in sync (CI uses this)
 gen-check:
-    python protocol/generate.py --check
+    uv run protocol/generate.py --check
 
-# build the WHOLE project as one package (host wheel + firmware images) -> dist/
+# build the WHOLE project as one package (host wheel + at32f4 firmware) -> dist/
 package:
-    python tools/package.py
+    uv run tools/package.py
 
-# build just the firmware images -> dist/ (portable: pure-Python HEX merge, no srecord/crcmod)
+# build just the firmware images -> dist/ (portable: pure-Python HEX merge, no srecord)
 fw mcus="at32f4":
-    python tools/package.py --skip-host --mcus {{mcus}}
+    uv run tools/package.py --skip-host --mcus {{mcus}}
 
-# full Greaseweazle-style firmware release (all MCUs + .upd files); needs srecord + crcmod (CI/Linux)
+# full firmware release: all MCUs + a combined .upd update file -> dist/ (no host wheel)
 fw-dist:
-    make -C firmware dist
+    uv run tools/package.py --dist --skip-host
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
 flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
@@ -46,6 +48,10 @@ test:
 lint:
     cd host && uv run ruff check .
     cd host && uv run mypy tapewyrm
+
+# remove build, package, and cache artifacts (keeps the uv venv)
+clean:
+    uv run tools/clean.py
 
 # everything CI runs (protocol drift check last)
 ci: gen host
