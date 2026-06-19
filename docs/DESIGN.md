@@ -2,7 +2,7 @@
 
 > **Status:** design record. The host stack and codec are implemented; the Greaseweazle firmware is **vendored complete in-tree** (`firmware/`, Unlicense) with the QIC layer grafted onto GW's control loop and flux recording.
 > **License:** the whole project is **public domain under the Unlicense** (see `UNLICENSE`); the vendored Greaseweazle firmware is itself Unlicense.
-> **Purpose:** a single, self-contained document to seed a Claude Code session (or hand to an engineer) so the full reasoning, decisions, and open questions can be reconstructed without re-deriving them. Reads top-to-bottom; later sections assume the vocabulary of earlier ones.
+> **Purpose:** a single, self-contained document to document the full reasoning, decisions, and open questions can be reconstructed without re-deriving them. Reads top-to-bottom; later sections assume the vocabulary of earlier ones.
 > **Name:** *Tapewyrm* — the tape is a long serpent of a medium, written in a back-and-forth serpentine (§7.4); a wyrm rather than a weasel.
 
 ---
