@@ -1,0 +1,23 @@
+name: contract
+
+# Mechanically enforce the protocol no-drift invariant (DESIGN.md §12.4):
+# regenerate both ends and fail if anything changed.
+
+on:
+  push:
+    paths: ["protocol/**", "firmware/protocol.h", "host/tapewyrm/link/protocol.py"]
+  pull_request:
+    paths: ["protocol/**", "firmware/protocol.h", "host/tapewyrm/link/protocol.py"]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate protocol
+        run: python protocol/generate.py
+      - name: Fail on drift
+        run: git diff --exit-code

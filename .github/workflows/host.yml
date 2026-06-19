@@ -1,0 +1,28 @@
+name: host
+
+on:
+  push:
+    paths: ["host/**", ".github/workflows/host.yml"]
+  pull_request:
+    paths: ["host/**", ".github/workflows/host.yml"]
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync
+        run: uv sync --extra dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy tapewyrm
+      - name: Pytest
+        run: uv run pytest --cov=tapewyrm --cov-report=term-missing

@@ -1,0 +1,29 @@
+name: firmware
+
+# Builds the vendored GW firmware tree with the Tapewyrm QIC sources.
+# NOTE: until the GW firmware tree is vendored under firmware/ (DESIGN.md §12.5),
+# this job only sanity-checks that the QIC skeleton sources compile against the
+# generated protocol.h. Wire up the full `make -C firmware` once vendored.
+
+on:
+  push:
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+  pull_request:
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: Cross-compile QIC skeleton sources (Cortex-M4)
+        run: |
+          # TODO(bench): replace with `make -C <vendored-gw-tree> out/at32f4/prod/...`
+          # once the GW firmware tree is vendored (§12.5). Until then, do a REAL
+          # Cortex-M4 cross-compile of the QIC sources (objects only, -Werror) —
+          # this exercises actual ARM Thumb codegen against the generated protocol.h.
+          make -f firmware/Makefile cross-check
