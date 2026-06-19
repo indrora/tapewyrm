@@ -15,40 +15,45 @@ version = 1
 caps = ["verbs", "capture", "markers"]
 
 # --- USB transaction opcodes (host -> device request frames, §13.3) ---
+# These are issued as ordinary Greaseweazle command packets {cmd, len, payload}
+# and dispatched by GW's process_command() (which we borrow — see firmware/). They
+# MUST sit ABOVE GW's own command range (GW uses 0..22), so the QIC verbs occupy
+# 0x80+. A stock `gw` host hitting a Tapewyrm command simply gets ACK_BAD_COMMAND.
+# Order is chosen so the firmware's dispatched verbs are the contiguous 0x80..0x84.
 [[transaction]]
 name = "INFO"
-code = 0x01
+code = 0x80
 desc = "Device info + capability gate (QIC bit + proto version)"
 
 [[transaction]]
 name = "SET_TIMING"
-code = 0x02
+code = 0x81
 desc = "Set QIC pulse/report cadence (idle-only)"
 
 [[transaction]]
-name = "SELECT"
-code = 0x03
-desc = "Drive-select hint (idle-only; sticky-select optional)"
-
-[[transaction]]
 name = "COMMAND_TXN"
-code = 0x04
+code = 0x82
 desc = "Emit n STEP pulses verbatim; optionally clock report_bits off TRK0"
 
 [[transaction]]
 name = "WAIT_READY"
-code = 0x05
+code = 0x83
 desc = "Poll the ready/INDEX line until ready or timeout"
 
 [[transaction]]
 name = "CAPTURE"
-code = 0x06
+code = 0x84
 desc = "Open a free-running flux capture session (device holds the lease)"
 
 [[transaction]]
+name = "SELECT"
+code = 0x85
+desc = "Drive-select hint (host-side; firmware selects via GW's drive_select)"
+
+[[transaction]]
 name = "ABORT"
-code = 0x07
-desc = "Out-of-band stop valid during CAPTURE; routes through Quiesce"
+code = 0x86
+desc = "Out-of-band stop during CAPTURE; firmware-side via GW clear-comms, not a queued cmd"
 
 # --- In-flux-stream tape markers (opcode-escape channel, §7.2) ---
 [[marker]]

@@ -6,13 +6,13 @@ PROTO_VERSION = 1
 CAPS = frozenset(['capture', 'markers', 'verbs'])
 
 class Txn(IntEnum):
-    INFO = 0x01  # Device info + capability gate (QIC bit + proto version)
-    SET_TIMING = 0x02  # Set QIC pulse/report cadence (idle-only)
-    SELECT = 0x03  # Drive-select hint (idle-only; sticky-select optional)
-    COMMAND_TXN = 0x04  # Emit n STEP pulses verbatim; optionally clock report_bits off TRK0
-    WAIT_READY = 0x05  # Poll the ready/INDEX line until ready or timeout
-    CAPTURE = 0x06  # Open a free-running flux capture session (device holds the lease)
-    ABORT = 0x07  # Out-of-band stop valid during CAPTURE; routes through Quiesce
+    INFO = 0x80  # Device info + capability gate (QIC bit + proto version)
+    SET_TIMING = 0x81  # Set QIC pulse/report cadence (idle-only)
+    COMMAND_TXN = 0x82  # Emit n STEP pulses verbatim; optionally clock report_bits off TRK0
+    WAIT_READY = 0x83  # Poll the ready/INDEX line until ready or timeout
+    CAPTURE = 0x84  # Open a free-running flux capture session (device holds the lease)
+    SELECT = 0x85  # Drive-select hint (host-side; firmware selects via GW's drive_select)
+    ABORT = 0x86  # Out-of-band stop during CAPTURE; firmware-side via GW clear-comms, not a queued cmd
 
 
 class Marker(IntEnum):
