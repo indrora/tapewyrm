@@ -838,24 +838,27 @@ The protecting invariant is narrow: **do not touch the bootloader flash region, 
 
 ### 12.6 Task runner — `justfile` skeleton
 
-A `just` recipe set coordinates the heterogeneous build (a root Makefile is the zero-new-tool alternative, and the firmware already speaks Make):
+A `just` recipe set coordinates the heterogeneous build. The Python helper scripts
+carry **PEP 723 inline metadata** (`# /// script … # ///`) declaring their deps, and
+are run with **`uv run`**, so e.g. `crcmod` (needed for the `.upd` CRCs) is fetched
+automatically — no manual venv, no system `srecord`/`crcmod`/`zip`.
 
 ```just
 # regenerate protocol.h + protocol.py from the single source of truth
 gen:
-    python protocol/generate.py
+    uv run protocol/generate.py
 
-# build the WHOLE project as one package (host wheel + firmware images) -> dist/
+# build the WHOLE project as one package (host wheel + at32f4 firmware) -> dist/
 package:
-    python tools/package.py
+    uv run tools/package.py
 
 # build just the firmware images -> dist/ (portable: pure-Python HEX merge, no srecord)
 fw mcus="at32f4":
-    python tools/package.py --skip-host --mcus {{mcus}}
+    uv run tools/package.py --skip-host --mcus {{mcus}}
 
-# full Greaseweazle-style firmware release (all MCUs + .upd); needs srecord + crcmod
+# full firmware release: all MCUs + a combined .upd update file -> dist/ (no host wheel)
 fw-dist:
-    make -C firmware dist
+    uv run tools/package.py --dist --skip-host
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
 flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
@@ -865,17 +868,25 @@ flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
 dfu bin="firmware/out/at32f4/prod/tapewyrm/target.bin":
     cd host && uv run tw dfu ../{{bin}}
 
+# remove build, package, and cache artifacts (keeps the uv venv)
+clean:
+    uv run tools/clean.py
+
 # host: sync, lint, typecheck, test (no hardware)
 host:
-    uv sync
-    uv run ruff check . && uv run ruff format --check .
-    uv run mypy tapewyrm
-    uv run pytest
+    cd host && uv sync --extra dev
+    cd host && uv run ruff check . && uv run ruff format --check .
+    cd host && uv run mypy tapewyrm && uv run pytest
 
 # everything CI runs
-ci: gen host (fw "prod") (fw "debug")
+ci: gen host
     git diff --exit-code   # protocol drift check
 ```
+
+`tools/package.py --dist` reimplements GW's `make dist` portably: it builds every
+MCU, merges bootloader+app with the pure-Python `tools/ihex.py`, and writes a
+combined `.upd` via a faithful port of `firmware/scripts/mk_update.py` (validated
+byte-for-byte by GW's own `mk_update.py verify`).
 
 ### 12.7 CI matrix (GitHub Actions)
 
