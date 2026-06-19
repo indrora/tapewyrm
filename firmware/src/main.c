@@ -37,7 +37,9 @@ int main(void)
     board_init();
 
     printk("\n** Tapewyrm (QIC-80 recovery) v%u.%u\n", fw_major, fw_minor);
-    printk("** Greaseweazle firmware base by Keir Fraser <keir.xen@gmail.com>\n");
+    printk("** Unlicense by Morgan Gangwere <morgan.gangwere@gmail.com>\n");
+    printk("** https://github.com/indrora/tapewyrm\n");
+    printk("** Based on Greaseweazle by Keir Fraser <keir.xen@gmail.com>\n");
     printk("** https://github.com/keirf/greaseweazle-firmware\n\n");
 
     floppy_init();
