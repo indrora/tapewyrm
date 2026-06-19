@@ -1,0 +1,119 @@
+# Tapewyrm wire-protocol — single source of truth (DESIGN.md §12.4, §13.3).
+#
+# `protocol/generate.py` emits BOTH ends from this file:
+#   - firmware/protocol.h        (C)
+#   - host/tapewyrm/link/protocol.py   (Python)
+# CI regenerates and fails on `git diff` so the two ends can never drift.
+#
+# TODO(bench), DESIGN.md §13.6 item 1: the `marker` codes below ride GW's flux
+# opcode-escape channel. Their concrete byte values MUST be reconciled with the
+# real Greaseweazle firmware opcode space before capture works on hardware. The
+# values here are internal placeholders that keep both ends in lockstep; only the
+# *numbers* in [[marker]] are bench-dependent, not the structure.
+
+version = 1
+caps = ["verbs", "capture", "markers"]
+
+# --- USB transaction opcodes (host -> device request frames, §13.3) ---
+[[transaction]]
+name = "INFO"
+code = 0x01
+desc = "Device info + capability gate (QIC bit + proto version)"
+
+[[transaction]]
+name = "SET_TIMING"
+code = 0x02
+desc = "Set QIC pulse/report cadence (idle-only)"
+
+[[transaction]]
+name = "SELECT"
+code = 0x03
+desc = "Drive-select hint (idle-only; sticky-select optional)"
+
+[[transaction]]
+name = "COMMAND_TXN"
+code = 0x04
+desc = "Emit n STEP pulses verbatim; optionally clock report_bits off TRK0"
+
+[[transaction]]
+name = "WAIT_READY"
+code = 0x05
+desc = "Poll the ready/INDEX line until ready or timeout"
+
+[[transaction]]
+name = "CAPTURE"
+code = 0x06
+desc = "Open a free-running flux capture session (device holds the lease)"
+
+[[transaction]]
+name = "ABORT"
+code = 0x07
+desc = "Out-of-band stop valid during CAPTURE; routes through Quiesce"
+
+# --- In-flux-stream tape markers (opcode-escape channel, §7.2) ---
+[[marker]]
+name = "SESSION_START"
+code = 0xF0
+desc = "rate, sample clock, TPT, direction, pass-id, UTC — anchors t=0"
+
+[[marker]]
+name = "SEGMENT"
+code = 0xF1
+desc = "tick count since previous + running index — each hardware INDEX edge"
+
+[[marker]]
+name = "EVENT"
+code = 0xF2
+desc = "code: motion-started / hole-EOT / overflow / gap"
+
+[[marker]]
+name = "END"
+code = 0xF3
+desc = "reason, flux-count, byte-count, checksum — seals the run"
+
+[[marker]]
+name = "HEARTBEAT"
+code = 0xF4
+desc = "coarse keepalive across long erased stretches (demoted, optional)"
+
+# --- EVENT sub-codes (payload of an EVENT marker, §5.4) ---
+[[event]]
+name = "MOTION_STARTED"
+code = 0x01
+
+[[event]]
+name = "HOLE_EOT"
+code = 0x02
+
+[[event]]
+name = "OVERFLOW"
+code = 0x03
+
+[[event]]
+name = "GAP"
+code = 0x04
+
+# --- END reason codes (payload of the END marker, §5.4) ---
+[[end_reason]]
+name = "NORMAL"
+code = 0x00
+
+[[end_reason]]
+name = "ABORT"
+code = 0x01
+
+[[end_reason]]
+name = "OVERFLOW"
+code = 0x02
+
+[[end_reason]]
+name = "EOT"
+code = 0x03
+
+[[end_reason]]
+name = "USB_LOSS"
+code = 0x04
+
+[[end_reason]]
+name = "WATCHDOG"
+code = 0x05
