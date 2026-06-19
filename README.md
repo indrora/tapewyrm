@@ -50,4 +50,7 @@ marked `TODO(bench)` per [DESIGN.md §13.6](docs/DESIGN.md).
 
 ## License
 
-GPL-2.0-or-later (inherits Greaseweazle / ftape provenance).
+**The Unlicense** (public domain) — see [UNLICENSE](UNLICENSE). This applies to
+the whole project: the host software and the firmware (which vendors the
+Greaseweazle firmware, itself Unlicense). The QIC standards and ftape were
+references only; no GPL code is incorporated.

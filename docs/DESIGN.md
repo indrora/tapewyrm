@@ -1,6 +1,7 @@
 # Tapewyrm — QIC-80 tape recovery over Greaseweazle v4.1
 
-> **Status:** design record, pre-implementation.
+> **Status:** design record. The host stack and codec are implemented; the Greaseweazle firmware is **vendored complete in-tree** (`firmware/`, Unlicense) with the QIC layer grafted onto GW's control loop and flux recording.
+> **License:** the whole project is **public domain under the Unlicense** (see `UNLICENSE`); the vendored Greaseweazle firmware is itself Unlicense.
 > **Purpose:** a single, self-contained document to seed a Claude Code session (or hand to an engineer) so the full reasoning, decisions, and open questions can be reconstructed without re-deriving them. Reads top-to-bottom; later sections assume the vocabulary of earlier ones.
 > **Name:** *Tapewyrm* — the tape is a long serpent of a medium, written in a back-and-forth serpentine (§7.4); a wyrm rather than a weasel.
 
@@ -777,7 +778,7 @@ The project is **two artifacts plus a generated contract between them** — firm
 
 ### 12.1 Firmware — extend GW's build, don't reinvent it
 
-GW firmware builds with the **ARM GNU toolchain via Make**: `gcc-arm-none-eabi`, plus `srecord`, `stm32flash`, `zip`, and a small set of Python packages (`bitarray crcmod pyserial requests`). `make dist` produces `out/<mcu>/<level>/greaseweazle/target.hex` for `<mcu> ∈ {at32f4, stm32f1, stm32f7}` and `<level> ∈ {debug, prod}`.
+GW firmware builds with the **ARM GNU toolchain via Make**: `gcc-arm-none-eabi`, plus `srecord`, `stm32flash`, `zip`, and a small set of Python packages (`bitarray crcmod pyserial requests`). `make dist` produces `out/<mcu>/<level>/tapewyrm/target.hex` for `<mcu> ∈ {at32f4, stm32f1, stm32f7}` and `<level> ∈ {debug, prod}`.
 
 **The v4.1's AT32F403 is the `at32f4` target.** Our QIC sources (verbs engine, arbiter, free-running flux mode, marker injector) are added into GW's tree and built as the `at32f4` target. Build `prod` for releases; build `debug` during bring-up — it enables **3 Mbaud serial logging**, which is what you want while debugging the report-bit loop and the arbiter lease machine.
 
@@ -833,7 +834,7 @@ tapewyrm/
 2. **A/B against a known-good flux engine** — stock GW reading a *real floppy* is the reference for whether a capture fault is yours or the silicon's: same board, same USB, same flux primitives, firmware known-good. If GW reads a floppy clean and Tapewyrm's capture is garbage, the bug is yours.
 3. **The hardware keeps its resale/reuse value** — it is still a Greaseweazle when you are done, not a single-purpose brick.
 
-The protecting invariant is narrow: **do not touch the bootloader flash region, the application entry vector, the DFU strap, or the USB update-mode descriptors/commands** — keep all of that wire-compatible with the GW bootloader (so both `tw flash` and stock `gw update` drive it). Diverge as hard as you like *above* the application entry point; the boot/update layer is the one place the fork stays faithful.
+The protecting invariant is narrow: **do not touch the bootloader flash region, the application entry vector, the DFU strap, or the USB VID/PID + update-mode commands/protocol** — keep all of that wire-compatible with the GW bootloader (so both `tw flash` and stock `gw update` drive it; detection keys off the VID/PID). The human-readable USB *product string* is rebranded to `Tapewyrm` and the boot banner says Tapewyrm (both cosmetic — they don't affect wire-compat); the update-mode bootloader itself stays the GW substrate. Diverge as hard as you like *above* the application entry point; the boot/update layer is the one place the fork stays faithful.
 
 ### 12.6 Task runner — `justfile` skeleton
 
@@ -844,20 +845,24 @@ A `just` recipe set coordinates the heterogeneous build (a root Makefile is the 
 gen:
     python protocol/generate.py
 
-# build firmware (prod by default; `just fw debug` for serial logging)
-fw level="prod":
-    make -C firmware out/at32f4/{{level}}/greaseweazle/target.hex
+# build the WHOLE project as one package (host wheel + firmware images) -> dist/
+package:
+    python tools/package.py
 
-# real Cortex-M4 cross-compile of the QIC skeleton sources (needs arm-none-eabi-gcc)
-fw-check:
-    make -f firmware/Makefile cross-check
+# build just the firmware images -> dist/ (portable: pure-Python HEX merge, no srecord)
+fw mcus="at32f4":
+    python tools/package.py --skip-host --mcus {{mcus}}
+
+# full Greaseweazle-style firmware release (all MCUs + .upd); needs srecord + crcmod
+fw-dist:
+    make -C firmware dist
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
-flash hex="firmware/out/at32f4/prod/greaseweazle/target.hex":
-    cd host && uv run tw flash ../{{hex}}
+flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
+    cd host && uv run tw flash ../{{image}}
 
 # recovery flash via the hardware DFU header + ROM bootloader (tw -> dfu-util)
-dfu bin="firmware/out/at32f4/prod/greaseweazle/target.bin":
+dfu bin="firmware/out/at32f4/prod/tapewyrm/target.bin":
     cd host && uv run tw dfu ../{{bin}}
 
 # host: sync, lint, typecheck, test (no hardware)
@@ -1052,14 +1057,14 @@ Multi-pass union (`codec.merge`) sits between *placed sectors* and *segments*; t
 **Generates directly from this document (no hardware):**
 - The **entire `codec/*` tree** — §7.3/§7.5/§13.2/§13.5 are complete; test against the §13.2 RS vector, synthesized `RawFluxCapture` fixtures, and ftape cross-checks.
 - **Host control layers** (`link/`, `qic117/`, `tape/`, `rawflux/`, `report.py`, `cli.py`) — §6A + §13.1 + §13.3 + §13.4.
-- **Firmware structure** (`qic/arbiter`, `verbs`, `flux_capture`, `markers`, `transactions`) — §5 + §13.3/§13.4 give the state machines and transaction set.
+- **Firmware** — Greaseweazle v1.6 is **vendored complete in-tree** (`firmware/`, builds with the ARM GNU toolchain) and the QIC layer is grafted onto GW's control loop: `src/qic/qic.c` is `#include`d into `src/floppy.c`, adding `CMD_QIC_*` (= the generated `TW_TXN_*`) cases to `process_command` and reusing GW's flux-read engine for free-running capture (§5, §13.3).
 - The **protocol codegen** and `justfile`/CI (§12).
 
 **Needs a bench / a real drive before it runs (the genuine seams, §9):**
-1. **GW flux opcode byte values + long-flux continuation** — read from `greaseweazle-firmware` to finalize `codec.flux`, `markers`, and `protocol.*`.
-2. **GW firmware integration points** — exactly how `transactions`/`flux_capture` hook GW's command handler and read-stop control.
+1. **Host-side GW flux opcode reconciliation** — the firmware now reuses GW's real flux encoder + `0xFF` opcode escape (tape markers ride codes `0xF0–0xF4`); what remains is teaching the host `codec.flux`/`rawflux` to skip GW's *own* `FLUXOP_*` opcodes when decoding a real capture. The firmware side is done.
+2. ~~GW firmware integration points~~ — **resolved by vendoring** (firmware now builds in-tree): QIC verbs are grafted into GW's `process_command`, capture reuses `floppy_read`/`rdata_encode_flux` free-running, and host-stop maps onto GW's `BAUD_CLEAR_COMMS` out-of-band path. What remains is hardware validation of the pulse/flux timing on a real drive.
 3. **The target `DriveProfile`** — wake timing, CCS level, quirks; characterize via `gw pin` + scope.
 4. **v4.1 schematic confirm** + **34-pin open-collector** assumption.
 5. **STAC/DCLZ decompressor** for compressed volumes.
 
-So Claude Code can plausibly one-shot the host codec and control stack and the firmware skeleton; the five items above are where it must stop and either read GW source or touch hardware. Mark them as `TODO(bench)` in generated code.
+The host codec + control stack are implemented and the Greaseweazle firmware is **vendored complete in-tree** with the QIC graft building; the items above are where progress now needs a real drive (timing / profile / schematic validation) or the one host-side decode tweak. They are marked `TODO(bench)` at their sites.
