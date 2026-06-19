@@ -1,0 +1,31 @@
+# Colorado / HP Colorado QIC-80 floppy-tape drive family.
+#
+# Nominal QIC-117 Rev J defaults (DESIGN.md §13.1). All timings/quirks below are
+# placeholders.
+# TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: characterize the real wake
+# sequence, exact pulse/report timings, CCS level (does it support 36/37 geometry,
+# Skip-Extended, Report Tape Status?), and vendor quirks on the bench via
+# `gw pin` + scope before trusting this profile.
+
+name = "colorado"
+bit_order = "lsb"           # QIC-117 reports clock LSB-first off TRK0 (§2.1)
+report_strategy = "index_edge"  # prefer waiting on INDEX edge over a blind settle (§5.3)
+quirks = []                 # TODO(bench): e.g. "slow_wake", "no_ccs2_geometry"
+
+[timing]
+pulse_us = 200              # STEP pulse width
+inter_pulse_us = 2000       # ~2.0 ms STEP interval (Rev J 0.9-2.1 ms)
+terminate_gap_us = 3000     # > 2.9 ms ends a command train (< => Soft Reset)
+report_settle_us = 900      # report bit appears within 900 us of 2nd pulse
+motion_timeout_s = 20       # generic motion wait-ready ceiling (seek 15 s, stop 8 s)
+
+# Wake sequence: list of (cmd, arg, delay_ms). Nominal init per DESIGN.md §9 item 3
+# (reset -> ~1 s diagnostics -> clear New-Cartridge/Error -> primary mode).
+# TODO(bench): confirm the real sequence + delays for this drive family.
+[[wake]]
+cmd = "soft reset"
+delay_ms = 1000             # allow up to ~1 s power-on diagnostics
+
+[[wake]]
+cmd = "enter primary mode"
+delay_ms = 50

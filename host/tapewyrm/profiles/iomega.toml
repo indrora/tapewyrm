@@ -1,0 +1,28 @@
+# Iomega Ditto QIC-80 / QIC-3010 floppy-tape drive family.
+#
+# Nominal QIC-117 Rev J defaults (DESIGN.md §13.1). All timings/quirks below are
+# placeholders.
+# TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: characterize the real wake
+# sequence, exact pulse/report timings, CCS level (36/37 geometry, Skip-Extended,
+# Report Tape Status support?), and vendor quirks on the bench via `gw pin` + scope
+# before trusting this profile. Ditto units are known to vary by generation.
+
+name = "iomega"
+bit_order = "lsb"
+report_strategy = "index_edge"
+quirks = []                 # TODO(bench): Ditto generations differ; record here
+
+[timing]
+pulse_us = 200
+inter_pulse_us = 2000
+terminate_gap_us = 3000
+report_settle_us = 900
+motion_timeout_s = 20
+
+[[wake]]
+cmd = "soft reset"
+delay_ms = 1000
+
+[[wake]]
+cmd = "enter primary mode"
+delay_ms = 50

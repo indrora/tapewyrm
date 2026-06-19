@@ -1,0 +1,29 @@
+# Conner / Conner-Archive QIC-80 floppy-tape drive family.
+#
+# Nominal QIC-117 Rev J defaults (DESIGN.md §13.1). All timings/quirks below are
+# placeholders.
+# TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: characterize the real wake
+# sequence, exact pulse/report timings, CCS level (36/37 geometry, Skip-Extended,
+# Report Tape Status support?), and vendor quirks on the bench via `gw pin` + scope
+# before trusting this profile. Some Conner units are basic CCS-1 (no 36/37) and
+# rely on the fixed 100/207 segments-per-track fallback (DESIGN.md §7.3).
+
+name = "conner"
+bit_order = "lsb"
+report_strategy = "fixed_settle"  # TODO(bench): some basic drives lack a reliable INDEX edge
+quirks = []                       # TODO(bench): e.g. "no_ccs2_geometry"
+
+[timing]
+pulse_us = 200
+inter_pulse_us = 2000
+terminate_gap_us = 3000
+report_settle_us = 900
+motion_timeout_s = 20
+
+[[wake]]
+cmd = "soft reset"
+delay_ms = 1000
+
+[[wake]]
+cmd = "enter primary mode"
+delay_ms = 50
