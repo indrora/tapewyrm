@@ -18,6 +18,11 @@ firmware/out/
 *.elf
 *.hex
 *.bin
+*.upd
+
+# Package output
+/dist/
+host/dist/
 
 # Editor / OS
 .DS_Store

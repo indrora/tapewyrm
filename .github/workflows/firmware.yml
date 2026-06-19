@@ -1,15 +1,13 @@
 name: firmware
 
-# Builds the vendored GW firmware tree with the Tapewyrm QIC sources.
-# NOTE: until the GW firmware tree is vendored under firmware/ (DESIGN.md §12.5),
-# this job only sanity-checks that the QIC skeleton sources compile against the
-# generated protocol.h. Wire up the full `make -C firmware` once vendored.
+# Builds the vendored Greaseweazle firmware (with the Tapewyrm QIC layer grafted
+# in) for the AT32F403 (v4.1) target, entirely in-tree.
 
 on:
   push:
-    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+    paths: ["firmware/**", "tools/**", ".github/workflows/firmware.yml"]
   pull_request:
-    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+    paths: ["firmware/**", "tools/**", ".github/workflows/firmware.yml"]
 
 jobs:
   firmware:
@@ -20,10 +18,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-arm-none-eabi
-      - name: Cross-compile QIC skeleton sources (Cortex-M4)
-        run: |
-          # TODO(bench): replace with `make -C <vendored-gw-tree> out/at32f4/prod/...`
-          # once the GW firmware tree is vendored (§12.5). Until then, do a REAL
-          # Cortex-M4 cross-compile of the QIC sources (objects only, -Werror) —
-          # this exercises actual ARM Thumb codegen against the generated protocol.h.
-          make -f firmware/Makefile cross-check
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build firmware image (at32f4) in-tree
+        # The portable packager builds the firmware with a pure-Python Intel-HEX
+        # merge, so it needs only the ARM toolchain + make + python (no srecord).
+        run: python tools/package.py --skip-host --mcus at32f4
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapewyrm-firmware-at32f4
+          path: dist/**/firmware/*

@@ -1,0 +1,30 @@
+name: package
+
+# Build the WHOLE project as one package (host wheel + firmware images) -> dist/.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM GNU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the package
+        run: python tools/package.py --mcus at32f4
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapewyrm-package
+          path: dist/tapewyrm-*.zip
