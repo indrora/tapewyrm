@@ -23,7 +23,7 @@
 #include "flux_capture.h"
 #include "markers.h"
 #include "gw_stubs.h"
-#include "../protocol.h"
+#include "protocol.h"
 
 /* QIC-117 motion command numbers used by the capture wrapper (§13.1).
  * These are the ONLY command numbers the firmware knows by name; everything else

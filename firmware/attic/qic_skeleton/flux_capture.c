@@ -25,7 +25,7 @@
 #include "markers.h"
 #include "verbs.h"
 #include "gw_stubs.h"
-#include "../protocol.h"
+#include "protocol.h"
 
 /* Ring buffer size: a chunk of the v4.1's 224 kB SRAM (§3). The exact split
  * with GW's own buffers is a vendoring decision. TODO(bench): size against GW's

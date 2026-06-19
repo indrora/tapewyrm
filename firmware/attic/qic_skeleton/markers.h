@@ -25,7 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "../protocol.h" /* TW_MARK_*, TW_EVT_*, TW_END_* */
+#include "protocol.h" /* TW_MARK_*, TW_EVT_*, TW_END_* */
 #include "gw_stubs.h"
 
 #ifdef __cplusplus
