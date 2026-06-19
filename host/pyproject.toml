@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "QIC-80 floppy-tape recovery over Greaseweazle v4.1 — host software"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "GPL-2.0-or-later" }
+license = "Unlicense"
 authors = [{ name = "Tapewyrm contributors" }]
 
 # Core runtime deps. The flux/PLL/MFM reuse from the `greaseweazle` host package
