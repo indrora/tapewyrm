@@ -47,6 +47,9 @@ class Cmd:
     takes_arg: bool = False
     high_speed: bool = False
     is_streaming: bool = False
+    # Max execution time to Ready, seconds (QIC-117 Rev J Table 2d: worst case
+    # over every tape length/speed). None = no Ready event (instant/ACK-only).
+    timeout_s: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -55,31 +58,31 @@ class Cmd:
 # ---------------------------------------------------------------------------
 
 _CMDS: tuple[Cmd, ...] = (
-    Cmd(1, Kind.RESET, True, "soft reset"),
+    Cmd(1, Kind.RESET, True, "soft reset", timeout_s=460),
     Cmd(2, Kind.INTERNAL, True, "report next bit"),
-    Cmd(3, Kind.MOTION, True, "pause"),
-    Cmd(4, Kind.MOTION, True, "micro step pause"),
+    Cmd(3, Kind.MOTION, True, "pause", timeout_s=16),
+    Cmd(4, Kind.MOTION, True, "micro step pause", timeout_s=16),
     Cmd(5, Kind.CONFIG, False, "alternate command time-out"),
     Cmd(6, Kind.REPORT, False, "report drive status"),
     Cmd(7, Kind.REPORT, False, "report error code"),
     Cmd(8, Kind.REPORT, False, "report drive configuration"),
     Cmd(9, Kind.REPORT, False, "report rom version"),
-    Cmd(10, Kind.STREAM, False, "logical forward", is_streaming=True),
-    Cmd(11, Kind.MOTION, False, "physical reverse", high_speed=True),
-    Cmd(12, Kind.MOTION, False, "physical forward", high_speed=True),
-    Cmd(13, Kind.MOTION, False, "seek head to track", takes_arg=True),
-    Cmd(14, Kind.MOTION, True, "seek load point"),
+    Cmd(10, Kind.STREAM, False, "logical forward", is_streaming=True, timeout_s=650),
+    Cmd(11, Kind.MOTION, False, "physical reverse", high_speed=True, timeout_s=650),
+    Cmd(12, Kind.MOTION, False, "physical forward", high_speed=True, timeout_s=650),
+    Cmd(13, Kind.MOTION, False, "seek head to track", takes_arg=True, timeout_s=15),
+    Cmd(14, Kind.MOTION, True, "seek load point", timeout_s=670),
     Cmd(15, Kind.MODE, False, "enter format mode"),
-    Cmd(16, Kind.MOTION, True, "write reference burst"),
+    Cmd(16, Kind.MOTION, True, "write reference burst", timeout_s=940),
     Cmd(17, Kind.MODE, False, "enter verify mode"),
-    Cmd(18, Kind.MOTION, True, "stop tape"),
+    Cmd(18, Kind.MOTION, True, "stop tape", timeout_s=8),
     # 19-20 reserved.
-    Cmd(21, Kind.MOTION, True, "micro step head up"),
-    Cmd(22, Kind.MOTION, True, "micro step head down"),
+    Cmd(21, Kind.MOTION, True, "micro step head up", timeout_s=0.2),
+    Cmd(22, Kind.MOTION, True, "micro step head down", timeout_s=0.2),
     Cmd(23, Kind.SELECT, False, "soft select", takes_arg=True),  # literal 20 pulses
     Cmd(24, Kind.SELECT, False, "soft deselect"),
-    Cmd(25, Kind.MOTION, True, "skip n segs reverse", takes_arg=True),
-    Cmd(26, Kind.MOTION, True, "skip n segs forward", takes_arg=True),
+    Cmd(25, Kind.MOTION, True, "skip n segs reverse", takes_arg=True, timeout_s=650),
+    Cmd(26, Kind.MOTION, True, "skip n segs forward", takes_arg=True, timeout_s=650),
     Cmd(27, Kind.CONFIG, False, "select rate or format", takes_arg=True),
     Cmd(28, Kind.MODE, False, "enter diag mode 1", takes_arg=True),  # sent twice
     Cmd(29, Kind.MODE, False, "enter diag mode 2", takes_arg=True),  # sent twice
@@ -87,9 +90,9 @@ _CMDS: tuple[Cmd, ...] = (
     Cmd(31, Kind.INTERNAL, False, "vendor unique 31"),  # vendor-unique
     Cmd(32, Kind.REPORT, False, "report vendor id"),
     Cmd(33, Kind.REPORT, False, "report tape status"),
-    Cmd(34, Kind.MOTION, True, "skip n ext reverse", takes_arg=True),
-    Cmd(35, Kind.MOTION, True, "skip n ext forward", takes_arg=True),
-    Cmd(36, Kind.MOTION, True, "calibrate tape length"),
+    Cmd(34, Kind.MOTION, True, "skip n ext reverse", takes_arg=True, timeout_s=650),
+    Cmd(35, Kind.MOTION, True, "skip n ext forward", takes_arg=True, timeout_s=650),
+    Cmd(36, Kind.MOTION, True, "calibrate tape length", timeout_s=1300),
     Cmd(37, Kind.REPORT, False, "report format segments"),
     Cmd(38, Kind.CONFIG, False, "set n format segments", takes_arg=True),
     # 39 reserved.

@@ -98,8 +98,22 @@ class Qic117Drive:
         # report would swallow segment 0 (DESIGN.md §2.1/§6A.3). In practice
         # capture is armed via link.capture(); command() with LF is the bare verb.
         if cmd.kind is Kind.MOTION and not cmd.is_streaming:
-            return self.wait_ready(self.profile.timing.motion_timeout_s)
+            return self.wait_ready(self._ready_timeout(cmd))
         return None
+
+    def _ready_timeout(self, cmd: Cmd) -> float:
+        """How long to wait for Ready after ``cmd`` (QIC-117 Rev J Table 2d).
+
+        The spec value is the worst case over every tape length and speed; e.g.
+        Seek Load Point is 670 s, and on the bench it took ~28 s even from BOT
+        because the drive re-references the tape. The profile's
+        ``motion_timeout_s`` only covers commands the table gives no time for.
+        A 1 s floor keeps the 200 ms micro-steps from timing out on USB round
+        trips alone (each status poll costs a few ms of pulse train + report).
+        """
+        if cmd.timeout_s is None:
+            return float(self.profile.timing.motion_timeout_s)
+        return max(cmd.timeout_s, 1.0)
 
     def wait_ready(self, timeout_s: float, poll_s: float = 0.1) -> DriveStatus:
         """Poll Report Drive Status until the ready bit is set (ftape-style).
