@@ -335,12 +335,21 @@ static struct {
 
 /* A pass ends when the TAPE stops, never on a timer: Logical Forward runs to
  * logical EOT and halts by itself (and the bench drive ignored Stop Tape during
- * LF). Once flux has started, QIC_IDLE_END_MS without a single transition means
- * the tape has stopped. On the bench tape the longest gap inside real data was
- * 72 ms (inter-segment erase gaps ~21 ms), so 1 s is a 14x margin. If no flux
- * arrives at all within QIC_NO_START_MS (LF refused -- e.g. error 19, cartridge
- * not referenced -- or the tape never moved), end the run instead of streaming
- * long-gap filler forever. */
+ * LF). Once the drive has found a segment (its first INDEX pulse; during LF the
+ * drive pulses INDEX once per segment and nothing else), QIC_IDLE_END_MS
+ * without a single transition means the tape has stopped. On the bench tape the
+ * longest gap inside real data was 72 ms (inter-segment erase gaps ~21 ms), so
+ * 1 s is a 14x margin.
+ *
+ * The idle rule must NOT be armed by flux alone. A pass that starts at the
+ * physical end of the tape crosses ~1 s of blank leader before the first
+ * segment, and a stray transition or two from head settling right at the start
+ * is normal: on the bench, track 10 saw one at 279 ms then 960 ms of silence,
+ * and track 12 saw one at 25 ms then > 1 s, which ended the pass before any
+ * data. So until the first INDEX, only QIC_NO_START_MS applies: if no segment
+ * shows up by then (LF refused -- e.g. error 19, cartridge not referenced --
+ * the tape never moved, or a probe under Physical motion, which gates RDATA),
+ * end the run instead of streaming long-gap filler forever. */
 #define QIC_IDLE_END_MS   1000u
 #define QIC_NO_START_MS  15000u
 
@@ -484,10 +493,11 @@ static uint8_t qic_capture_check_motion(void)
     if (qic_cap.flux_count != qic_cap.seen_count) {
         qic_cap.seen_count = qic_cap.flux_count;
         qic_cap.last_flux_at = time_now();
-        return 0xff;
     }
-    if (qic_cap.flux_count == 0) {
-        /* Tape never started streaming flux. */
+    if (qic_cap.seg_index == 0) {
+        /* No segment found yet: only the no-start watchdog can end the run.
+         * Checked even while stray transitions trickle in, so noise without
+         * segments can't keep a refused or blank pass alive forever. */
         if (time_since(qic_cap.armed_at) >= (int32_t)time_ms(QIC_NO_START_MS))
             return TW_END_WATCHDOG;
         return 0xff;
