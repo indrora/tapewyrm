@@ -5,6 +5,7 @@ A single ``@click.group()`` named ``cli`` with shared ``--port`` / ``--profile``
 each mapping to a layer:
 
     info     host + firmware build identity, board, port and USB serial
+    dump     capture whole tracks to raw files (Logical Forward, tape-terminated)
     probe    open device, wake, identify; print config / tape status / geometry
     drive    poke the drive by hand: status, reports, motion, scope (read-only)
     capture  sweep tracks -> write RawFluxCapture files
@@ -429,6 +430,44 @@ def info(app: AppContext) -> None:
     click.echo(f"firmware  : {dev.firmware}, {built}, protocol v{dev.proto_ver} [{caps}]")
     if fw and fw.commit and hb.commit and fw.commit != hb.commit:
         click.echo("note      : tw and firmware were built from different commits")
+
+
+def _parse_tracks(spec: str) -> list[int]:
+    """'0-12' or '0,3,5-7' -> sorted unique track numbers (each 0..63)."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        a, _, b = part.strip().partition("-")
+        lo, hi = int(a), int(b or a)
+        if not 0 <= lo <= hi <= 63:
+            raise click.BadParameter(f"bad track range {part!r}", param_hint="--tracks")
+        out.update(range(lo, hi + 1))
+    return sorted(out)
+
+
+@cli.command()
+@click.option("--tracks", required=True, help="tracks to capture, e.g. 0-12 or 0,2,5-7")
+@click.option(
+    "--out", "out", type=click.Path(file_okay=False), required=True, help="output directory"
+)
+@click.pass_obj
+def dump(app: AppContext, tracks: str, out: str) -> None:
+    """Capture whole tracks to raw files, one Logical Forward pass each.
+
+    Each pass ends when the tape stops at logical EOT. After every track the
+    capture is decoded and the dump stops early if the tape looks unhealthy.
+    Serpentine order: run tracks in ascending order to avoid rewinds.
+    """
+    from tapewyrm.tape.dump import DumpStopped, dump_tracks
+
+    track_list = _parse_tracks(tracks)
+    with _drive_session(app) as d:
+        try:
+            results = dump_tracks(d, track_list, Path(out), log=click.echo)
+        except DumpStopped as exc:
+            raise click.ClickException(f"dump stopped: {exc}") from exc
+    good = sum(r.good for r in results)
+    total = sum(r.sectors for r in results)
+    click.echo(f"done: {len(results)} tracks, {good}/{total} sectors CRC-clean -> {out}")
 
 
 @cli.command()

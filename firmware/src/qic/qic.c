@@ -327,7 +327,22 @@ static struct {
     uint32_t byte_budget;  /* self-terminate after this many flux DATA bytes  */
                            /* (0 = unbounded: host stops the stream)          */
     bool_t need_session_start; /* emit SESSION_START on the first read pump    */
+    /* End-of-motion detection (see qic_capture_check_motion). */
+    time_t armed_at;       /* when the capture was armed                      */
+    time_t last_flux_at;   /* when flux_count last advanced                   */
+    uint32_t seen_count;   /* flux_count at the last check                    */
 } qic_cap;
+
+/* A pass ends when the TAPE stops, never on a timer: Logical Forward runs to
+ * logical EOT and halts by itself (and the bench drive ignored Stop Tape during
+ * LF). Once flux has started, QIC_IDLE_END_MS without a single transition means
+ * the tape has stopped. On the bench tape the longest gap inside real data was
+ * 72 ms (inter-segment erase gaps ~21 ms), so 1 s is a 14x margin. If no flux
+ * arrives at all within QIC_NO_START_MS (LF refused -- e.g. error 19, cartridge
+ * not referenced -- or the tape never moved), end the run instead of streaming
+ * long-gap filler forever. */
+#define QIC_IDLE_END_MS   1000u
+#define QIC_NO_START_MS  15000u
 
 /* Append one raw byte into GW's u_buf[] ring (same cursor as rdata_encode_flux).
  * Marker bytes are NOT counted in the flux-data accounting (only flux is). */
@@ -454,6 +469,34 @@ static bool_t qic_capture_budget_reached(void)
         && (qic_cap.byte_count >= qic_cap.byte_budget);
 }
 
+/* For floppy.c's read loop, which is compiled before qic_cap is visible. */
+static bool_t qic_capture_active(void)
+{
+    return qic_cap.active;
+}
+
+/* End-of-motion check, run on every floppy_read() pump while capturing.
+ * Returns a TW_END_* reason when the pass is over, or 0xff to keep going. */
+static uint8_t qic_capture_check_motion(void)
+{
+    if (!qic_cap.active)
+        return 0xff;
+    if (qic_cap.flux_count != qic_cap.seen_count) {
+        qic_cap.seen_count = qic_cap.flux_count;
+        qic_cap.last_flux_at = time_now();
+        return 0xff;
+    }
+    if (qic_cap.flux_count == 0) {
+        /* Tape never started streaming flux. */
+        if (time_since(qic_cap.armed_at) >= (int32_t)time_ms(QIC_NO_START_MS))
+            return TW_END_WATCHDOG;
+        return 0xff;
+    }
+    if (time_since(qic_cap.last_flux_at) >= (int32_t)time_ms(QIC_IDLE_END_MS))
+        return TW_END_EOT; /* motion stopped: LF reached logical EOT (or halted) */
+    return 0xff;
+}
+
 /* SEGMENT-marker hook: called from rdata_encode_flux()'s index branch with the
  * tick delta GW already computed. Emits our typed SEGMENT marker into the SAME
  * u_buf[] stream (so it sits right next to GW's FLUXOP_INDEX opcode -- the host
@@ -488,6 +531,8 @@ static uint8_t qic_capture_arm(void)
     qic_cap.checksum = 0;
     qic_cap.seg_index = 0;
     qic_cap.need_session_start = TRUE;
+    qic_cap.armed_at = qic_cap.last_flux_at = time_now();
+    qic_cap.seen_count = 0;
     qic_cap.active = TRUE;
 
     return floppy_read_prep(&rf);

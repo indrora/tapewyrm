@@ -257,17 +257,22 @@ def correct(seg: Segment) -> SegmentResult:
 
     # Build the N x 1024 received matrix (erased rows are zeroed) and decode columns.
     width = _column_width(seg, participating)
-    columns_recv = _gather_columns(seg, participating, n, width)
+    columns_recv = _gather_columns(seg, participating, n, width, erased)
     if erasure_count:
         for c in range(width):
             col = columns_recv[c]
             columns_recv[c] = correct_codeword(col, erased, n)
 
-    # Write corrected symbols back into the segment sectors so downstream
-    # extraction sees a consistent, repaired segment.
+    # Write corrected symbols back into the sectors that exist, so downstream
+    # code sees a repaired segment.
     _scatter_columns(seg, participating, columns_recv, width)
 
-    data = _extract_participating_data(seg, participating, n)
+    # The data comes straight from the solved columns, NOT from re-reading the
+    # sectors: a sector that was never read (None) has nowhere to be written
+    # back to, and its rebuilt bytes used to be dropped -- the extraction then
+    # emitted zeros for it.
+    data_rows = max(0, n - REDUNDANCY)
+    data = bytes(columns_recv[c][r] for r in range(data_rows) for c in range(width))
     status = SegmentStatus.CLEAN if erasure_count == 0 else SegmentStatus.CORRECTED
     return SegmentResult(
         status=status,
@@ -291,13 +296,23 @@ def _column_width(seg: Segment, participating: list[int]) -> int:
     return 1024
 
 
-def _gather_columns(seg: Segment, participating: list[int], n: int, width: int) -> list[list[int]]:
-    """Return ``width`` codewords, each length ``n`` (row = participating index)."""
-    # Pre-fetch each row's bytes (or zeros for missing/erased rows).
+def _gather_columns(
+    seg: Segment, participating: list[int], n: int, width: int, erased: list[int]
+) -> list[list[int]]:
+    """Return ``width`` codewords, each length ``n`` (row = participating index).
+
+    Erased rows MUST be zero: :func:`correct_codeword` computes syndromes on the
+    assumption that erased symbols are 0. Passing a CRC-failed sector's corrupt
+    bytes through (as this used to) makes every correction of it wrong --
+    found on the bench tape's segment 94, which decompressed 53 bytes short.
+    """
+    erased_set = set(erased)
     rows: list[bytes] = []
-    for slot in participating:
+    for pos, slot in enumerate(participating):
         sec = seg.sectors[slot]
-        if sec is not None and sec.data and len(sec.data) == width:
+        if pos in erased_set:
+            rows.append(bytes(width))
+        elif sec is not None and sec.data and len(sec.data) == width:
             rows.append(sec.data)
         else:
             rows.append(bytes(width))

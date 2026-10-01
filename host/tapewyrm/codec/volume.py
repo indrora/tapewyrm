@@ -207,15 +207,21 @@ def parse_header(seg: Segment) -> tuple[VolumeInfo, BadSectorMap]:
     return vol, bsm
 
 
-class UnsupportedBadSectorMap(ValueError):
-    """A non-empty bad-sector map in an encoding we have no spec for."""
-
-
 # Rev N §7.1: the format parameter record is bytes 0-255 of sector 0 (234-255
 # unused), so the map -- "sectors 0-28" -- can only begin at offset 256. (We used
 # to start at 128, which read the lifetime-segments counter and the initial
 # format date as two "bad sectors" on the bench tape.)
 BSM_OFFSET = 256
+
+# Fixed formats (codes 2, 3, 5 -- QIC-80-MC Rev K, not in our Rev N): the map is
+# a 32-bit little-endian mask per segment starting at offset 2048 (sector 2),
+# bit k = sector k of that segment is excluded. NOT taken from a spec: verified
+# empirically on the bench tape (format code 5), where segment 129's mask 0x800
+# (sector 11) is the only exclusion that makes segment 129 decode, with the
+# QIC-113 uncompressed byte offsets agreeing byte-exactly with segments 128 and
+# 130 on both sides. All 32 slots of segment 129 carry valid IDs, so an
+# excluded sector is still physically recorded; it just isn't in the codeword.
+FIXED_BSM_OFFSET = 2048
 
 
 def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
@@ -228,17 +234,16 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
     scan from a conventional offset and stop at the terminator.
     """
     bsm = BadSectorMap()
-    region = header_data[BSM_OFFSET : 29 * 1024]  # sectors 0..28, after the FPR
     if format_code != 4:
-        # Rev N only defines the map for format code 04 (3-byte LSN list).
-        # Fixed formats (2, 3, 5) follow QIC-80-MC Rev K, which we do not have.
-        # An all-zero region means "no bad sectors" under any encoding; anything
-        # else we refuse to guess at.
-        if any(region):
-            raise UnsupportedBadSectorMap(
-                f"format code {format_code}: non-empty bad-sector map in the Rev K "
-                "fixed-format encoding (not in QIC-80-MC Rev N)"
-            )
+        end = min(len(header_data), 29 * 1024)
+        for seg_abs, off in enumerate(range(FIXED_BSM_OFFSET, end - 3, 4)):
+            mask = int.from_bytes(header_data[off : off + 4], "little")
+            if mask == 0xFFFFFFFF:
+                bsm.bad_segments.add(seg_abs)
+            elif mask:
+                bsm.bad_lsns.update(
+                    seg_abs * Segment.SECTORS + k for k in range(32) if mask >> k & 1
+                )
         return bsm
     i = BSM_OFFSET
     end = len(header_data)
@@ -264,6 +269,25 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
 # ---------------------------------------------------------------------------
 # Volume table
 # ---------------------------------------------------------------------------
+
+
+def apply_bsm(segs: dict[tuple[int, int], Segment], bsm: BadSectorMap) -> int:
+    """Mark each segment's BSM-excluded sectors; returns how many were marked.
+
+    Must run BEFORE Reed-Solomon correction: an excluded sector is not part of
+    the codeword (QIC-80-MC Rev N 6.2.5), so correcting without this treats it
+    as a damaged data sector and scrambles the segment.
+    """
+    by_seg: dict[int, set[int]] = {}
+    for lsn in bsm.bad_lsns:
+        by_seg.setdefault(lsn // Segment.SECTORS, set()).add(lsn % Segment.SECTORS)
+    marked = 0
+    for seg in segs.values():
+        slots = by_seg.get(seg.seg)
+        if slots:
+            seg.excluded = set(slots)
+            marked += len(slots)
+    return marked
 
 
 def parse_volume_table(seg: Segment) -> list[VtblEntry]:

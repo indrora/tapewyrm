@@ -58,9 +58,20 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
 
     # 2. Place self-locating sectors into segment bins (capture-order independent).
     segs = place.place(merged, geom)
-
-    # 3. RS erasure-decode each segment; record per-segment status.
     report = RecoveryReport()
+
+    # 3. Header segment first: it is the first defect-free segment, so it needs
+    #    no correction, and its bad-sector map must be applied BEFORE RS -- an
+    #    excluded sector is not part of the codeword (QIC-80-MC Rev N 6.2.5).
+    header_seg = _find_header_segment(segs)
+    if header_seg is None:
+        report.notes.append("no header segment found; cannot reassemble volumes")
+        return [], report
+    vol, bsm = volume_mod.parse_header(header_seg)
+    report.expected_bad = len(bsm.bad_segments) + len(bsm.bad_lsns)
+    volume_mod.apply_bsm(segs, bsm)
+
+    # 4. RS erasure-decode each segment; record per-segment status.
     for key, seg in segs.items():
         result = seg_mod.correct_segment(seg)
         report.segment_status[key] = result.status
@@ -69,14 +80,6 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
         if result.status is SegmentStatus.UNCORRECTABLE:
             report.unexpected_bad += 1
             report.recapture.append(key)
-
-    # 4. Parse the header segment (format params + BSM).
-    header_seg = _find_header_segment(segs)
-    if header_seg is None:
-        report.notes.append("no header segment found; cannot reassemble volumes")
-        return [], report
-    vol, bsm = volume_mod.parse_header(header_seg)
-    report.expected_bad = len(bsm.bad_segments) + len(bsm.bad_lsns)
 
     # If the header reported real geometry, rebuild segment->abs mapping with it.
     if vol.segments_per_track:

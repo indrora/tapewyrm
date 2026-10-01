@@ -62,6 +62,7 @@ _CAP_BITS = {0: "verbs", 1: "capture", 2: "markers"}
 # motor are plain GW commands, and so is the board/firmware identity.
 _GW_GET_INFO = 0
 _GW_MOTOR = 6
+_GW_GET_FLUX_STATUS = 9
 _GW_SELECT = 12
 _GW_DESELECT = 13
 _GW_SET_BUS_TYPE = 14
@@ -394,6 +395,15 @@ class DeviceLink:
         body = self._request(int(Txn.WAIT_READY), _u16le(timeout_s & 0xFFFF), _WAIT_RESP_LEN)
         return body[0] == 0  # 0 = ready, 1 = timed out
 
+    def flux_status(self) -> int:
+        """GW GET_FLUX_STATUS (cmd 9): the ACK of the read that just finished.
+
+        0 = OKAY; e.g. 4 = FLUX_OVERFLOW if USB couldn't keep up. Call after a
+        capture stream has drained.
+        """
+        ack, _ = self._exchange(_GW_GET_FLUX_STATUS, b"", 0)
+        return ack
+
     def build_info(self) -> FirmwareBuild | None:
         """The git commit the firmware was built from; None on older images.
 
@@ -494,6 +504,10 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
             except TransportError as exc:
                 raise LinkError(f"capture stream read failed: {exc}") from exc
             if not data:
+                # The device drained the stream (END + NUL, then silence). Mark
+                # the session closed so __exit__ doesn't send ABORT -- which no
+                # firmware verb implements -- into an idle command channel.
+                self._closed = True
                 break
             yield data
 

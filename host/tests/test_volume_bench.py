@@ -56,15 +56,24 @@ def test_header_dates_are_calendar_dates():
     assert decode_short_date(vol.initial_format_date) == (1997, 8, 7, 15, 40, 25)
 
 
-def test_nonempty_bsm_for_fixed_format_is_refused_not_guessed():
-    import pytest
+def test_fixed_format_bsm_is_a_per_segment_bitmap_at_2048():
+    # Format code 5: 32-bit mask per segment from offset 2048, bit k = sector k.
+    # Verified on the bench tape: segment 129 = 0x800 (sector 11 excluded).
+    data = bytearray(HEADER.ljust(29 * 1024, b"\x00"))
+    data[2048 + 4 * 129 : 2048 + 4 * 130] = (0x800).to_bytes(4, "little")
+    data[2048 + 4 * 7 : 2048 + 4 * 8] = (0xFFFFFFFF).to_bytes(4, "little")
+    bsm = _parse_bsm(bytes(data), format_code=5)
+    assert bsm.bad_lsns == {129 * 32 + 11}
+    assert bsm.bad_segments == {7}
 
-    from tapewyrm.codec.volume import UnsupportedBadSectorMap
 
-    data = bytearray(HEADER)
-    data[256:259] = b"\x01\x00\x00"
-    with pytest.raises(UnsupportedBadSectorMap):
-        _parse_bsm(bytes(data), format_code=5)
+def test_apply_bsm_marks_excluded_slots():
+    from tapewyrm.codec.volume import BadSectorMap, apply_bsm
+    from tapewyrm.types import Segment
+
+    segs = {(0, 129): Segment(tpt=0, tps=129, seg=129), (0, 5): Segment(tpt=0, tps=5, seg=5)}
+    assert apply_bsm(segs, BadSectorMap(bad_lsns={129 * 32 + 11})) == 1
+    assert segs[(0, 129)].excluded == {11} and not segs[(0, 5)].excluded
 
 
 def test_vendor_specific_vtbl_entry():

@@ -119,6 +119,8 @@ static void qic_capture_finish(uint8_t reason);
 static void qic_capture_abort_silent(void);
 static bool_t qic_capture_budget_reached(void);
 static void qic_capture_emit_session_start_if_needed(void);
+static uint8_t qic_capture_check_motion(void);
+static bool_t qic_capture_active(void);
 
 /* Marshalling and unmarshalling of USB packets. */
 static struct {
@@ -884,6 +886,7 @@ static void make_read_packet(unsigned int n)
 static void floppy_read(void)
 {
     unsigned int avail = (uint32_t)(u_prod - u_cons);
+    uint8_t qic_end_reason;
 
     if (floppy_state == ST_read_flux) {
 
@@ -910,6 +913,15 @@ static void floppy_read(void)
             floppy_state = ST_read_flux_drain;
             u_cons = u_prod = avail = 0;
 
+        } else if ((qic_end_reason = qic_capture_check_motion()) != 0xff) {
+
+            /* Tapewyrm: the tape has stopped (or never started). Seal the run
+             * with END(EOT / WATCHDOG) through the same clean path as the byte
+             * budget, so a full-track pass terminates by itself. */
+            floppy_flux_end();
+            qic_capture_finish(qic_end_reason);
+            floppy_state = ST_read_flux_drain;
+
         } else if (qic_capture_budget_reached()) {
 
             /* Tapewyrm: a byte-budget capture has streamed its budget. Take the
@@ -932,7 +944,10 @@ static void floppy_read(void)
 
         }
 
-        else if (time_since(read.deadline) >= 0) {
+        /* Tapewyrm: a QIC capture is ended by the tape, never by GW's read
+         * deadline -- "no deadline" is INT_MAX SysTick ticks, only ~79.5 s at
+         * 27 MHz, while one QIC-80 track takes ~176 s. */
+        else if (!qic_capture_active() && time_since(read.deadline) >= 0) {
 
             /* Deadline is reached: End the read now. */
             floppy_flux_end();

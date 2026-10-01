@@ -296,3 +296,53 @@ def recover_sectors(flux: FluxStream, rate_kbps: int) -> Iterator[RawSector]:
     """
     decoded = intervals_to_bytes(flux, rate_kbps)
     yield from recover_sectors_from_bytes(decoded)
+
+
+# ---------------------------------------------------------------------------
+# Real flux: bitcells -> sync-aligned bytes -> sectors (bench-proven)
+# ---------------------------------------------------------------------------
+
+# 0xA1 with its missing clock bit, as 16 raw MFM cells (the classic 0x4489).
+_SYNC_A1_CELLS = b"0100010010001001"
+_SYNC3_CELLS = _SYNC_A1_CELLS * 3
+# A data field is 3 sync + mark + 1024 + CRC = 1030 bytes; decode a little more.
+_MAX_FIELD_BYTES = 1100
+
+
+def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
+    """Decode MFM bitcells (one 0/1 byte per cell) into a byte stream.
+
+    MFM has no byte alignment of its own: it comes from the A1 sync marks. We
+    find every run of three A1 syncs, decode the bytes that follow *aligned to
+    that run* (data bits are the odd cells of each 16-cell word), stop at the
+    next sync run, and concatenate the pieces. Each piece starts with
+    ``A1 A1 A1 <mark>``, which is exactly what :func:`recover_sectors_from_bytes`
+    scans for. Bytes between fields (gaps) are not needed and are skipped.
+    """
+    text = bytes(cells).translate(bytes.maketrans(b"\x00\x01", b"01"))
+    starts: list[int] = []
+    p = text.find(_SYNC3_CELLS)
+    while p != -1:
+        starts.append(p)
+        p = text.find(_SYNC3_CELLS, p + len(_SYNC3_CELLS))
+
+    out = bytearray()
+    for k, s in enumerate(starts):
+        nxt = starts[k + 1] if k + 1 < len(starts) else len(text)
+        for j in range(min(_MAX_FIELD_BYTES, (nxt - s) // 16)):
+            word = text[s + 16 * j : s + 16 * j + 16]
+            out.append(int(word[1::2], 2))
+    return bytes(out)
+
+
+def recover_sectors_from_flux(
+    intervals: list[int], sample_clock_hz: int, rate_kbps: int
+) -> list[RawSector]:
+    """Flux tick intervals -> GW PLL -> MFM bytes -> QIC sectors.
+
+    The MFM bitcell is half a data bit: 1 us at 500 kbit/s (QIC-80).
+    """
+    from tapewyrm.codec import gwpll
+
+    cells = gwpll.flux_to_bitcells(intervals, sample_clock_hz, 1 / (rate_kbps * 2000))
+    return list(recover_sectors_from_bytes(bitcells_to_bytes(cells)))
