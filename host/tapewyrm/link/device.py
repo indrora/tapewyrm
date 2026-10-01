@@ -37,7 +37,7 @@ from __future__ import annotations
 import struct
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import TracebackType
 
 from tapewyrm.link.protocol import CAPS, PROTO_VERSION, Txn
@@ -121,6 +121,18 @@ class ScopeTrace:
         return "+".join(names) or "-"
 
 
+# BUILD_INFO response: commit:40 bytes ASCII hex (zero-filled if unknown), dirty:u8.
+_BUILD_INFO = struct.Struct("<40sB")
+
+
+@dataclass(frozen=True)
+class FirmwareBuild:
+    """Which source a firmware image was built from (BUILD_INFO verb)."""
+
+    commit: str | None  # 40-char hex SHA, None if the build had no git
+    dirty: bool  # firmware/ or protocol/ had uncommitted changes at build time
+
+
 # CAPTURE request: motion_n:u8, rate:u16, tpt:u16, direction:u8, pass_id:u16,
 # byte_budget:u32 (0 = free-run until aborted).
 _CAPTURE = struct.Struct("<BHHBHI")
@@ -153,6 +165,16 @@ GW_USB_VID = 0x1209  # pid.codes open-source VID
 GW_USB_PID = 0x4D69  # Keir Fraser's Greaseweazle PID
 
 
+def usb_serial_for(port: str) -> str:
+    """USB serial-number string of the device behind ``port`` ("" if unknown)."""
+    from serial.tools import list_ports
+
+    for p in list_ports.comports():
+        if p.device == port:
+            return p.serial_number or ""
+    return ""
+
+
 def find_port() -> str:
     """Return the serial port of the single attached Greaseweazle.
 
@@ -179,12 +201,14 @@ class DeviceLink:
 
     # --- lifecycle ---
 
-    def open(self, port: str | None = None) -> DeviceInfo:
+    def open(self, port: str | None = None, *, gate: bool = True) -> DeviceInfo:
         """Open the link, identify the board, run the capability gate.
 
         Identity comes from GW's own GET_INFO; the capability gate (DESIGN.md
         §6A.2) from our INFO verb. Stock GW firmware answers INFO with
-        BAD_COMMAND, which we turn into ``LinkVersionError``.
+        BAD_COMMAND, which we turn into ``LinkVersionError`` -- unless
+        ``gate=False`` (``tw info`` wants to *describe* stock firmware, not
+        refuse it); then ``proto_ver`` is 0 and ``qic_caps`` is empty.
         """
         if self._transport is None:
             self._transport = SerialTransport(port if port is not None else find_port())
@@ -194,7 +218,14 @@ class DeviceLink:
             raise LinkError(f"failed to open transport: {exc}") from exc
 
         info = self._identify()
-        self._gate(info)
+        if isinstance(self._transport, SerialTransport):
+            info = replace(
+                info,
+                port=self._transport.port,
+                serial=usb_serial_for(self._transport.port),
+            )
+        if gate:
+            self._gate(info)
         self._info = info
         return info
 
@@ -362,6 +393,18 @@ class DeviceLink:
         timeout_s = max(0, (timeout_ms + 999) // 1000)
         body = self._request(int(Txn.WAIT_READY), _u16le(timeout_s & 0xFFFF), _WAIT_RESP_LEN)
         return body[0] == 0  # 0 = ready, 1 = timed out
+
+    def build_info(self) -> FirmwareBuild | None:
+        """The git commit the firmware was built from; None on older images.
+
+        Images predating the BUILD_INFO verb (and stock GW) answer BAD_COMMAND.
+        """
+        ack, body = self._exchange(int(Txn.BUILD_INFO), b"", _BUILD_INFO.size)
+        if ack != ACK_OKAY:
+            return None
+        raw, dirty = _BUILD_INFO.unpack(body)
+        commit = raw.rstrip(b"\x00").decode("ascii", "replace")
+        return FirmwareBuild(commit=commit or None, dirty=bool(dirty))
 
     # --- bench tools ---
 

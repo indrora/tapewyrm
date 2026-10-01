@@ -90,6 +90,7 @@ class DeviceInfo:
     sram_bytes: int
     qic_caps: frozenset[str]  # e.g. {"verbs", "capture", "markers"}
     proto_ver: int = 0
+    port: str = ""  # serial device path, e.g. /dev/cu.usbmodem121401
 
 
 @dataclass(frozen=True)

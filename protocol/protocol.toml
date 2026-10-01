@@ -60,6 +60,11 @@ name = "SCOPE"
 code = 0x87
 desc = "Bench logic-probe: optional n STEP pulses, then edge-log the drive's input lines"
 
+[[transaction]]
+name = "BUILD_INFO"
+code = 0x88
+desc = "Firmware build identity: git commit (40 hex chars) + dirty flag"
+
 # --- In-flux-stream tape markers (opcode-escape channel, §7.2) ---
 [[marker]]
 name = "SESSION_START"

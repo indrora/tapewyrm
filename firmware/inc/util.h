@@ -114,6 +114,8 @@ uint16_t crc16_ccitt(const void *buf, size_t len, uint16_t crc);
 
 /* Build info. */
 extern const uint8_t fw_major, fw_minor;
+extern const char tw_git_commit[41]; /* build_info.c; "" if unknown */
+extern const uint8_t tw_git_dirty;
 
 /* Bootloader mode flag. */
 extern volatile uint32_t _reset_flag;

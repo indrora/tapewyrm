@@ -59,6 +59,7 @@
 #define CMD_QIC_WAIT_READY  TW_TXN_WAIT_READY
 #define CMD_QIC_CAPTURE     TW_TXN_CAPTURE
 #define CMD_QIC_SCOPE       TW_TXN_SCOPE
+#define CMD_QIC_BUILD_INFO  TW_TXN_BUILD_INFO
 
 /* ======================================================================== *
  *  QIC-117 timing envelope (DESIGN.md §2.1 Table 1, §5.3)
@@ -719,6 +720,22 @@ static unsigned int qic_cmd_scope(uint8_t len)
     u_buf[n + 2] = overflow;
     memcpy(&u_buf[n + 3], counts, sizeof(counts));
     n += 3 + sizeof(counts) + n_edges * 5u;
+    u_buf[1] = ACK_OKAY;
+    return n;
+}
+
+/* CMD_QIC_BUILD_INFO: which source this image was built from (for `tw info`).
+ * No payload. Response after ACK (u_buf[2]..): commit:40 bytes ASCII hex
+ * (zero-filled if unknown), dirty:u8. 2 + 41 = 43 bytes, inside the 64-byte
+ * single-packet response limit. A separate verb (rather than growing INFO)
+ * keeps INFO's layout stable: older images just answer BAD_COMMAND. */
+static unsigned int qic_cmd_build_info(void)
+{
+    unsigned int n = 2;
+    memset(&u_buf[n], 0, 40);
+    memcpy(&u_buf[n], tw_git_commit, strnlen(tw_git_commit, 40));
+    n += 40;
+    u_buf[n++] = tw_git_dirty;
     u_buf[1] = ACK_OKAY;
     return n;
 }

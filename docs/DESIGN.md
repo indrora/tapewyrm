@@ -1004,6 +1004,7 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 | `WAIT_READY` | `{timeout_s:u16}` | `{status:u8}` -- **0 = ready**, 1 = timed out | waits for cue INDEX (see §5.3) |
 | `CAPTURE` | `{motion_n:u8, rate:u16, tpt:u16, direction:u8, pass_id:u16, byte_budget:u32}` | `{echo, ack}` then **stream** | stream = GW flux bytes + markers; byte_budget 0 = free-run |
 | `SCOPE` | `{cmd_n:u8, duration_ms:u16}` | `{initial:u8, n_edges:u8, overflow:u8, counts:4×u16, edges:n×{t_us:u32, state:u8}}` (≤10 edges) | bench probe: edge-log TRK0/INDEX/WRPROT/pin34 after optional pulses |
+| `BUILD_INFO` | — | `{commit:40 bytes ASCII hex (zero-filled if unknown), dirty:u8}` | build identity for `tw info`; `firmware/scripts/pio_pre.py` generates it; older images answer BAD_COMMAND |
 | `ABORT`/`STOP` | — (**out-of-band control**, not queued) | — | valid during CAPTURE; routes through Quiesce |
 
 **Capture stream** = verbatim GW flux bytes interleaved with opcode-escape **markers** (§7.2): `SESSION_START{rate, clock, TPT, direction, pass_id, utc}` · `SEGMENT{ticks, index}` (per hardware INDEX edge) · `EVENT{code}` · `END{reason, flux_count, byte_count, checksum}`. Backpressure: sustained overflow → `EVENT{overflow}` + clean abort (never silently drop). USB suspend/disconnect → device-side dead-man → Quiesce stop.

@@ -19,6 +19,7 @@ enum {
     TW_TXN_SELECT = 0x85,  /* Drive-select hint (host-side; firmware selects via GW's drive_select) */
     TW_TXN_ABORT = 0x86,  /* Out-of-band stop during CAPTURE; firmware-side via GW clear-comms, not a queued cmd */
     TW_TXN_SCOPE = 0x87,  /* Bench logic-probe: optional n STEP pulses, then edge-log the drive's input lines */
+    TW_TXN_BUILD_INFO = 0x88,  /* Firmware build identity: git commit (40 hex chars) + dirty flag */
 };
 
 /* In-flux-stream tape markers (opcode-escape channel) */

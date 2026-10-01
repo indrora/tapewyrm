@@ -122,7 +122,10 @@ def main() -> int:
             if check:
                 print(f"STALE: {path.relative_to(ROOT)}")
             else:
-                path.write_text(content, encoding="utf-8")
+                # The repo is CRLF throughout. read_text() above normalises line
+                # endings (so --check compares content only); write CRLF to match,
+                # or every regeneration flattens protocol.h/.py to LF.
+                path.write_text(content, encoding="utf-8", newline="\r\n")
                 print(f"wrote {path.relative_to(ROOT)}")
 
     if check and stale:

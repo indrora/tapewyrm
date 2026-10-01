@@ -45,6 +45,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["tapewyrm"]
 
+# hatch_build.py stamps the git commit into the wheel for `tw info`.
+[tool.hatch.build.targets.wheel.hooks.custom]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

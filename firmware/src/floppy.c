@@ -1828,6 +1828,10 @@ static void process_command(void)
         resp_sz = qic_cmd_scope(len);
         goto out;
     }
+    case CMD_QIC_BUILD_INFO: {
+        resp_sz = qic_cmd_build_info();
+        goto out;
+    }
     case CMD_QIC_CAPTURE: {
         /* Arms a free-running flux read; the ST_read_flux state machine then
          * streams the capture (markers + flux) and ACKs on completion, exactly
