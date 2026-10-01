@@ -9,13 +9,12 @@ Default (`uv run tools/package.py`): host wheel/sdist + the at32f4 firmware imag
 -> dist/tapewyrm-<version>.zip.
 
 Release (`uv run tools/package.py --dist`): the full Greaseweazle-style firmware
-release — all MCUs (stm32f1, stm32f7, at32f4), each as a flashable .hex
+release — every MCU with a PlatformIO env (today: at32f4), each as a flashable .hex
 (bootloader+app) and .bin, PLUS a combined .upd update file — alongside the host
 wheel, zipped.
 
-Needs only: Python, the ARM GNU toolchain (arm-none-eabi-gcc/objcopy), GNU make
-(mingw32-make on Windows/MSYS), `uv`, and (declared above, fetched by uv) crcmod
-for the .upd CRCs. The bootloader+app HEX merge is pure-Python (tools/ihex.py),
+Needs only: Python, PlatformIO Core (`pio`, which fetches its own pinned ARM GCC),
+`uv`, and (declared above, fetched by uv) crcmod for the .upd CRCs. The bootloader+app HEX merge is pure-Python (tools/ihex.py),
 the .upd is a faithful port of firmware/scripts/mk_update.py, and the archive is
 zipfile — so no srecord / system crcmod / zip are required.
 """
@@ -23,8 +22,6 @@ zipfile — so no srecord / system crcmod / zip are required.
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import shutil
 import struct
 import subprocess
@@ -44,7 +41,7 @@ import ihex  # noqa: E402
 # Greaseweazle hardware-model ids (firmware/scripts/mk_update.py). Canonical .upd
 # ordering matches GW's `make dist` (f1, f7, at32f4; each bootloader then app).
 HW_MODEL = {"stm32f1": 1, "stm32f7": 7, "at32f4": 4}
-DIST_MCUS = ["stm32f1", "stm32f7", "at32f4"]
+DIST_MCUS = ["at32f4"]  # only MCU with PlatformIO envs (firmware/platformio.ini)
 
 
 def tool(*names: str) -> str:
@@ -61,62 +58,53 @@ def host_version() -> str:
 
 
 def fw_version() -> tuple[int, int]:
-    text = (FW / "Makefile").read_text()
-    return (
-        int(re.search(r"FW_MAJOR\s*:=\s*(\d+)", text).group(1)),
-        int(re.search(r"FW_MINOR\s*:=\s*(\d+)", text).group(1)),
-    )
+    """Firmware version, single-sourced from firmware/platformio.ini.
 
+    PlatformIO's .ini is configparser syntax (with `;` comments), so we read the
+    ``custom_fw_major`` / ``custom_fw_minor`` options from the shared ``[env]``
+    section rather than regex-scraping like the old Makefile reader did.
+    """
+    import configparser
 
-def _make_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env["ROOT"] = str(FW)
-    maj, minr = fw_version()
-    env["FW_MAJOR"], env["FW_MINOR"] = str(maj), str(minr)
-    return env
+    ini = configparser.ConfigParser(inline_comment_prefixes=(";",))
+    ini.read(FW / "platformio.ini")
+    return int(ini["env"]["custom_fw_major"]), int(ini["env"]["custom_fw_minor"])
 
 
 def build_firmware(mcus: list[str]) -> dict[str, dict[str, Path]]:
-    make = tool("mingw32-make", "make")
-    objcopy = tool("arm-none-eabi-objcopy")
-    py = sys.executable
-    env = _make_env()
-    out: dict[str, dict[str, Path]] = {}
+    """Build bootloader + app with PlatformIO; merge them into one HEX.
 
-    for mcu in mcus:
-        print(f"== firmware: {mcu} ==")
-        boot = FW / "out" / mcu / "prod" / "bootloader"
-        app = FW / "out" / mcu / "prod" / "tapewyrm"
-        boot.mkdir(parents=True, exist_ok=True)
-        app.mkdir(parents=True, exist_ok=True)
+    Only at32f4 (Greaseweazle V4.x) has PlatformIO environments; the STM32F1/F7
+    sources are still in-tree but unwired (see firmware/platformio.ini). PIO
+    emits firmware.{elf,bin,hex} per env under firmware/.pio/build/<env>/; the
+    app HEX is app-only, so we merge it with the bootloader HEX (tools/ihex.py)
+    to get a single image for DFU/first flash.
+    """
+    unsupported = [m for m in mcus if m != "at32f4"]
+    if unsupported:
+        raise SystemExit(f"no PlatformIO env for MCU(s): {', '.join(unsupported)}")
+    pio = tool("pio", "platformio")
+    print("== firmware: at32f4 (pio run -e bootloader -e tapewyrm) ==")
+    subprocess.run(
+        [pio, "run", "-d", str(FW), "-e", "bootloader", "-e", "tapewyrm"], check=True
+    )
 
-        def run_make(cwd: Path, *targets: str, **flags: str) -> None:
-            flag_args = [f"{k}={v}" for k, v in flags.items()]
-            subprocess.run(
-                [make, "-C", str(cwd), "-f", str(FW / "Rules.mk"), *targets,
-                 f"PYTHON={py}", f"mcu={mcu}", "prod=y", *flag_args],
-                check=True, env=env,
-            )
-
-        # Bootloader: .hex/.bin need no srecord; skip .upd (we generate it here).
-        run_make(boot, "target.hex", "target.bin", bootloader="y")
-        # Application: build .bin (+ .elf dependency); skip the .hex rule (srecord).
-        run_make(app, "target.bin", tapewyrm="y")
-
-        # objcopy the app ELF -> app-only HEX ourselves, then merge with bootloader.
-        app_hex = app / "app-only.hex"
-        subprocess.run([objcopy, "-O", "ihex", str(app / "target.elf"), str(app_hex)],
-                       check=True)
-        merged = app / "tapewyrm.hex"
-        ihex.merge([boot / "target.hex", app_hex], merged)
-
-        out[mcu] = {
-            "hex": merged, "bin": app / "target.bin", "elf": app / "target.elf",
-            "boot_bin": boot / "target.bin",
+    build = FW / ".pio" / "build"
+    boot, app = build / "bootloader", build / "tapewyrm"
+    merged = app / "tapewyrm.hex"
+    ihex.merge([boot / "firmware.hex", app / "firmware.hex"], merged)
+    print(
+        f"   at32f4: tapewyrm.hex ({merged.stat().st_size} B), "
+        f"app.bin ({(app / 'firmware.bin').stat().st_size} B)"
+    )
+    return {
+        "at32f4": {
+            "hex": merged,
+            "bin": app / "firmware.bin",
+            "elf": app / "firmware.elf",
+            "boot_bin": boot / "firmware.bin",
         }
-        print(f"   {mcu}: tapewyrm.hex ({merged.stat().st_size} B), "
-              f"app.bin ({(app / 'target.bin').stat().st_size} B)")
-    return out
+    }
 
 
 # --- .upd update-file generation (faithful port of firmware/scripts/mk_update.py) ---

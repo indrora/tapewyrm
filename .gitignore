@@ -14,6 +14,7 @@ htmlcov/
 
 # Firmware build output
 firmware/out/
+firmware/.pio/
 *.o
 *.elf
 *.hex

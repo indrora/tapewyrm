@@ -1,0 +1,17 @@
+{
+  "build": {
+    "cpu": "cortex-m4",
+    "f_cpu": "216000000L",
+    "mcu": "at32f403acgu7"
+  },
+  "frameworks": [],
+  "name": "Greaseweazle V4.x (AT32F403A, bare-metal)",
+  "upload": {
+    "maximum_ram_size": 229376,
+    "maximum_size": 1048576,
+    "protocol": "custom",
+    "protocols": ["custom"]
+  },
+  "url": "https://github.com/keirf/greaseweazle",
+  "vendor": "Greaseweazle"
+}

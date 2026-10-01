@@ -16,20 +16,20 @@ gen-check:
 package:
     uv run tools/package.py
 
-# build just the firmware images -> dist/ (portable: pure-Python HEX merge, no srecord)
+# build just the firmware images via PlatformIO -> dist/ (pure-Python HEX merge)
 fw mcus="at32f4":
     uv run tools/package.py --skip-host --mcus {{mcus}}
 
-# full firmware release: all MCUs + a combined .upd update file -> dist/ (no host wheel)
+# full firmware release: every PIO-wired MCU (at32f4) + a combined .upd -> dist/ (no host wheel)
 fw-dist:
     uv run tools/package.py --dist --skip-host
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
-flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
+flash image="firmware/.pio/build/tapewyrm/firmware.bin":
     cd host && uv run tw flash ../{{image}}
 
 # recovery flash via the hardware DFU header + AT32 ROM bootloader (tw -> dfu-util)
-dfu bin="firmware/out/at32f4/prod/tapewyrm/target.bin":
+dfu bin="firmware/.pio/build/tapewyrm/firmware.bin":
     cd host && uv run tw dfu ../{{bin}}
 
 # host: sync, lint, typecheck, test (no hardware)
