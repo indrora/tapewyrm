@@ -15,7 +15,7 @@ file set's Volume Data Area byte stream (DESIGN.md §7.5 input).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.tape.geometry import coord_to_lsn
@@ -37,17 +37,35 @@ DATA_SECTORS_PER_SEGMENT = Segment.DATA_ROWS  # 29
 
 @dataclass
 class VolumeInfo:
-    """Decoded format parameter record (DESIGN.md §7.3 sector 0)."""
+    """Decoded format parameter record: header segment sector 0, bytes 0-255.
 
-    format_code: int
-    segments_per_track: int
-    tracks: int
-    max_fsd: int
-    max_ftk: int
-    max_fsc: int
-    tape_name: str
-    format_date: int  # packed short-date (see decode_short_date)
-    valid_signature: bool = True
+    Offsets follow QIC-80-MC Rev N §7.1 (docs/qic80n.pdf). Rev N defines the
+    header for format code 04; codes 2, 3 and 5 are Rev K fixed formats, which
+    we have not got -- but the bench Colorado tape (code 5) matches the Rev N
+    field layout byte for byte (segments/track, tracks, name, dates, counters).
+    Packed dates are raw; decode them with :func:`decode_short_date`.
+    """
+
+    format_code: int  # 4
+    segments_per_track: int  # 24-25
+    tracks: int  # 26
+    max_fsd: int  # 27
+    max_ftk: int  # 28
+    max_fsc: int  # 29
+    tape_name: str  # 30-73
+    format_date: int  # 14-17: most recent format
+    valid_signature: bool = True  # 0-3 == 55 AA 55 AA
+    revision: int = 0  # 5: 0x0D = Rev M, 0x0C = Rev L, 0 = before L
+    header_seg: int = 0  # 6-7
+    dup_header_seg: int = 0  # 8-9
+    first_data_seg: int = 0  # 10-11: first logical area data segment
+    last_data_seg: int = 0  # 12-13
+    write_date: int = 0  # 18-21: most recent write or format
+    name_date: int = 0  # 74-77: when the tape name was written
+    reformat_error: bool = False  # 128 == 0xFF: fields lost to a re-format error
+    segments_written: int = 0  # 130-133: written/formatted/verified, lifetime
+    initial_format_date: int = 0  # 138-141
+    format_count: int = 0  # 142-143
 
 
 @dataclass
@@ -71,17 +89,29 @@ class BadSectorMap:
 
 @dataclass
 class VtblEntry:
-    """One 128-byte volume-table entry (DESIGN.md §7.3, §7.5)."""
+    """One 128-byte ``VTBL`` volume-table entry, QIC-80-MC Rev N §8.
+
+    Bytes 0-56 are always defined. When the vendor-specific bit (byte 56 bit 0)
+    is set, "only this bit and the previous bytes (0-55) are defined" and the
+    volume is not QIC-80-MC compliant -- so every later field is ``None``. (The
+    bench tape's CMS backup is such a volume.) The raw record is kept so a
+    vendor-specific decoder can read the rest.
+    """
 
     signature: bytes
-    start_seg: int
-    end_seg: int
-    description: str
-    flags: int  # byte 56
-    os_type: int  # byte 125
-    compressed: bool  # byte 124 bit 7
-    dir_section_size: int  # bytes 92..95 (Directory Section Size)
+    start_seg: int  # 4-5 (word)
+    end_seg: int  # 6-7 (word)
+    description: str  # 8-51
+    flags: int  # 56
+    os_type: int | None  # 125: 1 = DOS; anything else = extended format
+    compressed: bool | None  # 124 bit 7
+    dir_section_size: int | None  # 92-95
     raw: bytes = b""
+    date: int = 0  # 52-55, packed (decode_short_date)
+    multi_cartridge_seq: int | None = None  # 57
+    data_section_size: int | None = None  # 96-103 (quadword)
+    compression_code: int | None = None  # 124 bits 0-5 (QIC-123; 0x01 compliant)
+    source_label: str | None = None  # 106-121
 
     # --- derived flag accessors (DESIGN.md §7.5) ---
     @property
@@ -105,8 +135,10 @@ class VtblEntry:
 def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None:
     """Decode a packed short date/time into (year, month, day, hour, min, sec).
 
-    Encoding (DESIGN.md §7.3, §7.5): bits 31..25 = year - 1970;
-    bits 24..0 = ``sc + 60*(mn + 60*(hr + 24*(dy + 31*mo)))``.
+    Encoding (QIC-80-MC Rev N §7.1): bits 31..25 = year - 1970;
+    bits 24..0 = ``sc + 60*(mn + 60*(hr + 24*(dy + 31*mo)))`` with MO 0-11 and
+    DY 0-30. We return a calendar month 1-12 and day 1-31 (this used to leak the
+    0-based values, so the bench tape read as "11/22" instead of 23 December).
     ``0`` and all-ones are treated as undefined -> None.
     """
     if packed == 0 or packed == 0xFFFFFFFF:
@@ -122,7 +154,7 @@ def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None
     dy = rest % 31
     rest //= 31
     mo = rest
-    return (1970 + year, mo, dy, hr, mn, sc)
+    return (1970 + year, mo + 1, dy + 1, hr, mn, sc)
 
 
 # ---------------------------------------------------------------------------
@@ -140,36 +172,53 @@ def parse_header(seg: Segment) -> tuple[VolumeInfo, BadSectorMap]:
     data = seg_mod.segment_data(seg)
     sector0 = data[:1024] if len(data) >= 1024 else data.ljust(1024, b"\x00")
 
-    valid = sector0[0:4] == FPR_SIGNATURE
-    format_code = sector0[4]
-    segments_per_track = int.from_bytes(sector0[24:26], "little")
-    tracks = sector0[26]
-    max_fsd = sector0[27]
-    max_ftk = sector0[28]
-    max_fsc = sector0[29]
-    name_raw = sector0[30:74]
-    tape_name = name_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
-    # Format date: packed short-date in the header (offset is vendor-ish; QIC-80-MC
-    # stores it after the name area). We read 4 bytes at offset 74.
-    format_date = int.from_bytes(sector0[74:78], "little")
+    def u16(off: int) -> int:
+        return int.from_bytes(sector0[off : off + 2], "little")
 
+    def u32(off: int) -> int:
+        return int.from_bytes(sector0[off : off + 4], "little")
+
+    name_raw = sector0[30:74]
     vol = VolumeInfo(
-        format_code=format_code,
-        segments_per_track=segments_per_track,
-        tracks=tracks,
-        max_fsd=max_fsd,
-        max_ftk=max_ftk,
-        max_fsc=max_fsc,
-        tape_name=tape_name,
-        format_date=format_date,
-        valid_signature=valid,
+        format_code=sector0[4],
+        segments_per_track=u16(24),
+        tracks=sector0[26],
+        max_fsd=sector0[27],
+        max_ftk=sector0[28],
+        max_fsc=sector0[29],
+        tape_name=name_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip(),
+        # Offset 14, not 74: 74-77 is when the *tape name* was written (Rev N).
+        format_date=u32(14),
+        valid_signature=sector0[0:4] == FPR_SIGNATURE,
+        revision=sector0[5],
+        header_seg=u16(6),
+        dup_header_seg=u16(8),
+        first_data_seg=u16(10),
+        last_data_seg=u16(12),
+        write_date=u32(18),
+        name_date=u32(74),
+        reformat_error=sector0[128] == 0xFF,
+        segments_written=u32(130),
+        initial_format_date=u32(138),
+        format_count=u16(142),
     )
 
-    bsm = _parse_bsm(data)
+    bsm = _parse_bsm(data, vol.format_code)
     return vol, bsm
 
 
-def _parse_bsm(header_data: bytes) -> BadSectorMap:
+class UnsupportedBadSectorMap(ValueError):
+    """A non-empty bad-sector map in an encoding we have no spec for."""
+
+
+# Rev N §7.1: the format parameter record is bytes 0-255 of sector 0 (234-255
+# unused), so the map -- "sectors 0-28" -- can only begin at offset 256. (We used
+# to start at 128, which read the lifetime-segments counter and the initial
+# format date as two "bad sectors" on the bench tape.)
+BSM_OFFSET = 256
+
+
+def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
     """Parse the ascending 3-byte LSN bad-sector-map entries (DESIGN.md §7.3).
 
     The BSM occupies the header segment's data area (sectors 0..28). Entries are
@@ -179,10 +228,19 @@ def _parse_bsm(header_data: bytes) -> BadSectorMap:
     scan from a conventional offset and stop at the terminator.
     """
     bsm = BadSectorMap()
-    # The format parameter record occupies the start of sector 0; the BSM proper
-    # begins after it. QIC-80-MC packs the map starting at sector 0 offset 128.
-    start = 128
-    i = start
+    region = header_data[BSM_OFFSET : 29 * 1024]  # sectors 0..28, after the FPR
+    if format_code != 4:
+        # Rev N only defines the map for format code 04 (3-byte LSN list).
+        # Fixed formats (2, 3, 5) follow QIC-80-MC Rev K, which we do not have.
+        # An all-zero region means "no bad sectors" under any encoding; anything
+        # else we refuse to guess at.
+        if any(region):
+            raise UnsupportedBadSectorMap(
+                f"format code {format_code}: non-empty bad-sector map in the Rev K "
+                "fixed-format encoding (not in QIC-80-MC Rev N)"
+            )
+        return bsm
+    i = BSM_OFFSET
     end = len(header_data)
     while i + 3 <= end:
         b0 = header_data[i]
@@ -222,10 +280,14 @@ def parse_volume_table(seg: Segment) -> list[VtblEntry]:
     while off + VTBL_ENTRY_LEN <= n:
         rec = data[off : off + VTBL_ENTRY_LEN]
         sig = rec[0:4]
-        if sig in (SIG_VTBL, SIG_XTBL):
+        if sig == SIG_VTBL:
             entries.append(_parse_vtbl_entry(rec))
-        elif sig in (SIG_UTID, SIG_EXVT):
-            # Recognized extension records; no file-set range to add here.
+        elif sig in (SIG_XTBL, SIG_UTID, SIG_EXVT):
+            # Rev N §8.1-8.3: XTBL extends the preceding VTBL (unicode name and
+            # password), UTID is a unicode tape name, EXVT chains the table into
+            # another segment. None of them is a file set of its own (XTBL used to
+            # be parsed as one, producing a bogus entry).
+            # TODO: follow EXVT (bytes 6-7 = child segment) for long tables.
             pass
         elif sig == b"\x00\x00\x00\x00":
             break  # empty record => end of table
@@ -236,26 +298,36 @@ def parse_volume_table(seg: Segment) -> list[VtblEntry]:
 
 def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
     """Decode one 128-byte VTBL/XTBL entry (DESIGN.md §7.3, §7.5)."""
-    sig = rec[0:4]
-    # start/end SEG are 4-byte fields immediately after the signature.
-    start_seg = int.from_bytes(rec[4:8], "little")
-    end_seg = int.from_bytes(rec[8:12], "little")
-    # Description: ASCII, 44 bytes at offset 12 (mirrors the tape-name field).
-    description = rec[12:56].split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
+
+    def text(b: bytes) -> str:
+        return b.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
+
     flags = rec[56]
-    compressed = bool(rec[124] & 0x80)
-    os_type = rec[125]
-    dir_section_size = int.from_bytes(rec[92:96], "little")
-    return VtblEntry(
-        signature=sig,
-        start_seg=start_seg,
-        end_seg=end_seg,
-        description=description,
+    entry = VtblEntry(
+        signature=rec[0:4],
+        # Words, not doublewords: Rev N §8 (the old 4-byte read at 4/8 gave
+        # 172425219 -> 1701603654 on the bench tape instead of 3 -> 2631).
+        start_seg=int.from_bytes(rec[4:6], "little"),
+        end_seg=int.from_bytes(rec[6:8], "little"),
+        description=text(rec[8:52]),
         flags=flags,
-        os_type=os_type,
-        compressed=compressed,
-        dir_section_size=dir_section_size,
+        date=int.from_bytes(rec[52:56], "little"),
+        os_type=None,
+        compressed=None,
+        dir_section_size=None,
         raw=rec,
+    )
+    if flags & 0x01:  # vendor specific: nothing past byte 56 is defined
+        return entry
+    return replace(
+        entry,
+        os_type=rec[125],
+        compressed=bool(rec[124] & 0x80),
+        dir_section_size=int.from_bytes(rec[92:96], "little"),
+        multi_cartridge_seq=rec[57],
+        data_section_size=int.from_bytes(rec[96:104], "little"),
+        compression_code=rec[124] & 0x3F,
+        source_label=text(rec[106:122]),
     )
 
 

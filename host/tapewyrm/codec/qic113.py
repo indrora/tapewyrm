@@ -82,8 +82,8 @@ class DirEntry:
 
         year, mo, dy, hr, mn, sc = decoded
         try:
-            # mo/dy are 0-based in the packed encoding; clamp to valid calendar.
-            return calendar.timegm((year, mo + 1, dy + 1, hr, mn, sc, 0, 0, 0))
+            # decode_short_date already returns a 1-based month and day.
+            return calendar.timegm((year, mo, dy, hr, mn, sc, 0, 0, 0))
         except (ValueError, OverflowError):
             return None
 
@@ -385,7 +385,7 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
     extended = is_extended_os(vtbl)
     fileset = FileSet(
         name=vtbl.description or ("C:" if not extended else "volume"),
-        compressed=vtbl.compressed,
+        compressed=vtbl.compressed is True,  # None (vendor-specific) = not known
         extended_os=extended,
     )
 
@@ -457,7 +457,7 @@ def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:
     occurrence region after the data section. If the directory size is known and
     fits, subtract it from the stream length.
     """
-    size = vtbl.dir_section_size
+    size = vtbl.dir_section_size or 0  # None for vendor-specific volumes
     if 0 < size <= len(stream):
         return len(stream) - size
     # Fallback: assume the directory begins right after the final data entry.

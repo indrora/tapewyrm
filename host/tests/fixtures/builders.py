@@ -42,8 +42,8 @@ def make_segment_from_sectors(
 
 
 def make_short_date(year, mo, dy, hr, mn, sc) -> int:
-    """Pack a short date the way decode_short_date expects (0-based mo/dy)."""
-    rest = sc + 60 * (mn + 60 * (hr + 24 * (dy + 31 * mo)))
+    """Pack a calendar date (month 1-12, day 1-31) as Rev N stores it (0-based)."""
+    rest = sc + 60 * (mn + 60 * (hr + 24 * ((dy - 1) + 31 * (mo - 1))))
     return ((year - 1970) << 25) | (rest & 0x01FFFFFF)
 
 
@@ -61,7 +61,8 @@ def build_format_parameter_record(
 ) -> bytes:
     """Build sector 0 of the header segment: FPR + bad-sector map.
 
-    The BSM proper begins at offset 128 (after the format parameter record), as
+    The BSM proper begins at offset 256 (after the 256-byte format parameter
+    record, QIC-80-MC Rev N §7.1), as
     3-byte ascending 1-based LSN entries, ``0`` terminated; high bit of MSB set
     => whole segment bad.
     """
@@ -75,10 +76,10 @@ def build_format_parameter_record(
     sec[29] = max_fsc
     name = tape_name.encode("ascii")[:44]
     sec[30 : 30 + len(name)] = name
-    struct.pack_into("<I", sec, 74, format_date)
+    struct.pack_into("<I", sec, 14, format_date)  # Rev N: most recent format
 
-    # Bad-sector map at offset 128.
-    off = 128
+    # Bad-sector map at offset 256.
+    off = 256
     entries: list[tuple[int, bool]] = []
     for lsn0 in bad_lsns or []:
         entries.append((lsn0 + 1, False))  # store 1-based
@@ -119,10 +120,10 @@ def build_vtbl_entry(
     """Build one 128-byte VTBL entry."""
     rec = bytearray(VTBL_ENTRY_LEN)
     rec[0:4] = signature
-    struct.pack_into("<I", rec, 4, start_seg)
-    struct.pack_into("<I", rec, 8, end_seg)
+    struct.pack_into("<H", rec, 4, start_seg)  # Rev N §8: words
+    struct.pack_into("<H", rec, 6, end_seg)
     desc = description.encode("ascii")[:44]
-    rec[12 : 12 + len(desc)] = desc
+    rec[8 : 8 + len(desc)] = desc
     rec[56] = flags
     struct.pack_into("<I", rec, 92, dir_section_size)
     if compressed:
