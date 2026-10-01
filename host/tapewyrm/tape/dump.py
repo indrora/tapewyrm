@@ -14,8 +14,14 @@ flux for 1 s), so nothing here depends on Stop Tape, which the bench drive
 ignored during Logical Forward.
 
 QIC-80 is serpentine: even tracks run toward physical EOT, odd tracks back
-toward BOT, so track N+1 starts where track N ended and a sequential dump never
-rewinds. Old tape is fragile; after every pass we check the drive and decode
+toward BOT, so track N+1 starts at the end where track N finished and a
+sequential dump never rewinds the whole tape. But Logical Forward starts
+reading wherever the tape happens to be (QIC-117 Rev J (10)), and where a pass
+stops is already past the next track's first few segments: the first dump of
+tape "jc" lost the first ~5 segments of every track after track 0 that way. So
+each pass first winds to the end of the tape where its track starts
+(:func:`wind_to_track_start`); in a sequential dump that is only the last few
+feet. Old tape is fragile; after every pass we check the drive and decode
 the capture, and stop the dump if anything looks worse rather than spending
 more passes on a tape that may be shedding.
 """
@@ -35,7 +41,15 @@ from tapewyrm.link.protocol import EndReason
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
 from tapewyrm.rawflux.container import read_header, write_preamble
-from tapewyrm.types import CaptureHeader, Direction, DriveConfig, StopCond, TapeFormat, TapeStatus
+from tapewyrm.types import (
+    CaptureHeader,
+    Direction,
+    DriveConfig,
+    DriveStatus,
+    StopCond,
+    TapeFormat,
+    TapeStatus,
+)
 
 # A track whose decodable sectors are less than this fraction CRC-clean stops
 # the dump: something (head, tape, PLL) has degraded and we want a human first.
@@ -112,6 +126,35 @@ def drive_identity(drive: Qic117Drive) -> CaptureHeader:
     )
 
 
+def wind_to_track_start(drive: Qic117Drive, track: int) -> DriveStatus:
+    """Put the tape at the physical end where ``track`` begins.
+
+    Even tracks run toward EOT, so they start at physical BOT: Physical Reverse.
+    Odd tracks run toward BOT and start at physical EOT: Physical Forward. Both
+    run at full speed, stop by themselves at the end of the tape, are a no-op
+    if the tape is already there, and keep the drive not-Ready until the tape
+    stops (Rev J (11)/(12)), so ``command`` returns the settled status. Seek
+    Load Point would also reach BOT, but it re-references the tape (~28 s on
+    the 350), so it isn't used here.
+
+    Raises :class:`DumpStopped` unless the drive reports the expected end
+    (``at_bot``/``at_eot``) with no error: reading from an unknown spot would
+    silently lose segments again.
+    """
+    forward = Direction.for_track(track) is Direction.FORWARD
+    cmd = commands.PHYSICAL_REVERSE if forward else commands.PHYSICAL_FORWARD
+    st = drive.command(cmd)
+    assert st is not None  # non-streaming motion always returns a status
+    at_start = st.at_bot if forward else st.at_eot
+    if st.error or not at_start:
+        err = drive.last_error.code if (st.error and drive.last_error) else None
+        raise DumpStopped(
+            f"track {track}: {cmd.name} ended at {st} (error {err}), not at physical "
+            f"{'BOT' if forward else 'EOT'}; refusing to read from an unknown position"
+        )
+    return st
+
+
 def summarize(path: Path) -> tuple[CaptureHeader, gwstream.ParsedStream, list]:
     """Decode a TWRF capture with its own rate and clock (no assumptions)."""
     hdr, flux_at = read_header(path)
@@ -145,6 +188,9 @@ def dump_tracks(
                 f"before track {track}: drive not ready+referenced ({st}); "
                 "Logical Forward would be refused (Rev J error 19)"
             )
+        t_wind = time.monotonic()
+        wind_to_track_start(drive, track)
+        log(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
         drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
 
         path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
