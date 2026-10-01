@@ -141,12 +141,17 @@ _REPORT_BITS = {6: 8, 7: 16, 8: 8, 9: 8, 32: 16, 33: 8, 37: 16}
 
 
 @contextmanager
-def _drive_session(app: AppContext) -> Iterator[Any]:
+def _drive_session(
+    app: AppContext, *, wake: bool = True, profile: DriveProfile | None = None
+) -> Iterator[Any]:
     """Open the link, wake the drive with the profile, yield a Qic117Drive.
 
     Every ``tw drive`` command is one short session. On the way out we always
-    release the drive select and the port; commands that move tape stop it
-    themselves before returning (``Qic117Drive.jog``) or wait for Ready.
+    release the GW drive-select lines and the port; commands that move tape
+    stop it themselves before returning (``Qic117Drive.jog``) or wait for Ready.
+    A phantom-selected drive stays selected across sessions (it ignores the DS
+    lines) until ``tw drive deselect``, a reset or a power cycle.
+    ``wake=False`` skips the profile's wake sequence (for select/deselect).
     """
     from tapewyrm.link.device import DeviceLink, LinkError
     from tapewyrm.qic117.drive import DriveError, Qic117Drive
@@ -155,8 +160,9 @@ def _drive_session(app: AppContext) -> Iterator[Any]:
     try:
         link.open(app.port)
         link.deselect()  # phantom drives want every DS line idle
-        drive = Qic117Drive(link, app.profile)
-        drive.wake()
+        drive = Qic117Drive(link, profile or app.profile)
+        if wake:
+            drive.wake()
         yield drive
     except (LinkError, DriveError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -241,6 +247,82 @@ def _decode_tape(b: int) -> str:
     ts = TapeStatus.decode(b)
     kind = TAPE_TYPES.get(ts.tape_type, f"reserved type {ts.tape_type}")
     return f"format {ts.format.name}, {kind} tape" + (", wide (8mm)" if ts.wide else "")
+
+
+def _cue_period_ms(trace: Any) -> float | None:
+    """Mean spacing of INDEX assertions in a SCOPE trace, or None if < 2."""
+    prev_set = trace.initial & 0b10
+    rises = []
+    for t, st in trace.edges:
+        now = st & 0b10
+        if now and not prev_set:
+            rises.append(t)
+        prev_set = now
+    if len(rises) < 2:
+        return None
+    return (rises[-1] - rises[0]) / (len(rises) - 1) / 1000
+
+
+def _with_phantom_unit(profile: DriveProfile, unit: int) -> DriveProfile:
+    """The profile's wake sequence, with Phantom Select addressing ``unit``."""
+    from dataclasses import replace
+
+    steps = list(profile.wake_sequence)
+    for i, (name, _arg, delay) in enumerate(steps):
+        if name.strip().lower() == "phantom select":
+            steps[i] = (name, unit, delay)
+            break
+    else:
+        steps.insert(0, ("phantom select", unit, 50))
+    return replace(profile, wake_sequence=tuple(steps))
+
+
+@drive.command("select")
+@click.option(
+    "--unit",
+    type=click.IntRange(0, 63),
+    default=None,
+    help="phantom unit address (default: the profile's; the Colorado 350 is 0)",
+)
+@click.pass_obj
+def drive_select(app: AppContext, unit: int | None) -> None:
+    """Wake and select the drive, and prove it is listening.
+
+    Runs the profile's wake sequence (for phantom drives such as the Colorado:
+    Phantom Select 46 with its N+2 unit argument, then Enter Primary Mode),
+    reads status, and checks for the cue INDEX pulses a selected, ready drive
+    emits every few ms (QIC-117 Rev J Fig. 6). The drive stays selected after
+    this command exits.
+    """
+    profile = _with_phantom_unit(app.profile, unit) if unit is not None else app.profile
+    with _drive_session(app, profile=profile) as d:
+        st = d.status()
+        click.echo(f"status : {_fmt_status(st)}")
+        period = _cue_period_ms(d.link.scope(0, 30))
+        if period is not None:
+            click.echo(f"select : yes -- cue INDEX every {period:.1f} ms")
+        elif st.ready:
+            click.echo("select : answering reports, but no cue INDEX seen")
+        else:
+            click.echo("select : answering reports; drive busy (no cue INDEX until Ready)")
+
+
+@drive.command("deselect")
+@click.pass_obj
+def drive_deselect(app: AppContext) -> None:
+    """Release a phantom-selected drive (Phantom Deselect, 47).
+
+    Phantom drives ignore the drive-select lines, so they stay selected until
+    told otherwise; this lets another drive on the same cable be used.
+    """
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app, wake=False) as d:
+        d.link.command_txn(commands.TABLE["PHANTOM_DESELECT"].code)
+        period = _cue_period_ms(d.link.scope(0, 30))
+        click.echo(
+            "deselect: done" if period is None else f"deselect: still cueing ({period:.1f} ms)!"
+        )
 
 
 @drive.command("status")
