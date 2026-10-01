@@ -5,6 +5,7 @@ A single ``@click.group()`` named ``cli`` with shared ``--port`` / ``--profile``
 each mapping to a layer:
 
     probe    open device, wake, identify; print config / tape status / geometry
+    drive    poke the drive by hand: status, reports, motion, scope (read-only)
     capture  sweep tracks -> write RawFluxCapture files
     decode   RawFluxCapture(s) -> files + recovery report (no hardware)
     recover  capture + decode + multi-pass retries on weak segments
@@ -26,6 +27,8 @@ Config precedence: CLI flags -> config file -> profile defaults, resolved once i
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -125,6 +128,192 @@ def _open_stack(app: AppContext):
     link.open(app.port)
     drive = Qic117Drive(link, app.profile)
     return link, TapeTransport(drive)
+
+
+# ---------------------------------------------------------------------------
+# `tw drive ...` -- hand-driven drive control (bench / bring-up)
+# ---------------------------------------------------------------------------
+
+# Report commands and their payload widths in bits (QIC-117 Rev J Table 2c).
+_REPORT_BITS = {6: 8, 7: 16, 8: 8, 9: 8, 32: 16, 33: 8, 37: 16}
+
+
+@contextmanager
+def _drive_session(app: AppContext) -> Iterator[Any]:
+    """Open the link, wake the drive with the profile, yield a Qic117Drive.
+
+    Every ``tw drive`` command is one short session. On the way out we always
+    release the drive select and the port; commands that move tape stop it
+    themselves before returning (``Qic117Drive.jog``) or wait for Ready.
+    """
+    from tapewyrm.link.device import DeviceLink, LinkError
+    from tapewyrm.qic117.drive import DriveError, Qic117Drive
+
+    link = DeviceLink()
+    try:
+        link.open(app.port)
+        link.deselect()  # phantom drives want every DS line idle
+        drive = Qic117Drive(link, app.profile)
+        drive.wake()
+        yield drive
+    except (LinkError, DriveError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        try:
+            link.deselect()
+        except Exception:
+            pass
+        link.close()
+
+
+def _fmt_status(st: Any) -> str:
+    flags = [
+        name
+        for name in (
+            "ready", "error", "cartridge_present", "write_protect", "new_cartridge",
+            "referenced", "at_bot", "at_eot",
+        )
+        if getattr(st, name)
+    ]  # fmt: skip
+    return f"0x{st.raw:02x} [{' '.join(flags) or '-'}]"
+
+
+@cli.group()
+def drive() -> None:
+    """Poke the tape drive by hand: status, reports, motion, scope.
+
+    Read-only: commands that write to tape are refused by the drive layer.
+    Wakes the drive with --profile first (e.g. --profile colorado).
+    """
+
+
+@drive.command("status")
+@click.pass_obj
+def drive_status(app: AppContext) -> None:
+    """Drive status, latched error, configuration and ROM version."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        if d.last_error is not None:
+            click.echo(
+                f"cleared on wake: error {d.last_error.code} "
+                f"(cmd {d.last_error.associated_command})"
+            )
+        click.echo(f"status : {_fmt_status(d.status())}")
+        cfg = d.config()
+        click.echo(f"config : 0x{cfg.raw:02x} rate={cfg.rate_kbps} kbps qic80={cfg.qic80_mode}")
+        rom = d.report(commands.TABLE["REPORT_ROM_VERSION"], 8)
+        click.echo(f"rom    : 0x{rom:02x} (version {rom & 0x7F}{', beta' if rom & 0x80 else ''})")
+
+
+@drive.command("report")
+@click.argument("name")
+@click.pass_obj
+def drive_report(app: AppContext, name: str) -> None:
+    """Run one report command by name or code, e.g. `report rom version` or `report 9`."""
+    from tapewyrm.qic117 import commands
+
+    key = name.strip().upper().replace(" ", "_").replace("-", "_")
+    if key.isdigit():
+        cmd = commands.BY_CODE.get(int(key))
+    else:  # accept "rom version" as well as "report rom version"
+        cmd = commands.TABLE.get(key) or commands.TABLE.get(f"REPORT_{key}")
+    if cmd is None or cmd.code not in _REPORT_BITS:
+        names = ", ".join(commands.BY_CODE[c].name for c in sorted(_REPORT_BITS))
+        raise click.BadParameter(f"not a report command; one of: {names}", param_hint="NAME")
+    with _drive_session(app) as d:
+        bits = _REPORT_BITS[cmd.code]
+        val = d.report(cmd, bits)
+        click.echo(f"{cmd.name} (cmd {cmd.code}): 0x{val:0{bits // 4}x} 0b{val:0{bits}b}")
+
+
+@drive.command("load-point")
+@click.pass_obj
+def drive_load_point(app: AppContext) -> None:
+    """Seek Load Point (may take ~30 s+: the drive re-references the tape)."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.command(commands.SEEK_LOAD_POINT))}")
+
+
+@drive.command("fwd")
+@click.option("--seconds", default=2.0, show_default=True, help="how long to run")
+@click.pass_obj
+def drive_fwd(app: AppContext, seconds: float) -> None:
+    """Physical Forward for --seconds, then Stop (stops early at EOT)."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.jog(commands.PHYSICAL_FORWARD, seconds))}")
+
+
+@drive.command("rev")
+@click.option("--seconds", default=2.0, show_default=True, help="how long to run")
+@click.pass_obj
+def drive_rev(app: AppContext, seconds: float) -> None:
+    """Physical Reverse for --seconds, then Stop (stops early at BOT)."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.jog(commands.PHYSICAL_REVERSE, seconds))}")
+
+
+@drive.command("stop")
+@click.pass_obj
+def drive_stop(app: AppContext) -> None:
+    """Stop Tape."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.command(commands.STOP_TAPE))}")
+
+
+@drive.command("track")
+@click.argument("track", type=click.IntRange(0, 254))
+@click.pass_obj
+def drive_track(app: AppContext, track: int) -> None:
+    """Seek Head to Track N."""
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.command(commands.SEEK_HEAD_TO_TRACK, arg=track))}")
+
+
+@drive.command("micro")
+@click.argument("direction", type=click.Choice(["up", "down"]))
+@click.pass_obj
+def drive_micro(app: AppContext, direction: str) -> None:
+    """Micro-step the head up or down (re-seek the track to recentre)."""
+    from tapewyrm.qic117 import commands
+
+    name = "MICRO_STEP_HEAD_UP" if direction == "up" else "MICRO_STEP_HEAD_DOWN"
+    with _drive_session(app) as d:
+        click.echo(f"status : {_fmt_status(d.command(commands.TABLE[name]))}")
+
+
+@drive.command("scope")
+@click.option("--pulses", default=0, type=click.IntRange(0, 255), help="STEP pulses first")
+@click.option("--ms", default=300, type=click.IntRange(1, 10_000), show_default=True)
+@click.pass_obj
+def drive_scope(app: AppContext, pulses: int, ms: int) -> None:
+    """Edge-log TRK0/INDEX/WRPROT/pin34 (after optional pulses). Bench probe.
+
+    A selected, ready drive shows cue INDEX pulses every few ms.
+    """
+    from tapewyrm.link.device import ScopeTrace
+
+    with _drive_session(app) as d:
+        tr = d.link.scope(pulses, ms)
+        active = {k: v for k, v in tr.counts.items() if v}
+        click.echo(
+            f"initial={ScopeTrace.describe(tr.initial)} edges={sum(tr.counts.values())} "
+            f"by line={active or '{}'}"
+        )
+        for t_us, state in tr.edges:
+            click.echo(f"  {t_us / 1000:9.3f} ms  {ScopeTrace.describe(state)}")
+        if tr.overflow:
+            click.echo(f"  ... (edge log holds {len(tr.edges)}; totals above are complete)")
 
 
 @cli.command()

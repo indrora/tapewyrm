@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
+from tapewyrm.link.device import LinkError
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
 from tapewyrm.qic117.status import classify_error
@@ -28,6 +29,7 @@ from tapewyrm.types import (
     CaptureHeader,
     DriveConfig,
     StopCond,
+    TapeFormat,
     TapeStatus,
 )
 
@@ -74,15 +76,30 @@ class TapeTransport:
         """
         self.drive.wake()
         cfg = self.drive.config()
-        tape = self.drive.tape_status()
+        unsupported = False
+        try:
+            tape = self.drive.tape_status()  # cmd 33 (CCS-1)
+        except LinkError:
+            # Pre-CCS-1 drives (e.g. the bench Colorado Jumbo 350) never ACK
+            # Report Tape Status. QIC-117 Rev J Note 4: if Report Drive
+            # Configuration says QIC-80, the host may assume a QIC-80 tape.
+            unsupported = True
+            fmt = TapeFormat.QIC80 if cfg.qic80_mode else TapeFormat.QIC40
+            tape = TapeStatus(format=fmt, tape_type=0, wide=False, raw=0)
 
         spt: int | None = None
         try:
             reported = self.drive.format_segments()  # cmd 37 (CCS-2)
             spt = reported if reported > 0 else None
-        except Exception:
+        except LinkError:
             # Basic drive lacking 36/37: fall back to fixed geometry (§2.1, §7.3).
+            unsupported = True
             spt = None
+
+        if unsupported:
+            # An unsupported command may latch "undefined command"; read status
+            # (which reads+clears the error) so later commands aren't rejected.
+            self.drive.status()
 
         geom = Geometry.for_format(tape.format, segments_per_track=spt, wide=tape.wide)
         self._cfg, self._tape, self._geom = cfg, tape, geom

@@ -153,6 +153,32 @@ def test_identify_builds_geometry():
     assert ("wake",) in drive.commands_run
 
 
+def test_identify_falls_back_when_drive_lacks_tape_status():
+    # The bench Colorado Jumbo 350 never ACKs cmd 33 (or 37): fall back to the
+    # Drive Configuration QIC-80 bit (Rev J Note 4) and clear the latched error.
+    from tapewyrm.link.device import LinkError
+
+    class OldDrive(FakeDrive):
+        status_reads = 0
+
+        def tape_status(self):
+            raise LinkError("command 33: no ACK bit")
+
+        def format_segments(self):
+            raise LinkError("command 37: no ACK bit")
+
+        def status(self):
+            self.status_reads += 1
+            return super().status()
+
+    drive = OldDrive(FakeLink(), Geometry(tracks=4, segments_per_track=10))
+    cfg, tape, g = TapeTransport(drive).identify()
+    assert cfg.qic80_mode
+    assert tape.format is TapeFormat.QIC80
+    assert g.tracks == 28
+    assert drive.status_reads == 1  # error-clearing status read happened
+
+
 # ---------------------------------------------------------------------------
 # capture_pass
 # ---------------------------------------------------------------------------

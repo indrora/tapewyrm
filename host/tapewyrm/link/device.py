@@ -146,6 +146,29 @@ def _u16le(b: int) -> bytes:
     return struct.pack("<H", b)
 
 
+# Greaseweazle USB identity (firmware/src/usb/config.c). Our firmware keeps it,
+# so stock and Tapewyrm images enumerate identically; the INFO gate tells them
+# apart after open.
+GW_USB_VID = 0x1209  # pid.codes open-source VID
+GW_USB_PID = 0x4D69  # Keir Fraser's Greaseweazle PID
+
+
+def find_port() -> str:
+    """Return the serial port of the single attached Greaseweazle.
+
+    Raises ``LinkError`` when none, or more than one, is attached: guessing
+    between two GWs could send tape commands to the wrong drive.
+    """
+    from serial.tools import list_ports  # pyserial; lazy so imports stay light
+
+    ports = [p.device for p in list_ports.comports() if (p.vid, p.pid) == (GW_USB_VID, GW_USB_PID)]
+    if not ports:
+        raise LinkError("no Greaseweazle found (USB 1209:4d69); pass --port")
+    if len(ports) > 1:
+        raise LinkError(f"several Greaseweazles found {ports}; pass --port to pick one")
+    return ports[0]
+
+
 class DeviceLink:
     """Typed transaction client. No arbitration, no bus access (DESIGN.md §6.1)."""
 
@@ -164,9 +187,7 @@ class DeviceLink:
         BAD_COMMAND, which we turn into ``LinkVersionError``.
         """
         if self._transport is None:
-            if port is None:
-                raise LinkError("no transport injected and no port given to open()")
-            self._transport = SerialTransport(port)
+            self._transport = SerialTransport(port if port is not None else find_port())
         try:
             self._transport.open()
         except TransportError as exc:

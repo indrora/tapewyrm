@@ -50,6 +50,9 @@ class Cmd:
     # Max execution time to Ready, seconds (QIC-117 Rev J Table 2d: worst case
     # over every tape length/speed). None = no Ready event (instant/ACK-only).
     timeout_s: float | None = None
+    # Puts flux on the tape (or arms the drive to). Qic117Drive refuses these
+    # unless constructed with allow_writes=True: this project RECOVERS tapes.
+    writes: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +75,8 @@ _CMDS: tuple[Cmd, ...] = (
     Cmd(12, Kind.MOTION, False, "physical forward", high_speed=True, timeout_s=650),
     Cmd(13, Kind.MOTION, False, "seek head to track", takes_arg=True, timeout_s=15),
     Cmd(14, Kind.MOTION, True, "seek load point", timeout_s=670),
-    Cmd(15, Kind.MODE, False, "enter format mode"),
-    Cmd(16, Kind.MOTION, True, "write reference burst", timeout_s=940),
+    Cmd(15, Kind.MODE, False, "enter format mode", writes=True),
+    Cmd(16, Kind.MOTION, True, "write reference burst", timeout_s=940, writes=True),
     Cmd(17, Kind.MODE, False, "enter verify mode"),
     Cmd(18, Kind.MOTION, True, "stop tape", timeout_s=8),
     # 19-20 reserved.
@@ -123,6 +126,8 @@ LOGICAL_FORWARD = TABLE["LOGICAL_FORWARD"]
 SEEK_HEAD_TO_TRACK = TABLE["SEEK_HEAD_TO_TRACK"]
 SEEK_LOAD_POINT = TABLE["SEEK_LOAD_POINT"]
 STOP_TAPE = TABLE["STOP_TAPE"]
+PHYSICAL_FORWARD = TABLE["PHYSICAL_FORWARD"]
+PHYSICAL_REVERSE = TABLE["PHYSICAL_REVERSE"]
 SOFT_SELECT = TABLE["SOFT_SELECT"]
 REPORT_TAPE_STATUS = TABLE["REPORT_TAPE_STATUS"]
 REPORT_FORMAT_SEGMENTS = TABLE["REPORT_FORMAT_SEGMENTS"]

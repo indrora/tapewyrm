@@ -253,3 +253,58 @@ def test_reset_sends_soft_reset():
     drive.reset()
     assert link.command_codes() == [1]
     assert drive.last_error is None
+
+
+# ---------------------------------------------------------------------------
+# write guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["ENTER_FORMAT_MODE", "WRITE_REFERENCE_BURST"])
+def test_write_commands_refused_by_default(name):
+    drive, link = _drive()
+    with pytest.raises(DriveError, match="writes to tape"):
+        drive.command(commands.TABLE[name])
+    assert link.calls == []  # nothing reached the bus
+
+
+def test_write_commands_allowed_when_opted_in():
+    link = MockLink()
+    drive = Qic117Drive(link, DriveProfile.default(), allow_writes=True)
+    drive.command(commands.TABLE["ENTER_FORMAT_MODE"])
+    assert link.command_codes() == [15]
+
+
+def test_only_format_and_reference_burst_are_flagged_as_writes():
+    assert {c.code for c in commands.BY_CODE.values() if c.writes} == {15, 16}
+
+
+# ---------------------------------------------------------------------------
+# jog (Physical Forward/Reverse for N seconds)
+# ---------------------------------------------------------------------------
+
+
+def test_jog_stops_early_at_end_of_tape(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    drive, link = _drive()
+    link.queue_report(0b0100_0101, 1)  # poll: ready + at_bot -> we hit the end
+    link.queue_report(0b0100_0101, 1)  # status after Stop
+    st = drive.jog(commands.PHYSICAL_REVERSE, seconds=60)
+    assert st.at_bot
+    assert link.command_codes() == [11, 6, 18, 6]
+
+
+def test_jog_always_sends_stop_even_when_polling_fails(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    drive, link = _drive()
+    # No queued reports: the first status poll raises mid-motion.
+    with pytest.raises(AssertionError):
+        drive.jog(commands.PHYSICAL_FORWARD, seconds=60)
+    assert link.command_codes()[:2] == [12, 6]
+    assert 18 in link.command_codes()  # Stop Tape went out regardless
+
+
+def test_jog_rejects_non_physical_motion():
+    drive, _link = _drive()
+    with pytest.raises(ValueError):
+        drive.jog(commands.SEEK_LOAD_POINT, seconds=1)

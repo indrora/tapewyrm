@@ -292,3 +292,35 @@ def test_closed_link_raises():
     link = DeviceLink(FakeTransport())
     with pytest.raises(LinkClosed):
         link.command_txn(6, report_bits=8)
+
+
+# ---------------------------------------------------------------------------
+# find_port
+# ---------------------------------------------------------------------------
+
+
+class _Port:
+    def __init__(self, device, vid, pid):
+        self.device, self.vid, self.pid = device, vid, pid
+
+
+def _fake_ports(monkeypatch, ports):
+    from serial.tools import list_ports
+
+    monkeypatch.setattr(list_ports, "comports", lambda: ports)
+
+
+def test_find_port_picks_the_greaseweazle(monkeypatch):
+    from tapewyrm.link.device import find_port
+
+    _fake_ports(monkeypatch, [_Port("/dev/a", 0x2341, 1), _Port("/dev/gw", 0x1209, 0x4D69)])
+    assert find_port() == "/dev/gw"
+
+
+@pytest.mark.parametrize("n", [0, 2])
+def test_find_port_refuses_none_or_several(monkeypatch, n):
+    from tapewyrm.link.device import find_port
+
+    _fake_ports(monkeypatch, [_Port(f"/dev/gw{i}", 0x1209, 0x4D69) for i in range(n)])
+    with pytest.raises(LinkError):
+        find_port()

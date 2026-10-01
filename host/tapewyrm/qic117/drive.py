@@ -8,6 +8,9 @@ comes back. Dispatch is by ``Kind`` (the whole point of tagging the table):
 * **streaming** (Logical Forward) -> send and return; **NEVER** wait-ready/status
   after it — a status report would swallow segment 0 (DESIGN.md §2.1/§6A.3).
 * **mode / config / select** -> state change, no motion, no report.
+* **writes** (Enter Format Mode, Write Reference Burst) -> refused with
+  ``DriveError`` unless the drive was built with ``allow_writes=True``. This
+  project recovers tapes; nothing should arm the write path by accident.
 
 The command *content* is verbatim through ``link.command_txn``; only the
 follow-up policy lives here. Report bytes are converted to ints honoring
@@ -61,9 +64,12 @@ def bits_to_int(raw: bytes, bit_order: str) -> int:
 class Qic117Drive:
     """Semantic drive layer (DESIGN.md §6A.3)."""
 
-    def __init__(self, link: DeviceLink, profile: DriveProfile) -> None:
+    def __init__(
+        self, link: DeviceLink, profile: DriveProfile, *, allow_writes: bool = False
+    ) -> None:
         self.link = link
         self.profile = profile
+        self.allow_writes = allow_writes
         self._last_error: ErrorCode | None = None
 
     @property
@@ -87,6 +93,11 @@ class Qic117Drive:
         else returns ``None``. Logical Forward (streaming) is sent and returns
         immediately with NO wait-ready/status.
         """
+        if cmd.writes and not self.allow_writes:
+            raise DriveError(
+                f"refusing {cmd.name!r} (code {cmd.code}): it writes to tape and this "
+                "drive was not opened with allow_writes=True"
+            )
         if cmd.takes_arg:
             if arg is None:
                 raise ValueError(f"command {cmd.name!r} requires an argument")
@@ -114,6 +125,33 @@ class Qic117Drive:
         if cmd.timeout_s is None:
             return float(self.profile.timing.motion_timeout_s)
         return max(cmd.timeout_s, 1.0)
+
+    def jog(self, cmd: Cmd, seconds: float, poll_s: float = 0.25) -> DriveStatus:
+        """Run Physical Forward/Reverse for ``seconds``, then Stop Tape.
+
+        Physical motion only reports Ready when it reaches an end of tape, so it
+        cannot go through ``command()`` (that would wait up to 650 s). Instead
+        we poll status, stop early if the drive goes Ready (hit BOT/EOT) or
+        latches an error, and ALWAYS send Stop Tape on the way out -- including
+        on Ctrl-C or a link error -- so the tape is never left running.
+        Returns the status after the stop.
+        """
+        import time
+
+        if cmd.code not in (commands.PHYSICAL_FORWARD.code, commands.PHYSICAL_REVERSE.code):
+            raise ValueError(f"jog() takes Physical Forward/Reverse, not {cmd.name!r}")
+        self.link.command_txn(cmd.code)
+        try:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                time.sleep(poll_s)
+                st = self.status()
+                if st.ready or st.error:
+                    break
+        finally:
+            stopped = self.command(commands.STOP_TAPE)
+        assert stopped is not None  # Stop Tape is non-streaming motion
+        return stopped
 
     def wait_ready(self, timeout_s: float, poll_s: float = 0.1) -> DriveStatus:
         """Poll Report Drive Status until the ready bit is set (ftape-style).
