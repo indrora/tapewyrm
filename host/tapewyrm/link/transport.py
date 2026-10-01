@@ -2,12 +2,20 @@
 
 This layer is *semantically dumb*: it knows nothing about QIC commands, reports,
 or tape geometry. It only knows how to push request frames at the device, pull
-response frames back, and stream the capture path. The framing is the §13.3
-wire protocol:
+response frames back, and stream the capture path. The framing is
+Greaseweazle's own command-packet protocol, because the firmware grafts our
+verbs onto GW's ``process_command()`` dispatch (firmware/src/qic/qic.c):
 
-    request frame  : {opcode:u8, len:u16-LE, payload}
-    response frame : {opcode:u8, len:u16-LE, payload}
-    capture path   : a continuous byte stream (GW flux bytes + opcode markers)
+    request  : {cmd:u8, total_len:u8, payload}     total_len = 2 + len(payload)
+    response : {cmd_echo:u8, ack:u8, payload}      payload ONLY when ack == OKAY
+    capture  : a continuous byte stream (GW flux bytes + opcode markers)
+
+GW responses carry **no length field**: the host must know how many payload
+bytes each command returns (exactly how GW's own host tools work), so
+``recv_frame`` takes the expected payload length. On a non-OKAY ack the device
+sends just the two header bytes, so we must not try to read a payload then.
+(DESIGN.md §13.3 originally described a u16-length framing; the firmware never
+implemented that, and the firmware is what is on the device.)
 
 Two concrete transports live here:
 
@@ -26,9 +34,20 @@ from collections import deque
 from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
 
-# Wire framing constants (§13.3). The header is opcode:u8 + len:u16-LE.
-_FRAME_HEADER = struct.Struct("<BH")
-FRAME_HEADER_LEN = _FRAME_HEADER.size  # 3
+# GW command-packet framing. Request header = cmd:u8 + total_len:u8 (total_len
+# counts the 2 header bytes); response header = cmd_echo:u8 + ack:u8.
+_FRAME_HEADER = struct.Struct("<BB")
+FRAME_HEADER_LEN = _FRAME_HEADER.size  # 2
+MAX_PAYLOAD = 0xFF - FRAME_HEADER_LEN  # total_len is a u8
+
+# GW ACK codes (firmware/inc/cdc_acm_protocol.h ACK_*).
+ACK_OKAY = 0
+ACK_NAMES = {
+    0: "OKAY", 1: "BAD_COMMAND", 2: "NO_INDEX", 3: "NO_TRK0",
+    4: "FLUX_OVERFLOW", 5: "FLUX_UNDERFLOW", 6: "WRPROT", 7: "NO_UNIT",
+    8: "NO_BUS", 9: "BAD_UNIT", 10: "BAD_PIN", 11: "BAD_CYLINDER",
+    12: "OUT_OF_SRAM", 13: "OUT_OF_FLASH",
+}  # fmt: skip
 
 
 class TransportError(Exception):
@@ -40,20 +59,20 @@ class TransportClosed(TransportError):
 
 
 def encode_frame(opcode: int, payload: bytes = b"") -> bytes:
-    """Encode one request/response frame: {opcode:u8, len:u16-LE, payload}."""
+    """Encode one GW request packet: {cmd:u8, total_len:u8, payload}."""
     if not 0 <= opcode <= 0xFF:
         raise ValueError(f"opcode out of range: {opcode}")
-    if len(payload) > 0xFFFF:
-        raise ValueError("frame payload too long for u16 length field")
-    return _FRAME_HEADER.pack(opcode, len(payload)) + payload
+    if len(payload) > MAX_PAYLOAD:
+        raise ValueError(f"payload too long for GW u8 length field: {len(payload)}")
+    return _FRAME_HEADER.pack(opcode, FRAME_HEADER_LEN + len(payload)) + payload
 
 
 def decode_frame_header(header: bytes) -> tuple[int, int]:
-    """Decode a 3-byte frame header into (opcode, payload_len)."""
+    """Decode a 2-byte GW response header into (cmd_echo, ack)."""
     if len(header) != FRAME_HEADER_LEN:
         raise TransportError(f"short frame header: {len(header)} bytes")
-    opcode, length = _FRAME_HEADER.unpack(header)
-    return opcode, length
+    echo, ack = _FRAME_HEADER.unpack(header)
+    return echo, ack
 
 
 @runtime_checkable
@@ -70,8 +89,19 @@ class Transport(Protocol):
     def send_frame(self, opcode: int, payload: bytes = b"") -> None:
         """Write one request frame to the device."""
 
-    def recv_frame(self) -> tuple[int, bytes]:
-        """Read one response frame, returning (opcode, payload)."""
+    def recv_frame(
+        self, opcode: int, resp_len: int = 0, timeout_s: float | None = None
+    ) -> tuple[int, bytes]:
+        """Read one GW response to ``opcode``, returning (ack, payload).
+
+        ``resp_len`` payload bytes are read only when ack == OKAY. A cmd echo
+        that does not match ``opcode`` means the stream is desynchronised.
+        ``timeout_s`` overrides the read timeout for slow commands (e.g. a
+        multi-second SCOPE capture that only answers when it is done).
+        """
+
+    def read_exact(self, n: int) -> bytes:
+        """Read exactly ``n`` more response bytes (variable-length tails)."""
 
     def send_control(self, opcode: int, payload: bytes = b"") -> None:
         """Write an out-of-band control frame (e.g. ABORT) mid-capture.
@@ -168,10 +198,25 @@ class SerialTransport:
             buf.extend(chunk)
         return bytes(buf)
 
-    def recv_frame(self) -> tuple[int, bytes]:
-        opcode, length = decode_frame_header(self._read_exact(FRAME_HEADER_LEN))
-        payload = self._read_exact(length) if length else b""
-        return opcode, payload
+    def recv_frame(
+        self, opcode: int, resp_len: int = 0, timeout_s: float | None = None
+    ) -> tuple[int, bytes]:
+        ser = self._require()
+        if timeout_s is not None:
+            ser.timeout = timeout_s  # type: ignore[attr-defined]
+        try:
+            echo, ack = decode_frame_header(self._read_exact(FRAME_HEADER_LEN))
+        finally:
+            if timeout_s is not None:
+                ser.timeout = self.timeout_s  # type: ignore[attr-defined]
+        if echo != opcode:
+            raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
+        if ack != ACK_OKAY:
+            return ack, b""
+        return ack, self._read_exact(resp_len) if resp_len else b""
+
+    def read_exact(self, n: int) -> bytes:
+        return self._read_exact(n)
 
     def read_stream(self, max_bytes: int = 65536) -> bytes:
         ser = self._require()
@@ -192,7 +237,7 @@ class FakeTransport:
     Usage::
 
         t = FakeTransport()
-        t.queue_response(Txn.INFO, info_payload)      # canned response frames
+        t.queue_response(Txn.INFO, info_payload)      # canned OKAY response
         t.queue_stream_chunk(flux_bytes)              # capture stream chunks
         link = DeviceLink(t)
         ...
@@ -206,13 +251,14 @@ class FakeTransport:
         self._open = False
         self.sent_frames: list[tuple[int, bytes]] = []
         self.sent_control: list[tuple[int, bytes]] = []
-        self._responses: deque[tuple[int, bytes]] = deque()
+        self._responses: deque[tuple[int, int, bytes]] = deque()
         self._stream: deque[bytes] = deque()
+        self._tail = b""  # unread remainder of the last response (read_exact)
 
     # --- scripting API ---
 
-    def queue_response(self, opcode: int, payload: bytes = b"") -> None:
-        self._responses.append((int(opcode), payload))
+    def queue_response(self, opcode: int, payload: bytes = b"", ack: int = ACK_OKAY) -> None:
+        self._responses.append((int(opcode), ack, payload))
 
     def queue_stream_chunk(self, data: bytes) -> None:
         self._stream.append(data)
@@ -248,11 +294,30 @@ class FakeTransport:
         encode_frame(opcode, payload)
         self.sent_control.append((int(opcode), bytes(payload)))
 
-    def recv_frame(self) -> tuple[int, bytes]:
+    def recv_frame(
+        self, opcode: int, resp_len: int = 0, timeout_s: float | None = None
+    ) -> tuple[int, bytes]:
         self._require()
+        if self._tail:
+            raise TransportError(f"{len(self._tail)} B of the previous response unread")
         if not self._responses:
             raise TransportError("no queued response frame")
-        return self._responses.popleft()
+        echo, ack, payload = self._responses.popleft()
+        if echo != opcode:
+            raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
+        if ack != ACK_OKAY:
+            return ack, b""
+        if len(payload) < resp_len:
+            raise TransportError(f"queued payload {len(payload)} B < expected {resp_len} B")
+        self._tail = payload[resp_len:]
+        return ack, payload[:resp_len]
+
+    def read_exact(self, n: int) -> bytes:
+        self._require()
+        if len(self._tail) < n:
+            raise TransportError(f"short read: wanted {n}, have {len(self._tail)}")
+        head, self._tail = self._tail[:n], self._tail[n:]
+        return head
 
     def read_stream(self, max_bytes: int = 65536) -> bytes:
         self._require()

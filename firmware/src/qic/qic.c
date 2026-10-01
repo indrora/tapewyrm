@@ -58,6 +58,7 @@
 #define CMD_QIC_PULSES      TW_TXN_COMMAND_TXN
 #define CMD_QIC_WAIT_READY  TW_TXN_WAIT_READY
 #define CMD_QIC_CAPTURE     TW_TXN_CAPTURE
+#define CMD_QIC_SCOPE       TW_TXN_SCOPE
 
 /* ======================================================================== *
  *  QIC-117 timing envelope (DESIGN.md §2.1 Table 1, §5.3)
@@ -590,6 +591,116 @@ static unsigned int qic_cmd_wait_ready(uint8_t len)
     timeout_s = *(uint16_t *)&u_buf[2];
     ready = qic_wait_ready((uint32_t)timeout_s * 1000u);
     u_buf[n++] = ready ? 0u : 1u;
+    u_buf[1] = ACK_OKAY;
+    return n;
+}
+
+/* ======================================================================== *
+ *  CMD_QIC_SCOPE: bench logic probe (a logic analyser for the drive's outputs)
+ *  ----------------------------------------------------------------------- *
+ *  Bring-up tool: we could not tell whether the drive was ignoring us or
+ *  answering in a way the report engine missed. SCOPE optionally emits cmd_n
+ *  STEP pulses, then busy-polls every drive->host line we can read and logs
+ *  EDGES (not raw samples), so an idle line costs nothing and a short ACK blip
+ *  is still caught. We cannot see our own outputs (STEP/DIR/DS) this way --
+ *  only whether the drive ever drives anything.
+ *
+ *  The last pulse is emitted with NO trailing gap so sampling starts the
+ *  instant STEP is released: the terminate gap, the drive recognising the
+ *  command, and its ACK bit all land inside the capture window.
+ *
+ *  Payload: cmd_n:u8, duration_ms:u16 (3 bytes; duration capped at 10 s).
+ *  Response after ACK (u_buf[2]..):
+ *    initial:u8         line state at t=0
+ *    n_edges:u8         edges logged (<= QIC_SCOPE_MAX_EDGES)
+ *    overflow:u8        1 = more edges happened than were logged
+ *    counts[4]:u16      per-line edge totals (saturating), logged or not
+ *    edges[n_edges]:    {t_us:u32 since t=0, state:u8}  (5 bytes each)
+ *  State bits: b0 TRK0, b1 INDEX, b2 WRPROT, b3 pin 34 (DSKCHG/RDY).
+ *  A SET bit means the line is ASSERTED, i.e. electrically LOW on the bus.
+ *  Sizing: GW sends a command response as ONE 64-byte USB packet (found on
+ *  the bench: a 253-byte response arrived truncated at 64), so the edge log is
+ *  capped at 10: 2 + 3 + 8 + 10*5 = 63 <= 64. `counts` still totals every edge.
+ * ======================================================================== */
+#define QIC_SCOPE_MAX_EDGES   10u
+#define QIC_SCOPE_MAX_MS      10000u
+#define QIC_SCOPE_LINES       4u
+
+static uint8_t qic_scope_sample(void)
+{
+    uint8_t s = 0, p34 = HIGH;
+
+    if (get_trk0() == LOW)
+        s |= 1u << 0;
+    if (get_index() == LOW)
+        s |= 1u << 1;
+    if (get_wrprot() == LOW)
+        s |= 1u << 2;
+    if (mcu_get_floppy_pin(34, &p34) == ACK_OKAY && p34 == LOW)
+        s |= 1u << 3;
+    return s;
+}
+
+static unsigned int qic_cmd_scope(uint8_t len)
+{
+    uint16_t counts[QIC_SCOPE_LINES] = { 0 };
+    uint8_t cmd_n, prev, cur, n_edges = 0, overflow = 0;
+    uint8_t *edges;
+    uint32_t duration_ms;
+    unsigned int i, n = 2;
+    time_t t0;
+
+    if (len != 2 + 3) {
+        u_buf[1] = ACK_BAD_COMMAND;
+        return n;
+    }
+    if (floppy_state != ST_command_wait || qic_cap.active) {
+        u_buf[1] = ACK_BAD_COMMAND;
+        return n;
+    }
+    cmd_n = u_buf[2];
+    duration_ms = *(uint16_t *)&u_buf[3];
+    if (duration_ms > QIC_SCOPE_MAX_MS)
+        duration_ms = QIC_SCOPE_MAX_MS;
+
+    /* n-1 pulses at the train cadence; the last with no trailing gap. */
+    for (i = 0; i < cmd_n; i++)
+        qic_step_pulse((i + 1u == cmd_n) ? 0 : qic_timing.inter_pulse_us);
+    write_pin(step, FALSE);
+
+    /* Request bytes are consumed; the response overwrites u_buf from [2]. */
+    edges = &u_buf[n + 3 + 2 * QIC_SCOPE_LINES];
+    t0 = time_now();
+    prev = qic_scope_sample();
+    u_buf[n] = prev;
+
+    for (;;) {
+        int32_t dt = time_since(t0);
+        if (dt >= (int32_t)time_ms(duration_ms))
+            break;
+        cur = qic_scope_sample();
+        if (cur != prev) {
+            uint8_t changed = cur ^ prev;
+            for (i = 0; i < QIC_SCOPE_LINES; i++)
+                if (((changed >> i) & 1u) && counts[i] != 0xFFFFu)
+                    counts[i]++;
+            if (n_edges < QIC_SCOPE_MAX_EDGES) {
+                uint32_t t_us = (uint32_t)dt / TIME_MHZ;
+                memcpy(&edges[n_edges * 5u], &t_us, 4);
+                edges[n_edges * 5u + 4u] = cur;
+                n_edges++;
+            } else {
+                overflow = 1;
+            }
+            prev = cur;
+        }
+        watchdog_kick();
+    }
+
+    u_buf[n + 1] = n_edges;
+    u_buf[n + 2] = overflow;
+    memcpy(&u_buf[n + 3], counts, sizeof(counts));
+    n += 3 + sizeof(counts) + n_edges * 5u;
     u_buf[1] = ACK_OKAY;
     return n;
 }

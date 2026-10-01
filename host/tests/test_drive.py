@@ -90,25 +90,34 @@ def test_report_dispatch_clocks_bits():
     assert link.calls == [("command_txn", 6, 8)]
 
 
-def test_non_streaming_motion_waits_ready_and_reads_status():
+def test_non_streaming_motion_polls_status_until_ready(monkeypatch):
+    # QIC-117 has no ready line: the drive polls Report Drive Status (ftape-style).
+    monkeypatch.setattr("time.sleep", lambda s: None)
     drive, link = _drive()
-    link.queue_ready(True)
+    link.queue_report(0b0000_0100, 1)  # cartridge, NOT ready (still moving)
     link.queue_report(0b0100_0101, 1)  # ready + cartridge + at_bot, no error
     st = drive.command(commands.SEEK_LOAD_POINT)
-    assert st is not None and st.ready
-    # Sequence: command pulse (14, 0), wait_ready, status report (6, 8).
-    assert link.opnames() == ["command_txn", "wait_ready", "command_txn"]
-    assert link.command_codes() == [14, 6]
+    assert st is not None and st.ready and st.at_bot
+    # Motion pulse 14, then status reports until ready. No firmware WAIT_READY.
+    assert link.command_codes() == [14, 6, 6]
+    assert "wait_ready" not in link.opnames()
+
+
+def test_wait_ready_times_out(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    drive, link = _drive()
+    for _ in range(3):
+        link.queue_report(0b0000_0100, 1)  # never ready
+    with pytest.raises(DriveError):
+        drive.wait_ready(timeout_s=0)
 
 
 def test_seek_head_to_track_sends_arg_as_n_plus_2():
     drive, link = _drive()
-    link.queue_ready(True)
     link.queue_report(0b0000_0001, 1)  # ready
     drive.command(commands.SEEK_HEAD_TO_TRACK, arg=5)
-    # command pulse 13, then arg pulse train 5+2=7, then wait_ready, then status.
-    assert link.command_codes()[:2] == [13, 7]
-    assert "wait_ready" in link.opnames()
+    # command pulse 13, then arg pulse train 5+2=7, then the ready poll (status 6).
+    assert link.command_codes() == [13, 7, 6]
 
 
 def test_seek_head_to_track_requires_arg():
@@ -209,9 +218,23 @@ def test_wake_runs_profile_sequence(monkeypatch):
         timing=DriveProfile.default().timing,
     )
     drive, link = _drive(prof)
+    link.queue_report(0b0000_0101, 1)  # final status read: ready + cartridge
     drive.wake()
-    # soft reset = 1, enter primary mode = 30.
-    assert link.command_codes() == [1, 30]
+    # soft reset = 1, enter primary mode = 30, then the error-clearing status (6).
+    assert link.command_codes() == [1, 30, 6]
+
+
+def test_wake_phantom_select_sends_unit_arg():
+    # Bench-confirmed Colorado wake: Phantom Select 46 + N+2 unit train (unit 0 -> 2).
+    prof = DriveProfile(
+        name="t",
+        wake_sequence=(("phantom select", 0, 0),),
+        timing=DriveProfile.default().timing,
+    )
+    drive, link = _drive(prof)
+    link.queue_report(0b0000_0101, 1)
+    drive.wake()
+    assert link.command_codes() == [46, 2, 6]
 
 
 def test_wake_unknown_command_raises():

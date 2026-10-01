@@ -98,9 +98,26 @@ class Qic117Drive:
         # report would swallow segment 0 (DESIGN.md §2.1/§6A.3). In practice
         # capture is armed via link.capture(); command() with LF is the bare verb.
         if cmd.kind is Kind.MOTION and not cmd.is_streaming:
-            self.link.wait_ready(self.profile.timing.motion_timeout_s * 1000)
-            return self.status()
+            return self.wait_ready(self.profile.timing.motion_timeout_s)
         return None
+
+    def wait_ready(self, timeout_s: float, poll_s: float = 0.1) -> DriveStatus:
+        """Poll Report Drive Status until the ready bit is set (ftape-style).
+
+        QIC-117 has no dedicated ready line: the drive keeps answering status
+        reports while it moves, and bit 0 goes TRUE when the operation is done.
+        Raises ``DriveError`` on timeout, carrying the last status seen.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout_s
+        while True:
+            st = self.status()
+            if st.ready:
+                return st
+            if time.monotonic() >= deadline:
+                raise DriveError(f"drive not ready after {timeout_s} s (last status {st})")
+            time.sleep(poll_s)
 
     def report(self, cmd: Cmd, nbits: int) -> int:
         """Issue a report command and return its ``nbits`` payload as an int.
@@ -164,6 +181,10 @@ class Qic117Drive:
             self.command(cmd, arg=arg)
             if delay_ms:
                 time.sleep(delay_ms / 1000.0)
+        # Read status last: it also reads+clears any latched error / new-cartridge
+        # state (power-on leaves error 26 latched), without which the drive
+        # rejects many later commands (QIC-117 Rev J §3).
+        self.status()
 
     def reset(self) -> None:
         """Soft Reset (cmd 1) — single pulse; clears state, drops to known mode."""

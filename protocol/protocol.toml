@@ -55,6 +55,11 @@ name = "ABORT"
 code = 0x86
 desc = "Out-of-band stop during CAPTURE; firmware-side via GW clear-comms, not a queued cmd"
 
+[[transaction]]
+name = "SCOPE"
+code = 0x87
+desc = "Bench logic-probe: optional n STEP pulses, then edge-log the drive's input lines"
+
 # --- In-flux-stream tape markers (opcode-escape channel, §7.2) ---
 [[marker]]
 name = "SESSION_START"

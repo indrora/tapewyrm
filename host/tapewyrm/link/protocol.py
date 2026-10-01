@@ -13,6 +13,7 @@ class Txn(IntEnum):
     CAPTURE = 0x84  # Open a free-running flux capture session (device holds the lease)
     SELECT = 0x85  # Drive-select hint (host-side; firmware selects via GW's drive_select)
     ABORT = 0x86  # Out-of-band stop during CAPTURE; firmware-side via GW clear-comms, not a queued cmd
+    SCOPE = 0x87  # Bench logic-probe: optional n STEP pulses, then edge-log the drive's input lines
 
 
 class Marker(IntEnum):

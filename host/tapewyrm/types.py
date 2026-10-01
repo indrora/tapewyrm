@@ -102,8 +102,10 @@ class TimingParams:
     pulse_us: int = 200
     inter_pulse_us: int = 2000  # ~2.0 ms STEP interval (0.9-2.1 ms)
     terminate_gap_us: int = 3000  # > 2.9 ms ends a command train (< -> Soft Reset)
-    report_settle_us: int = 900  # report bit appears within 900 us of 2nd pulse
+    report_settle_us: int = 900  # report bit appears within 900 us of 2nd pulse (fw TBIT)
     motion_timeout_s: int = 20  # generic motion wait-ready ceiling (seeks 15s, stop 8s)
+    tack_us: int = 2500  # max wait for a report's ACK bit (QIC-117 TACK)
+    report_on_index: bool = False  # fw waits for an INDEX cue per bit instead of a fixed settle
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,8 @@ class SelectHint:
 
     unit: int = 0
     sticky: bool = False  # keep select asserted across back-to-back command txns
+    bus: str = "shugart"  # GW bus type: "shugart" (DS0-3 lines) or "ibmpc" (A/B + motor)
+    motor: bool = False  # also assert the unit's motor-enable line
 
 
 @dataclass(frozen=True)
