@@ -83,9 +83,22 @@ env.AddBuildMiddleware(
 
 # src/Makefile: build_info.c bakes the firmware version into GetInfo, and (ours)
 # the git commit via the generated tw_git.h in the build dir.
-env.AddBuildMiddleware(
-    _with_file_cflags(
-        f"-DFW_MAJOR={fw_major}", f"-DFW_MINOR={fw_minor}", "-iquote", build_dir
-    ),
-    "*/build_info.c",
-)
+#
+# The explicit Depends() matters: SCons finds header dependencies by scanning
+# #includes along CPPPATH, but the build dir reaches the compiler only through a
+# raw -iquote flag, so SCons never saw build_info.c -> tw_git.h. A new commit
+# rewrote the header and build_info.o was NOT rebuilt (caught by `tw info`
+# reporting the previous commit). We keep CPPPATH empty on purpose (see
+# pio_post.py), so declare the edge by hand.
+def _build_info_middleware(env, node):
+    obj = env.Object(
+        node,
+        TW_FILE_CFLAGS=[
+            f"-DFW_MAJOR={fw_major}", f"-DFW_MINOR={fw_minor}", "-iquote", build_dir
+        ],
+    )
+    env.Depends(obj, _header_path)
+    return obj
+
+
+env.AddBuildMiddleware(_build_info_middleware, "*/build_info.c")
