@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from tapewyrm.codec import gwstream
-from tapewyrm.tape.dump import TrackResult, check_pass, missing_segments
+from tapewyrm.tape.dump import TrackResult, check_pass, missing_segments, segment_pulses
 
 PERIOD = 51_000_000  # ~710 ms of 72 MHz ticks, one segment on the 350
 
@@ -28,6 +28,15 @@ def test_missing_segments_from_long_gaps():
     # +-4% jitter (the bench spread) is not a gap.
     jitter = [k * PERIOD + (PERIOD // 25 if k % 2 else 0) for k in range(10)]
     assert missing_segments(jitter) == 0
+
+
+def test_a_cue_pulse_at_the_start_is_not_a_segment():
+    clk = 72_000_000
+    leader = int(1.9 * clk)  # cue at t=0, then ~1.9 s of leader, then segments
+    ticks = [0] + [leader + k * PERIOD for k in range(10)]
+    segs = segment_pulses(ticks, clk)
+    assert len(segs) == 10 and missing_segments(segs) == 0
+    assert missing_segments(ticks) == 2  # what the cue used to cost
 
 
 GOOD = TrackResult(

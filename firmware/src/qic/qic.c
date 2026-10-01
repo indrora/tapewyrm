@@ -331,6 +331,7 @@ static struct {
     time_t armed_at;       /* when the capture was armed                      */
     time_t last_flux_at;   /* when flux_count last advanced                   */
     uint32_t seen_count;   /* flux_count at the last check                    */
+    bool_t segment_seen;   /* an INDEX after the cue holdoff: real data began */
 } qic_cap;
 
 /* A pass ends when the TAPE stops, never on a timer: Logical Forward runs to
@@ -352,6 +353,13 @@ static struct {
  * end the run instead of streaming long-gap filler forever. */
 #define QIC_IDLE_END_MS   1000u
 #define QIC_NO_START_MS  15000u
+/* A ready, selected drive pulses INDEX every ~3 ms as a "cue" (Rev J Fig. 1/6)
+ * until Logical Forward takes over, so one cue pulse can land in the first
+ * milliseconds of a capture (bench: jc track 12 had one at t = 0). Segments
+ * arrive ~700 ms apart and only after the leader, so an INDEX within this
+ * long of arming is a cue, not a segment, and doesn't count as one. It is still
+ * recorded in the stream like every other pulse. */
+#define QIC_CUE_HOLDOFF_MS  50u
 
 /* Append one raw byte into GW's u_buf[] ring (same cursor as rdata_encode_flux).
  * Marker bytes are NOT counted in the flux-data accounting (only flux is). */
@@ -494,7 +502,7 @@ static uint8_t qic_capture_check_motion(void)
         qic_cap.seen_count = qic_cap.flux_count;
         qic_cap.last_flux_at = time_now();
     }
-    if (qic_cap.seg_index == 0) {
+    if (!qic_cap.segment_seen) {
         /* No segment found yet: only the no-start watchdog can end the run.
          * Checked even while stray transitions trickle in, so noise without
          * segments can't keep a refused or blank pass alive forever. */
@@ -517,6 +525,8 @@ static void qic_capture_on_index(uint32_t ticks)
         return;
     qic_cap.seg_index++;
     qic_mark_segment(ticks, qic_cap.seg_index);
+    if (time_since(qic_cap.armed_at) >= (int32_t)time_ms(QIC_CUE_HOLDOFF_MS))
+        qic_cap.segment_seen = TRUE;
 }
 
 /* Arm a capture: reset accounting and drive GW's flux read with NO limits
@@ -543,6 +553,7 @@ static uint8_t qic_capture_arm(void)
     qic_cap.need_session_start = TRUE;
     qic_cap.armed_at = qic_cap.last_flux_at = time_now();
     qic_cap.seen_count = 0;
+    qic_cap.segment_seen = FALSE;
     qic_cap.active = TRUE;
 
     return floppy_read_prep(&rf);

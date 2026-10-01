@@ -75,6 +75,19 @@ MIN_INDEX_FRACTION = 0.90
 MAX_MISSING_FRACTION = 0.05
 # An INDEX gap this many times the pass's median gap hides missed segments.
 LONG_GAP_FACTOR = 1.5
+# A ready drive pulses INDEX every ~3 ms as a "cue" until Logical Forward takes
+# over, so one can land at the very start of a capture (jc track 12: t = 0).
+# Segments come ~700 ms apart and only after the leader, so pulses this early
+# are cues, not segments. Same holdoff as the firmware's QIC_CUE_HOLDOFF_MS.
+CUE_HOLDOFF_S = 0.050
+
+
+def segment_pulses(index_ticks: list[int], sample_clock_hz: int) -> list[int]:
+    """The INDEX pulses that mark segments: all but cue pulses at the start."""
+    holdoff = CUE_HOLDOFF_S * sample_clock_hz
+    return [t for t in index_ticks if t >= holdoff]
+
+
 CAPTURE_SUFFIX = ".twrf"
 
 
@@ -304,6 +317,7 @@ def dump_tracks(
         log(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
         hdr_read, flux_at = read_header(path)
         ps = gwstream.parse(path.read_bytes()[flux_at:])
+        segments_at = segment_pulses(ps.index_ticks, ps.sample_clock_hz)
         res = TrackResult(
             track=track,
             path=str(path),
@@ -312,8 +326,8 @@ def dump_tracks(
             end_reason=EndReason(ps.end.reason).name if ps.end else "none",
             verified=ps.verified,
             tape_seconds=round(ps.duration_s, 1),
-            index_pulses=len(ps.index_ticks),
-            missing_est=missing_segments(ps.index_ticks),
+            index_pulses=len(segments_at),
+            missing_est=missing_segments(segments_at),
             status_after=st.raw,
             error_after=err,
         )
