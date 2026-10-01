@@ -83,5 +83,8 @@ def test_vendor_specific_vtbl_entry():
     assert e.description == "Files from Disk1_vol1 (C:)"  # starts at offset 8
     assert decode_short_date(e.date) == (1998, 12, 23, 2, 19, 27)
     assert e.flags == 0x25 and e.vendor_specific and e.directory_last
-    # Vendor-specific: Rev N defines nothing past byte 56.
-    assert e.os_type is None and e.compressed is None and e.dir_section_size is None
+    # Vendor-specific, but 58/59 = 113, 60/61 = 6: a QIC-113 Rev F volume, so
+    # bytes 84-127 follow QIC-113 section 6.
+    assert e.raw[58:62] == bytes([113, 0, 6, 0])
+    assert e.os_type == 6  # DOS extended format (long file names)
+    assert e.compressed is True and e.compression_code == 1  # QIC-122

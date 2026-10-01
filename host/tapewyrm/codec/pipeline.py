@@ -69,6 +69,17 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
         return [], report
     vol, bsm = volume_mod.parse_header(header_seg)
     report.expected_bad = len(bsm.bad_segments) + len(bsm.bad_lsns)
+
+    # The header (segment 0, side 0) places correctly under any geometry; every
+    # other sector needs the header's: floppy tracks per side = max_ftk + 1
+    # (150 on the bench tape, not Rev N's 255). Re-place with it.
+    if vol.segments_per_track:
+        geom = Geometry(
+            tracks=vol.tracks or geom.tracks,
+            segments_per_track=vol.segments_per_track,
+            ftk_per_side=vol.max_ftk + 1 if vol.max_ftk else geom.ftk_per_side,
+        )
+        segs = place.place(merged, geom)
     volume_mod.apply_bsm(segs, bsm)
 
     # 4. RS erasure-decode each segment; record per-segment status.
@@ -80,13 +91,6 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
         if result.status is SegmentStatus.UNCORRECTABLE:
             report.unexpected_bad += 1
             report.recapture.append(key)
-
-    # If the header reported real geometry, rebuild segment->abs mapping with it.
-    if vol.segments_per_track:
-        geom = Geometry(
-            tracks=vol.tracks or geom.tracks,
-            segments_per_track=vol.segments_per_track,
-        )
 
     # 5. Per-file-set Volume Data Area byte streams.
     streams = volume_mod.volume_streams(segs, vol, bsm)

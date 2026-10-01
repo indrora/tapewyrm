@@ -334,7 +334,10 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
     if len(raw) >= 62 and (vtbl.flags & 0x01):
         ext1 = int.from_bytes(raw[58:60], "little")
         ext2 = int.from_bytes(raw[60:62], "little")
-        if ext1 == 113 and ext2 == 7:
+        # 58/59 = 113 marks QIC-113; 60/61 is its revision (QIC-113 Rev G
+        # section 6: F = 6, G = 7). Any revision counts -- this used to demand
+        # exactly 7 and so misread the bench tape's Rev F volume as Basic DOS.
+        if ext1 == 113 and ext2 >= 1:
             return True
     if len(raw) >= 126 and raw[125] == 1:
         return False  # explicit Basic-DOS

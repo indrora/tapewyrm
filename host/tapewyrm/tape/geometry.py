@@ -12,6 +12,15 @@ are stated as fact from QIC-80-MC Rev N:
 Ranges: 1 <= FSC <= 128, 0 <= FTK <= 254, FSD length-dependent.
 (FSD,FTK,FSC) = (0,0,1) => tape track 0, segment 0.
 128 sectors = 1 floppy track = 4 segments; 1020 segments = 1 floppy side.
+
+Those constants are Rev N's, which only covers format code 4, where the header
+records "maximum floppy track = 254". The general rule is
+``floppy tracks per side = header max_ftk + 1``: the bench tape (format code 5,
+fixed format) records max_ftk = 149, i.e. 150 tracks = 600 segments per side.
+With the 1020 constant every sector on side >= 1 landed in the wrong segment
+(874 of 2629 volume segments "missing"). 5796 segments over max side 9 = 10
+sides of 600 fits; with 1020 the tape would need only 6. So every function here
+takes ``ftk_per_side`` (default 255, Rev N) and :class:`Geometry` carries it.
 """
 
 from __future__ import annotations
@@ -32,14 +41,17 @@ SECTORS_PER_FSD = 32640
 # ---------------------------------------------------------------------------
 
 
-def coord_to_lsn(fsd: int, ftk: int, fsc: int) -> int:
+FTK_PER_SIDE = 255  # Rev N (format code 4); else header max_ftk + 1
+
+
+def coord_to_lsn(fsd: int, ftk: int, fsc: int, ftk_per_side: int = FTK_PER_SIDE) -> int:
     """(FSD, FTK, FSC) -> logical sector number."""
-    return SECTORS_PER_FSD * fsd + SECTORS_PER_FTK * ftk + (fsc - 1)
+    return SECTORS_PER_FTK * (ftk_per_side * fsd + ftk) + (fsc - 1)
 
 
-def coord_to_seg(fsd: int, ftk: int, fsc: int) -> int:
+def coord_to_seg(fsd: int, ftk: int, fsc: int, ftk_per_side: int = FTK_PER_SIDE) -> int:
     """(FSD, FTK, FSC) -> absolute logical segment."""
-    return SEGMENTS_PER_FSD * fsd + SEGMENTS_PER_FTK * ftk + (fsc - 1) // SECTORS_PER_SEGMENT
+    return SEGMENTS_PER_FTK * (ftk_per_side * fsd + ftk) + (fsc - 1) // SECTORS_PER_SEGMENT
 
 
 def sector_in_segment(fsc: int) -> int:
@@ -47,10 +59,11 @@ def sector_in_segment(fsc: int) -> int:
     return (fsc - 1) % SECTORS_PER_SEGMENT
 
 
-def seg_to_coord(seg: int) -> tuple[int, int, int]:
+def seg_to_coord(seg: int, ftk_per_side: int = FTK_PER_SIDE) -> tuple[int, int, int]:
     """Absolute segment -> (FSD, FTK, FSC0) where FSC0 is the segment's first FSC."""
-    fsd = seg // SEGMENTS_PER_FSD
-    ftk = (seg % SEGMENTS_PER_FSD) // SEGMENTS_PER_FTK
+    per_side = SEGMENTS_PER_FTK * ftk_per_side
+    fsd = seg // per_side
+    ftk = (seg % per_side) // SEGMENTS_PER_FTK
     fsc0 = (seg % SEGMENTS_PER_FTK) * SECTORS_PER_SEGMENT + 1
     return fsd, ftk, fsc0
 
@@ -86,6 +99,7 @@ class Geometry:
     tracks: int
     segments_per_track: int
     sectors_per_segment: int = SECTORS_PER_SEGMENT
+    ftk_per_side: int = FTK_PER_SIDE  # header max_ftk + 1 (see module docstring)
 
     @classmethod
     def for_format(
@@ -126,7 +140,7 @@ class Geometry:
         The single self-locating step that lets capture order be irrelevant
         (DESIGN.md §2.3).
         """
-        seg = coord_to_seg(fsd, ftk, fsc)
+        seg = coord_to_seg(fsd, ftk, fsc, self.ftk_per_side)
         tpt, tps = self.seg_to_tpt_tps(seg)
         return seg, tpt, tps, sector_in_segment(fsc)
 

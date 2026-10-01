@@ -213,6 +213,10 @@ def parse_header(seg: Segment) -> tuple[VolumeInfo, BadSectorMap]:
 # format date as two "bad sectors" on the bench tape.)
 BSM_OFFSET = 256
 
+# QIC-113 Rev G section 6: a QIC-113 extended-OS volume on a QIC-40/80 tape sets
+# the vendor-specific bit and writes 113 / <revision> at VTBL offsets 58 / 60.
+QIC113_SIGNATURE = 113
+
 # Fixed formats (codes 2, 3, 5 -- QIC-80-MC Rev K, not in our Rev N): the map is
 # a 32-bit little-endian mask per segment starting at offset 2048 (sector 2),
 # bit k = sector k of that segment is excluded. NOT taken from a spec: verified
@@ -341,8 +345,14 @@ def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
         dir_section_size=None,
         raw=rec,
     )
-    if flags & 0x01:  # vendor specific: nothing past byte 56 is defined
+    if flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:
+        # Vendor specific and NOT a QIC-113 volume: per QIC-80 Rev N nothing
+        # past byte 56 is defined.
         return entry
+    # Either a plain QIC-80 entry, or a vendor-specific one carrying the QIC-113
+    # signature (58/59 = 113, 60/61 = QIC-113 revision: F = 6, G = 7), whose
+    # bytes 84-127 QIC-113 Rev G section 6 defines with the same layout. The
+    # bench tape is the latter (113, 6: QIC-113 Rev F, DOS extended format).
     return replace(
         entry,
         os_type=rec[125],
