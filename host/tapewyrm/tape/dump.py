@@ -1,10 +1,17 @@
-"""Dump whole tape tracks to raw capture files, gently.
+"""`tw dump`: whole tape tracks -> TWRF captures, gently.
 
-One Logical Forward pass per track, streamed straight to disk as the device
-sends it (``track-NN.raw``: the verbatim Tapewyrm/GW stream, decode later with
-``tapewyrm.codec.gwstream``). The firmware ends each pass by itself when the
-tape stops at logical EOT (no flux for 1 s), so nothing here depends on Stop
-Tape, which the bench drive ignored during Logical Forward.
+Step one of ``tw dump -> tw convert -> tw extract``. One Logical Forward pass
+per track, streamed straight to disk as a TWRF container (``track-NN.twrf``:
+:mod:`tapewyrm.rawflux.container`). Its header records everything needed to
+decode the flux later without guessing -- above all the bit rate, taken from
+Report Drive Configuration (the rate the drive uses for Logical Forward with
+this cartridge, QIC-117 Rev J (8)) -- plus the drive's raw status,
+configuration, ROM, vendor ID and tape status bytes and the tw/firmware
+commits that produced it.
+
+The firmware ends each pass by itself when the tape stops at logical EOT (no
+flux for 1 s), so nothing here depends on Stop Tape, which the bench drive
+ignored during Logical Forward.
 
 QIC-80 is serpentine: even tracks run toward physical EOT, odd tracks back
 toward BOT, so track N+1 starts where track N ended and a sequential dump never
@@ -18,18 +25,22 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tapewyrm.codec import gwstream, mfm
+from tapewyrm.link.device import LinkError
 from tapewyrm.link.protocol import EndReason
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
-from tapewyrm.types import StopCond
+from tapewyrm.rawflux.container import read_header, write_preamble
+from tapewyrm.types import CaptureHeader, Direction, DriveConfig, StopCond, TapeFormat, TapeStatus
 
 # A track whose decodable sectors are less than this fraction CRC-clean stops
 # the dump: something (head, tape, PLL) has degraded and we want a human first.
 MIN_GOOD_FRACTION = 0.80
+CAPTURE_SUFFIX = ".twrf"
 
 
 class DumpStopped(Exception):
@@ -56,9 +67,56 @@ class TrackResult:
         return self.good / self.sectors if self.sectors else 0.0
 
 
-def summarize(path: Path, rate_kbps: int) -> tuple[gwstream.ParsedStream, list]:
-    ps = gwstream.parse(path.read_bytes())
-    return ps, mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, rate_kbps)
+def _report(drive: Qic117Drive, name: str, bits: int) -> int | None:
+    """One raw report byte/word, or None if this drive doesn't implement it."""
+    try:
+        return drive.report(commands.TABLE[name], bits)
+    except LinkError:
+        drive.status()  # clear whatever the unsupported command latched
+        return None
+
+
+def drive_identity(drive: Qic117Drive) -> CaptureHeader:
+    """A header template carrying the drive's reports, rate and provenance.
+
+    Track/direction/time are filled in per pass by :func:`dump_tracks`.
+    """
+    from tapewyrm.buildinfo import host_build
+
+    status = drive.status().raw
+    config = _report(drive, "REPORT_DRIVE_CONFIGURATION", 8)
+    tape = _report(drive, "REPORT_TAPE_STATUS", 8)
+    rate = DriveConfig.decode(config).rate_kbps if config is not None else 500
+    fmt = TapeStatus.decode(tape).format if tape is not None else TapeFormat.UNKNOWN
+    if fmt is TapeFormat.UNKNOWN and config is not None and DriveConfig.decode(config).qic80_mode:
+        fmt = TapeFormat.QIC80  # Rev J Note 4
+    info = drive.link.info
+    fw = drive.link.build_info() if info is not None and info.proto_ver else None
+    return CaptureHeader(
+        rate_kbps=rate,
+        sample_clock_hz=(info.sample_clock_hz if info and info.sample_clock_hz else 72_000_000),
+        track=0,
+        direction=Direction.FORWARD,
+        pass_id=1,
+        utc="",
+        tape_format=fmt,
+        device_serial=info.serial if info else "",
+        drive_status=status,
+        drive_config=config,
+        drive_rom=_report(drive, "REPORT_ROM_VERSION", 8),
+        drive_vendor_id=_report(drive, "REPORT_VENDOR_ID", 16),
+        tape_status=tape,
+        tw_commit=host_build().commit,
+        firmware_commit=fw.commit if fw else None,
+        firmware_dirty=fw.dirty if fw else None,
+    )
+
+
+def summarize(path: Path) -> tuple[CaptureHeader, gwstream.ParsedStream, list]:
+    """Decode a TWRF capture with its own rate and clock (no assumptions)."""
+    hdr, flux_at = read_header(path)
+    ps = gwstream.parse(path.read_bytes()[flux_at:])
+    return hdr, ps, mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, hdr.rate_kbps)
 
 
 def dump_tracks(
@@ -66,14 +124,19 @@ def dump_tracks(
     tracks: Iterable[int],
     out_dir: Path,
     *,
-    rate_kbps: int = 500,
     log: Callable[[str], None] = print,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble."""
     from tapewyrm.qic117.status import error_name
+    from tapewyrm.tape.geometry import coord_to_seg
 
     link = drive.link
     out_dir.mkdir(parents=True, exist_ok=True)
+    template = drive_identity(drive)
+    log(
+        f"drive: config 0x{template.drive_config or 0:02x} -> {template.rate_kbps} kbps, "
+        f"tape {template.tape_format.name}; writing TWRF to {out_dir}"
+    )
     results: list[TrackResult] = []
     for track in tracks:
         st = drive.status()
@@ -84,19 +147,27 @@ def dump_tracks(
             )
         drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
 
-        path = out_dir / f"track-{track:02d}.raw"
+        path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
+        hdr = replace(
+            template,
+            track=track,
+            direction=Direction.for_track(track),
+            utc=datetime.now(UTC).isoformat(timespec="seconds"),
+            drive_status=st.raw,
+        )
         log(f"track {track:2d}: capturing -> {path}")
         t0 = time.monotonic()
         cap = link.capture(
             commands.LOGICAL_FORWARD.code,
             StopCond(byte_budget=0),  # the tape ends the pass, not a budget
-            rate=rate_kbps,
+            rate=hdr.rate_kbps,
             tpt=track,
             direction=track & 1,
-            pass_id=1,
+            pass_id=hdr.pass_id,
         )
         nbytes = 0
         with path.open("wb") as f:
+            write_preamble(f, hdr)
             for chunk in cap.chunks():
                 f.write(chunk)
                 nbytes += len(chunk)
@@ -107,9 +178,7 @@ def dump_tracks(
         err = drive.last_error.code if (st.error and drive.last_error) else None
 
         log(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; decoding...")
-        ps, sectors = summarize(path, rate_kbps)
-        from tapewyrm.tape.geometry import coord_to_seg
-
+        _, ps, sectors = summarize(path)
         res = TrackResult(
             track=track,
             path=str(path),

@@ -284,9 +284,9 @@ class DeviceLink:
 
         # Our verb. Stock firmware -> BAD_COMMAND -> proto_ver 0 -> gate refuses.
         ack, body = self._exchange(int(Txn.INFO), b"", _QIC_INFO.size)
-        proto_ver, caps_mask, sram_bytes = 0, 0, 0
+        proto_ver, caps_mask, sram_bytes, sample_hz = 0, 0, 0, 0
         if ack == ACK_OKAY:
-            proto_ver, caps_mask, sram_bytes, _ = _QIC_INFO.unpack(body)
+            proto_ver, caps_mask, sram_bytes, sample_hz = _QIC_INFO.unpack(body)
         caps = frozenset(name for bit, name in _CAP_BITS.items() if caps_mask >> bit & 1)
 
         return DeviceInfo(
@@ -298,6 +298,7 @@ class DeviceLink:
             sram_bytes=sram_bytes,
             qic_caps=caps,
             proto_ver=proto_ver,
+            sample_clock_hz=sample_hz,
         )
 
     @staticmethod

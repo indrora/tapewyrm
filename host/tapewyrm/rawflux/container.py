@@ -40,12 +40,19 @@ import json
 import struct
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import BinaryIO
 
 from tapewyrm.link import protocol
 from tapewyrm.types import CaptureHeader, Direction, Marker, MarkerKind, TapeFormat
 
 MAGIC = b"TWRF"
-FORMAT_VERSION = 1
+# v2 (2026-10-01): the header gains the drive's raw QIC-117 report bytes
+# (status, configuration -- hence the bit rate --, ROM, vendor ID, tape status)
+# and the tw/firmware commits. All new fields are optional, so v1 files load
+# with them as None; the on-disk layout is otherwise unchanged.
+FORMAT_VERSION = 2
+READABLE_VERSIONS = (1, 2)
+_PREAMBLE = struct.Struct("<4sHI")  # magic, version, header length
 ESC = 0xFF  # TODO(bench): reconcile with GW opcode-escape byte (§13.6 item 1)
 
 # protocol.Marker (on-wire 0xF0..) <-> types.MarkerKind (semantic 0..4)
@@ -207,33 +214,55 @@ class RawFluxCapture:
     # --- persistence ---
 
     def _header_dict(self) -> dict:
-        d = dataclasses.asdict(self.header)
-        d["direction"] = self.header.direction.value
-        d["tape_format"] = int(self.header.tape_format)
-        return d
+        return header_to_dict(self.header)
 
     def save(self, path: str | Path) -> None:
-        hdr_json = json.dumps(self._header_dict(), separators=(",", ":")).encode("utf-8")
         with Path(path).open("wb") as f:
-            f.write(MAGIC)
-            f.write(struct.pack("<H", FORMAT_VERSION))
-            f.write(struct.pack("<I", len(hdr_json)))
-            f.write(hdr_json)
+            write_preamble(f, self.header)
             f.write(self.flux)
 
     @classmethod
     def load(cls, path: str | Path) -> RawFluxCapture:
         with Path(path).open("rb") as f:
-            blob = f.read()
-        if blob[:4] != MAGIC:
-            raise ValueError(f"not a RawFluxCapture file (bad magic): {path}")
-        (version,) = struct.unpack_from("<H", blob, 4)
-        if version != FORMAT_VERSION:
-            raise ValueError(f"unsupported RawFluxCapture version {version}")
-        (hlen,) = struct.unpack_from("<I", blob, 6)
-        hdr_json = blob[10 : 10 + hlen]
-        flux = blob[10 + hlen :]
-        d = json.loads(hdr_json)
-        d["direction"] = Direction(d["direction"])
-        d["tape_format"] = TapeFormat(d["tape_format"])
-        return cls(header=CaptureHeader(**d), flux=flux)
+            hdr, _ = _read_header(f, str(path))
+            flux = f.read()
+        return cls(header=hdr, flux=flux)
+
+
+def header_to_dict(hdr: CaptureHeader) -> dict:
+    d = dataclasses.asdict(hdr)
+    d["direction"] = hdr.direction.value
+    d["tape_format"] = int(hdr.tape_format)
+    return d
+
+
+def write_preamble(f: BinaryIO, hdr: CaptureHeader) -> int:
+    """Write magic + version + header; return the byte offset where flux starts.
+
+    Lets a capture stream straight to disk: the header is known before the pass
+    starts, then flux chunks are appended as the device sends them.
+    """
+    hdr_json = json.dumps(header_to_dict(hdr), separators=(",", ":")).encode("utf-8")
+    f.write(_PREAMBLE.pack(MAGIC, FORMAT_VERSION, len(hdr_json)))
+    f.write(hdr_json)
+    return _PREAMBLE.size + len(hdr_json)
+
+
+def _read_header(f: BinaryIO, name: str) -> tuple[CaptureHeader, int]:
+    pre = f.read(_PREAMBLE.size)
+    if len(pre) < _PREAMBLE.size or pre[:4] != MAGIC:
+        raise ValueError(f"not a RawFluxCapture file (bad magic): {name}")
+    _, version, hlen = _PREAMBLE.unpack(pre)
+    if version not in READABLE_VERSIONS:
+        raise ValueError(f"unsupported RawFluxCapture version {version}: {name}")
+    d = json.loads(f.read(hlen))
+    d["direction"] = Direction(d["direction"])
+    d["tape_format"] = TapeFormat(d["tape_format"])
+    known = {fl.name for fl in dataclasses.fields(CaptureHeader)}
+    return CaptureHeader(**{k: v for k, v in d.items() if k in known}), _PREAMBLE.size + hlen
+
+
+def read_header(path: str | Path) -> tuple[CaptureHeader, int]:
+    """Just the header (and where the flux starts) -- cheap on a 60 MB capture."""
+    with Path(path).open("rb") as f:
+        return _read_header(f, str(path))

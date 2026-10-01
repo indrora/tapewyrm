@@ -19,6 +19,7 @@ from pathlib import Path
 from tapewyrm.codec import gwstream, mfm, place, qic122
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.codec import volume as volume_mod
+from tapewyrm.rawflux.container import read_header
 from tapewyrm.tape.geometry import Geometry
 from tapewyrm.types import RawSector, SegmentStatus
 
@@ -72,18 +73,36 @@ class RecoveredVolume:
     corrected_segments: int
 
 
+# Bare device streams from before TWRF (2026-10-01) carry no header: they
+# were all captured from a QIC-80 cartridge at 500 kbit/s.
+LEGACY_RAW_RATE_KBPS = 500
+
+
+def _capture_flux(path: Path) -> tuple[bytes, int]:
+    """(flux bytes, bit rate) of a TWRF capture or a legacy bare ``.raw``."""
+    blob = path.read_bytes()
+    if path.suffix == ".twrf":
+        hdr, flux_at = read_header(path)
+        return blob[flux_at:], hdr.rate_kbps
+    return blob, LEGACY_RAW_RATE_KBPS
+
+
 def load_sectors(dump_dir: Path, log: Callable[[str], None] = print) -> list[RawSector]:
-    """Decode every track capture to sectors (cached in ``sectors.pkl``)."""
+    """Decode every track capture to sectors (cached in ``sectors.pkl``).
+
+    Each TWRF capture is decoded at the bit rate recorded in its own header.
+    """
     cache = dump_dir / SECTOR_CACHE
-    tracks = sorted(dump_dir.glob("track-*.raw"))
+    tracks = sorted(dump_dir.glob("track-*.twrf")) or sorted(dump_dir.glob("track-*.raw"))
     if cache.exists() and all(cache.stat().st_mtime >= t.stat().st_mtime for t in tracks):
         sectors: list[RawSector] = pickle.loads(cache.read_bytes())
         return sectors
     sectors = []
     for t in tracks:
-        ps = gwstream.parse(t.read_bytes())
-        got = mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, 500)
-        log(f"{t.name}: {len(got)} sectors")
+        flux, rate = _capture_flux(t)
+        ps = gwstream.parse(flux)
+        got = mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, rate)
+        log(f"{t.name}: {len(got)} sectors at {rate} kbps")
         sectors += got
     cache.write_bytes(pickle.dumps(sectors))
     return sectors

@@ -5,7 +5,7 @@ A single ``@click.group()`` named ``cli`` with shared ``--port`` / ``--profile``
 each mapping to a layer:
 
     info     host + firmware build identity, board, port and USB serial
-    dump     capture whole tracks to raw files (Logical Forward, tape-terminated)
+    dump     capture whole tracks to TWRF files (Logical Forward, tape-terminated)
     probe    open device, wake, identify; print config / tape status / geometry
     drive    poke the drive by hand: status, reports, motion, scope (read-only)
     capture  sweep tracks -> write RawFluxCapture files
