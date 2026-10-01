@@ -93,6 +93,9 @@ static struct qic_timing qic_timing = {
  * report_bits, and the engine knows REPORT_NEXT_BIT advances one bit. */
 #define QIC_CMD_REPORT_NEXT_BIT_PULSES 2u
 
+/* Max cue INDEX interval, QIC-117 Rev J Table 1 T_INX (2 / 4 / 12 ms). */
+#define QIC_TINX_MAX_US 12000u
+
 /* QIC-117 motion command numbers the firmware must know BY NAME so the safe-stop
  * path can halt the tape itself on a dead-man trigger (host gone). Everything
  * else is verbatim from the host (§4.1 decision 2). */
@@ -168,9 +171,16 @@ static bool_t qic_sample_report_bit(bool_t *timed_out)
 {
     *timed_out = FALSE;
     if (qic_timing.report_on_index) {
+        /* Rev J §1.3: while a report bit is presented the drive emits cue
+         * INDEX pulses, the first within T_INXON (2.5 ms, our tack_us) and then
+         * every T_INX (<= 12 ms). Our pulse train already ended with the 3 ms
+         * terminating gap, so a cue may have come and gone: wait up to
+         * T_INXON + one full max T_INX for the next one. (This used to be
+         * bounded by T_BIT = 900 us, which a 2-12 ms cue cannot meet.) */
+        uint32_t window_us = (uint32_t)qic_timing.tack_us + QIC_TINX_MAX_US;
         time_t start = time_now();
         while (get_index() != LOW) { /* INDEX active == LOW (open-collector) */
-            if (time_since(start) >= (int32_t)time_us(qic_timing.tbit_us)) {
+            if (time_since(start) >= (int32_t)time_us(window_us)) {
                 *timed_out = TRUE;
                 break;
             }
@@ -237,6 +247,14 @@ static void qic_report(uint8_t report_bits, struct qic_report *out)
         out->final_ok = timed_out ? FALSE : fin;
         out->timed_out = out->timed_out || timed_out;
     }
+
+    /* Rev J §1.4.2: after the Final bit the report subcontext is over, but
+     * TRACK ZERO stays asserted and cue INDEX pulses keep coming "until
+     * another command is received". One more Report Next Bit is ignored
+     * outside the subcontext but clears both -- and the spec calls this out as
+     * important for reports made during Logical Forward, where stray cue
+     * INDEX pulses would be mistaken for segment marks in the flux stream. */
+    qic_pulses(QIC_CMD_REPORT_NEXT_BIT_PULSES);
 }
 
 /* Poll the ready/INDEX line until ready or `timeout_ms` elapses. Motion ops run

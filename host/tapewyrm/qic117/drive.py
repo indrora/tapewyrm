@@ -131,8 +131,9 @@ class Qic117Drive:
 
         Physical motion only reports Ready when it reaches an end of tape, so it
         cannot go through ``command()`` (that would wait up to 650 s). Instead
-        we poll status, stop early if the drive goes Ready (hit BOT/EOT) or
-        latches an error, and ALWAYS send Stop Tape on the way out -- including
+        we poll status, stop early if the drive goes Ready (it hit BOT/EOT or
+        stopped on an error; the error bit itself means nothing until Ready),
+        and ALWAYS send Stop Tape on the way out -- including
         on Ctrl-C or a link error -- so the tape is never left running.
         Returns the status after the stop.
         """
@@ -146,7 +147,7 @@ class Qic117Drive:
             while time.monotonic() < deadline:
                 time.sleep(poll_s)
                 st = self.status()
-                if st.ready or st.error:
+                if st.ready:  # hit BOT/EOT (or stopped on an error -- only valid when ready)
                     break
         finally:
             stopped = self.command(commands.STOP_TAPE)
@@ -184,10 +185,17 @@ class Qic117Drive:
     # --- status / error ---
 
     def status(self) -> DriveStatus:
-        """Report Drive Status (cmd 6); read+clear error on new-cartridge/error."""
+        """Report Drive Status (cmd 6); read+clear error on new-cartridge/error.
+
+        Only while Ready: Rev J says the Error Detected bit "is not valid unless
+        the Drive Ready bit is asserted", the error code is "undefined unless
+        Error Detected and Drive Ready", and Report Error Code clears the latch
+        only "after the drive indicates ready". Mid-motion we just return the
+        status and let the next Ready poll clear it.
+        """
         b = self.report(commands.REPORT_DRIVE_STATUS, 8)
         st = DriveStatus.decode(b)
-        if st.new_cartridge or st.error:
+        if st.ready and (st.new_cartridge or st.error):
             # Both cleared via Report Error Code (errors latch — DESIGN.md §6A.3).
             w = self.report(commands.REPORT_ERROR_CODE, 16)
             code = w & 0xFF
@@ -227,7 +235,17 @@ class Qic117Drive:
         family are bench-characterized; the profiles ship nominal placeholders.
         """
         import time
+        from dataclasses import replace
 
+        # Push the profile's pulse/report timing first: until now nothing ever
+        # called set_timing(), so the firmware always ran its compiled-in
+        # defaults and profile timings were dead configuration.
+        self.link.set_timing(
+            replace(
+                self.profile.timing,
+                report_on_index=self.profile.report_strategy == "index_edge",
+            )
+        )
         for name, arg, delay_ms in self.profile.wake_sequence:
             cmd = self._lookup(name)
             self.command(cmd, arg=arg)

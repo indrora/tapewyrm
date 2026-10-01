@@ -10,7 +10,7 @@ TOML schema (all keys optional except ``name``)::
 
     name = "colorado"
     bit_order = "lsb"            # "msb" | "lsb"
-    report_strategy = "index_edge"   # "index_edge" | "fixed_settle"
+    report_strategy = "fixed_settle"   # "fixed_settle" | "index_edge"
     quirks = ["slow_wake"]
 
     [timing]
@@ -110,6 +110,6 @@ def load_profile(name_or_path: str) -> DriveProfile:
         wake_sequence=wake,
         timing=timing,
         bit_order=str(data.get("bit_order", "lsb")),
-        report_strategy=str(data.get("report_strategy", "index_edge")),
+        report_strategy=str(data.get("report_strategy", "fixed_settle")),
         quirks=frozenset(str(q) for q in quirks),
     )

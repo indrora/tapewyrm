@@ -9,7 +9,7 @@
 
 name = "iomega"
 bit_order = "lsb"
-report_strategy = "index_edge"
+report_strategy = "fixed_settle"  # index_edge untested on hardware
 quirks = []                 # TODO(bench): Ditto generations differ; record here
 
 [timing]

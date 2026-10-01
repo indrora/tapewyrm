@@ -50,8 +50,9 @@ class Cmd:
     # Max execution time to Ready, seconds (QIC-117 Rev J Table 2d: worst case
     # over every tape length/speed). None = no Ready event (instant/ACK-only).
     timeout_s: float | None = None
-    # Puts flux on the tape (or arms the drive to). Qic117Drive refuses these
-    # unless constructed with allow_writes=True: this project RECOVERS tapes.
+    # Puts flux on the tape, arms the drive to, or (diag modes) may do anything
+    # at all. Qic117Drive refuses these unless constructed with
+    # allow_writes=True: this project RECOVERS tapes.
     writes: bool = False
 
 
@@ -61,8 +62,8 @@ class Cmd:
 # ---------------------------------------------------------------------------
 
 _CMDS: tuple[Cmd, ...] = (
-    Cmd(1, Kind.RESET, True, "soft reset", timeout_s=460),
-    Cmd(2, Kind.INTERNAL, True, "report next bit"),
+    Cmd(1, Kind.RESET, False, "soft reset", timeout_s=460),
+    Cmd(2, Kind.INTERNAL, False, "report next bit"),
     Cmd(3, Kind.MOTION, True, "pause", timeout_s=16),
     Cmd(4, Kind.MOTION, True, "micro step pause", timeout_s=16),
     Cmd(5, Kind.CONFIG, False, "alternate command time-out"),
@@ -80,15 +81,19 @@ _CMDS: tuple[Cmd, ...] = (
     Cmd(17, Kind.MODE, False, "enter verify mode"),
     Cmd(18, Kind.MOTION, True, "stop tape", timeout_s=8),
     # 19-20 reserved.
-    Cmd(21, Kind.MOTION, True, "micro step head up", timeout_s=0.2),
-    Cmd(22, Kind.MOTION, True, "micro step head down", timeout_s=0.2),
+    # 21/22 are not (n) in Rev J Table 2a; they are ILLEGAL in Format,
+    # Non-interruptible and High Speed modes instead.
+    Cmd(21, Kind.MOTION, False, "micro step head up", timeout_s=0.2),
+    Cmd(22, Kind.MOTION, False, "micro step head down", timeout_s=0.2),
     Cmd(23, Kind.SELECT, False, "soft select", takes_arg=True),  # literal 20 pulses
     Cmd(24, Kind.SELECT, False, "soft deselect"),
     Cmd(25, Kind.MOTION, True, "skip n segs reverse", takes_arg=True, timeout_s=650),
     Cmd(26, Kind.MOTION, True, "skip n segs forward", takes_arg=True, timeout_s=650),
     Cmd(27, Kind.CONFIG, False, "select rate or format", takes_arg=True),
-    Cmd(28, Kind.MODE, False, "enter diag mode 1", takes_arg=True),  # sent twice
-    Cmd(29, Kind.MODE, False, "enter diag mode 2", takes_arg=True),  # sent twice
+    # Diagnostic modes are "manufacturer dependent" (Rev J p.17): the drive could
+    # do anything in them, so the drive layer refuses them like a write.
+    Cmd(28, Kind.MODE, False, "enter diag mode 1", takes_arg=True, writes=True),  # sent twice
+    Cmd(29, Kind.MODE, False, "enter diag mode 2", takes_arg=True, writes=True),  # sent twice
     Cmd(30, Kind.MODE, False, "enter primary mode"),
     Cmd(31, Kind.INTERNAL, False, "vendor unique 31"),  # vendor-unique
     Cmd(32, Kind.REPORT, False, "report vendor id"),
@@ -142,9 +147,16 @@ SOFT_SELECT_PULSES = 20
 # ---------------------------------------------------------------------------
 
 
+# Rev J §1.4.3: "An argument is a pulse train limited to a maximum of a 6 bit
+# numeric value." Out-of-range arguments are silently IGNORED by the drive
+# (Rev J p.20), which would leave it waiting in the argument subcontext -- so we
+# refuse them here instead.
+MAX_ARG = 63
+
+
 def _plus2(value: int) -> int:
-    if value < 0:
-        raise ValueError(f"negative argument cannot be encoded: {value}")
+    if not 0 <= value <= MAX_ARG:
+        raise ValueError(f"argument {value} outside the 6-bit range 0..{MAX_ARG}")
     return value + 2
 
 
@@ -158,7 +170,13 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
     * Skip N Segs Reverse/Forward (25/26): two nibble trains ``(N&15)+2, (N>>4)+2``.
     * Skip N Ext Reverse/Forward (34/35): three nibble trains, each ``nibble+2``.
     * Set N Format Segments (38): three nibble trains, each ``nibble+2``.
+    * Enter Diag Mode 1/2 (28/29): the command code sent a second time (Rev J
+      Table 2b "command entered twice"), not N+2; ``value`` is ignored.
     * Anything else taking an arg (e.g. 27 rate/format, 46 unit): one ``value+2`` train.
+
+    Raises ``ValueError`` for values the drive would ignore: > 63 for a single
+    train (6-bit limit), > 255 for Skip N (two nibbles), > 4095 for the
+    three-nibble forms.
     """
     if cmd.code == SOFT_SELECT.code:
         # Literal 20 pulses, regardless of value.
@@ -168,9 +186,17 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
     if value < 0:
         raise ValueError(f"negative argument for {cmd.name!r}: {value}")
 
-    # Two-nibble forms (8-bit value, low nibble then high nibble).
+    # Diagnostic modes: the command is simply repeated.
+    if cmd.code in (TABLE["ENTER_DIAG_MODE_1"].code, TABLE["ENTER_DIAG_MODE_2"].code):
+        return [cmd.code]
+
+    # Two-nibble forms (8-bit value, low nibble then high nibble). Rev J writes
+    # the high train as (N/16)+2, i.e. N <= 255; larger N used to be silently
+    # masked (a skip of 300 became a skip of 44).
     if cmd.code in (TABLE["SKIP_N_SEGS_REVERSE"].code, TABLE["SKIP_N_SEGS_FORWARD"].code):
-        return [_plus2(value & 0x0F), _plus2((value >> 4) & 0x0F)]
+        if value > 0xFF:
+            raise ValueError(f"Skip N takes 0..255 segments, got {value} (use the Extended form)")
+        return [_plus2(value & 0x0F), _plus2(value >> 4)]
 
     # Three-nibble forms (12-bit value, low -> mid -> high nibble).
     if cmd.code in (
@@ -178,6 +204,8 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
         TABLE["SKIP_N_EXT_FORWARD"].code,
         TABLE["SET_N_FORMAT_SEGMENTS"].code,
     ):
+        if value > 0xFFF:
+            raise ValueError(f"{cmd.name!r} takes 0..4095, got {value}")
         return [
             _plus2(value & 0x0F),
             _plus2((value >> 4) & 0x0F),

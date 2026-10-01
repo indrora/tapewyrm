@@ -250,7 +250,7 @@ class DriveProfile:
     wake_sequence: tuple[tuple[str, int | None, int], ...]
     timing: TimingParams
     bit_order: str = "lsb"  # "msb" | "lsb"
-    report_strategy: str = "index_edge"  # "index_edge" | "fixed_settle"
+    report_strategy: str = "fixed_settle"  # "fixed_settle" (bench-proven) | "index_edge"
     quirks: frozenset[str] = frozenset()
 
     @classmethod

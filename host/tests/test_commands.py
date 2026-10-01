@@ -2,6 +2,7 @@
 
 import pytest
 
+from tapewyrm.qic117 import commands
 from tapewyrm.qic117.commands import (
     BY_CODE,
     SOFT_SELECT_PULSES,
@@ -139,3 +140,34 @@ def test_cmd_is_frozen():
     c = Cmd(99, Kind.MOTION, False, "x")
     with pytest.raises(dataclasses.FrozenInstanceError):
         c.code = 1  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Rev J audit: argument ranges (Table 2b, §1.4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_single_train_argument_is_six_bit():
+    seek = commands.SEEK_HEAD_TO_TRACK
+    assert commands.encode_arg(seek, 63) == [65]
+    with pytest.raises(ValueError):
+        commands.encode_arg(seek, 64)  # the drive would silently ignore it
+
+
+def test_skip_n_rejects_values_that_used_to_be_masked():
+    skip = commands.TABLE["SKIP_N_SEGS_FORWARD"]
+    assert commands.encode_arg(skip, 255) == [17, 17]
+    with pytest.raises(ValueError):
+        commands.encode_arg(skip, 300)  # was silently sent as 44
+
+
+def test_three_nibble_forms_cap_at_4095():
+    ext = commands.TABLE["SKIP_N_EXT_FORWARD"]
+    assert commands.encode_arg(ext, 4095) == [17, 17, 17]
+    with pytest.raises(ValueError):
+        commands.encode_arg(ext, 4096)
+
+
+@pytest.mark.parametrize("name,code", [("ENTER_DIAG_MODE_1", 28), ("ENTER_DIAG_MODE_2", 29)])
+def test_diag_mode_argument_is_the_command_repeated(name, code):
+    assert commands.encode_arg(commands.TABLE[name], 0) == [code]

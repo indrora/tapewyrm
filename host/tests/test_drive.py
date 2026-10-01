@@ -41,6 +41,9 @@ class MockLink:
             return self._reports.popleft()
         return b""
 
+    def set_timing(self, t) -> None:
+        self.calls.append(("set_timing", t))
+
     def wait_ready(self, timeout_ms: int) -> bool:
         self.calls.append(("wait_ready", timeout_ms))
         return self._ready.popleft() if self._ready else True
@@ -162,12 +165,12 @@ def test_status_reads_and_clears_error():
 def test_status_reads_error_on_new_cartridge():
     drive, link = _drive()
     link.queue_report(0b0001_0001, 1)  # ready + new_cartridge
-    link.queue_report((1 << 0) | (0 << 8), 2)  # reset-occurred (benign)
+    link.queue_report(26 | (0 << 8), 2)  # 26 = Power On Reset Occurred (benign)
     st = drive.status()
     assert st.new_cartridge
     assert link.command_codes() == [6, 7]
     assert drive.last_error is not None
-    assert drive.last_error.code == 1
+    assert drive.last_error.code == 26
     assert drive.last_error.fatal is False
 
 
@@ -275,8 +278,9 @@ def test_write_commands_allowed_when_opted_in():
     assert link.command_codes() == [15]
 
 
-def test_only_format_and_reference_burst_are_flagged_as_writes():
-    assert {c.code for c in commands.BY_CODE.values() if c.writes} == {15, 16}
+def test_refused_set_is_writes_plus_diagnostic_modes():
+    # 15/16 put flux on tape; 28/29 are manufacturer-dependent (Rev J p.17).
+    assert {c.code for c in commands.BY_CODE.values() if c.writes} == {15, 16, 28, 29}
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +312,51 @@ def test_jog_rejects_non_physical_motion():
     drive, _link = _drive()
     with pytest.raises(ValueError):
         drive.jog(commands.SEEK_LOAD_POINT, seconds=1)
+
+
+# ---------------------------------------------------------------------------
+# Rev J audit (docs/qic117j.pdf)
+# ---------------------------------------------------------------------------
+
+
+def test_status_ignores_error_bit_while_not_ready():
+    # Error Detected "is not valid unless the Drive Ready bit is asserted", and
+    # Report Error Code only clears it "after the drive indicates ready".
+    drive, link = _drive()
+    link.queue_report(0b0000_0110, 1)  # error + cartridge, NOT ready (moving)
+    st = drive.status()
+    assert st.error and not st.ready
+    assert link.command_codes() == [6]  # no Report Error Code
+    assert drive.last_error is None
+
+
+def test_jog_does_not_stop_on_error_bit_while_moving(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    drive, link = _drive()
+    link.queue_report(0b0000_0110, 1)  # moving, (meaningless) error bit
+    link.queue_report(0b0100_0101, 1)  # ready at BOT -> stop polling
+    link.queue_report(0b0100_0101, 1)  # status after Stop
+    drive.jog(commands.PHYSICAL_REVERSE, seconds=60)
+    assert link.command_codes() == [11, 6, 6, 18, 6]
+
+
+@pytest.mark.parametrize("strategy,on_index", [("fixed_settle", False), ("index_edge", True)])
+def test_wake_pushes_profile_timing_first(strategy, on_index):
+    prof = DriveProfile(
+        name="t",
+        wake_sequence=(("enter primary mode", None, 0),),
+        timing=DriveProfile.default().timing,
+        report_strategy=strategy,
+    )
+    drive, link = _drive(prof)
+    link.queue_report(0b0000_0101, 1)
+    drive.wake()
+    assert link.calls[0][0] == "set_timing"
+    assert link.calls[0][1].report_on_index is on_index
+    assert link.calls[0][1].pulse_us == prof.timing.pulse_us
+
+
+def test_non_interruptible_flags_match_table_2a():
+    # (n) in Rev J Table 2a: 3, 4, 14, 16, 18, 25, 26, 34, 35, 36. Nothing else.
+    flagged = {c.code for c in commands.BY_CODE.values() if c.non_intr}
+    assert flagged == {3, 4, 14, 16, 18, 25, 26, 34, 35, 36}

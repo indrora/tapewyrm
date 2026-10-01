@@ -94,7 +94,7 @@ Every sector carries its own CRC, so the decoder knows **which** sectors are bad
 - Connectivity/protection: USB-C, ESD protection on USB data, over-current protection on USB power.
 - **Hardware DFU header:** straps the AT32's built-in ROM bootloader, giving a probe-less, application-independent flash path that survives a broken/half-flashed firmware (the un-brick route). Flashing detail in §12.3.
 
-**Why it suffices for QIC (no board change):** QIC-117 needs a *subset* of the Shugart lines in the *same directions* GW already drives (STEP/DIR/WGATE/MOTOR/DSEL out) and senses (INDEX/TRK0/RDATA in). STEP is the command line; TRK0 is the return; INDEX is ready; RDATA is flux. The data channel is literally what GW does. Net work is firmware verbs + host software + a power/termination cabling setup. 12V via separate PSU + isolation jumper.
+**Why it suffices for QIC (no board change):** QIC-117 needs a *subset* of the Shugart lines in the *same directions* GW already drives (STEP/DIR/WGATE/MOTOR/DSEL out) and senses (INDEX/TRK0/RDATA in). STEP is the command line; TRK0 is the return; INDEX is the cue line (ready/idle, report bit presented, waiting for argument -- Rev J §1.3) and the segment mark during Logical Forward; RDATA is flux. The data channel is literally what GW does. Net work is firmware verbs + host software + a power/termination cabling setup. 12V via separate PSU + isolation jumper.
 
 > **Verify (cheap):** from the v4.1 design files, confirm TRK0/INDEX land on pollable GPIO/EXTI (not a peripheral-locked pin) and that the STEP output buffer swings the bus at the chosen cadence. Near-certain for a floppy interface; take it from the schematic, not from assumption.
 
@@ -173,10 +173,10 @@ Properties: **idempotent** (a second abort while quiescing is a no-op); broken-t
 
 ### 5.3 QIC verbs engine (command/status channel)
 
-- **Pulse emit:** *n* STEP pulses at the configured cadence (verbatim — no knowledge of meaning), then hold the terminating gap. Defaults from `set_timing`: ~2.0 ms step interval, gap > 2.9 ms to end the command. **Must keep pulses grouped under the command time-out** (an isolated slow pulse = Soft Reset) and **must not leave TRK0 asserted** between commands.
-- **Arguments:** for argument-bearing commands, emit the operand as a following pulse train in **N+2 form** (value+2 pulses); Soft Select is the exception (a literal 20 pulses).
-- **Report clock:** issue the report command, read the **ACK** bit (within TACK ≈ 2.5 ms; if false → flag reset/hardware failure), then for each data bit issue `REPORT_NEXT_BIT` (2 pulses) and sample TRK0 within TBIT (900 µs of the 2nd pulse edge), LSB-first; finally read the **Final** bit (false ⇒ report error). Up to 16 bits (Report Error Code = 2 bytes). The whole loop runs device-side → immune to USB jitter; the drive latched the value at command receipt. Prefer waiting on the ready/INDEX edge over a blind delay; support both, pick per drive on the bench.
-- **wait-ready:** poll the ready line until ready or a generous, motion-scaled timeout (seeks 15 s, stop 8 s).
+- **Pulse emit:** *n* STEP pulses at the configured cadence (verbatim — no knowledge of meaning), then hold the terminating gap. Defaults from `set_timing`: ~2.0 ms step interval, gap > 2.9 ms to end the command. **Must keep pulses grouped under the command time-out** (an isolated slow pulse = Soft Reset) and **must not leave TRK0 asserted** between commands: after a report's Final bit the drive *holds* TRK0 and keeps emitting cue INDEX "until another command is received" (Rev J §1.4.2), so the firmware sends one trailing `REPORT_NEXT_BIT` (ignored outside the report subcontext) to clear both. The spec calls this out as important for reports during Logical Forward, where stray cues would look like segment marks.
+- **Arguments:** for argument-bearing commands, emit the operand as a following pulse train in **N+2 form** (value+2 pulses); Soft Select is the exception (a literal 20 pulses), and Enter Diag Mode 1/2 repeat the command code. An argument is at most a **6-bit value** (0-63, Rev J §1.4.3); out-of-range arguments are silently *ignored* by the drive, so the host refuses them.
+- **Report clock:** issue the report command, read the **ACK** bit (within TACK ≈ 2.5 ms *after the command time-out*, i.e. up to ~5.4 ms after the last STEP -- Rev J §1.4.2 says wait TACK + nominal TTIMEOUT; if false → flag reset/hardware failure), then for each data bit issue `REPORT_NEXT_BIT` (2 pulses) and sample TRK0 within TBIT (900 µs of the 2nd pulse edge), LSB-first; finally read the **Final** bit (false ⇒ report error). Up to 16 bits (Report Error Code = 2 bytes). The whole loop runs device-side → immune to USB jitter; the drive latched the value at command receipt. Two strategies: fixed settle (sample after TBIT; bench-proven on the Colorado Jumbo 350, the default) or `index_edge` (wait for the cue INDEX the drive emits while a report bit is presented; first cue within TINXON 2.5 ms, then every TINX ≤ 12 ms -- so the wait is bounded by TINXON + TINX, not TBIT). Profiles pick via `report_strategy`; the drive layer pushes it with the timings in `wake()`.
+- **wait-ready:** QIC-117 has **no ready line**. The host polls the Ready bit of Report Drive Status (ftape-style) with Rev J Table 2d's per-command time-out (Seek Load Point 670 s, Stop 8 s, Seek Head to Track 15 s, ...); the firmware `WAIT_READY` verb waits on cue INDEX instead, which also fires while a report bit is up or an argument is awaited, so it is only meaningful when neither is pending. Error Detected / Referenced / BOT / EOT are **valid only while Ready**, and Report Error Code clears the latch only once Ready.
 
 ### 5.4 Flux engine (data channel) — capture pipeline
 
@@ -327,19 +327,16 @@ class Cmd:
     code: int; kind: Kind; non_intr: bool; name: str
     takes_arg: bool = False
 
+# Sketch only -- the authoritative table is host/tapewyrm/qic117/commands.py,
+# audited against Rev J Tables 2a-2d. non_intr is Rev J's "(n)" flag: exactly
+# 3, 4, 14, 16, 18, 25, 26, 34, 35, 36.
 TABLE: dict[str, Cmd] = {
-    "SOFT_RESET":            Cmd(1,  Kind.MODE,   True,  "soft reset"),
-    "REPORT_NEXT_BIT":       Cmd(2,  Kind.REPORT, True,  "report next bit"),
-    "PAUSE":                 Cmd(3,  Kind.MOTION, False, "pause"),
-    "REPORT_DRIVE_STATUS":   Cmd(6,  Kind.REPORT, True,  "report drive status"),
-    "REPORT_ERROR_CODE":     Cmd(7,  Kind.REPORT, True,  "report error code"),
-    "REPORT_CONFIGURATION":  Cmd(8,  Kind.REPORT, True,  "report configuration"),
-    "LOGICAL_FORWARD":       Cmd(10, Kind.MOTION, False, "logical forward"),
-    "SEEK_HEAD_TO_TRACK":    Cmd(13, Kind.MOTION, True,  "seek head to track", takes_arg=True),
-    "SEEK_LOAD_POINT":       Cmd(14, Kind.MOTION, False, "seek load point"),
-    "STOP_TAPE":             Cmd(18, Kind.MOTION, False, "stop tape"),
-    "REPORT_TAPE_STATUS":    Cmd(33, Kind.REPORT, True,  "report tape status"),
-    # ... fill out the full set, incl. vendor-unique 31, 40-45 ...
+    "SOFT_RESET":            Cmd(1,  Kind.RESET,  False, "soft reset", timeout_s=460),
+    "REPORT_DRIVE_STATUS":   Cmd(6,  Kind.REPORT, False, "report drive status"),
+    "SEEK_HEAD_TO_TRACK":    Cmd(13, Kind.MOTION, False, "seek head to track", takes_arg=True, timeout_s=15),
+    "SEEK_LOAD_POINT":       Cmd(14, Kind.MOTION, True,  "seek load point", timeout_s=670),
+    "STOP_TAPE":             Cmd(18, Kind.MOTION, True,  "stop tape", timeout_s=8),
+    # ... full set incl. vendor-unique 31, 40-45 ...
 }
 ```
 
@@ -917,40 +914,40 @@ Concrete data and algorithms so the modules in §5/§6/§6A can be generated dir
 |---|---|---|---|---|---|---|
 | 1 | Soft Reset | RST | — | — | — | 1 ack / 460 ready |
 | 2 | Report Next Bit | INT | — | — | — | 900 µs |
-| 3 | Pause | MOT | — | yes | n | 16 |
-| 4 | Micro Step Pause | MOT | — | yes | n | 16 |
+| 3 | Pause | MOT | — | referenced (not Ready) | n | 16 |
+| 4 | Micro Step Pause | MOT | — | referenced (not Ready) | n | 16 |
 | 5 | Alternate Command Time-out | CFG | — | — | — | 0 |
 | 6 | Report Drive Status | RPT | — | — | — | 2.5 ms ack |
-| 7 | Report Error Code | RPT | — | — | — | 2.5 ms ack |
+| 7 | Report Error Code | RPT | — | Ready | — | 2.5 ms ack |
 | 8 | Report Drive Configuration | RPT | — | — | — | 2.5 ms ack |
 | 9 | Report ROM Version | RPT | — | — | — | 2.5 ms ack |
 | 10 | **Logical Forward** | STREAM | — | yes | — | tape-len/speed (≤~650) |
-| 11 | Physical Reverse | MOT | — | yes | h | tape-len/speed |
-| 12 | Physical Forward | MOT | — | yes | h | tape-len/speed |
+| 11 | Physical Reverse | MOT | — | Ready + cartridge (not referenced) | h | ≤650 |
+| 12 | Physical Forward | MOT | — | Ready + cartridge (not referenced) | h | ≤650 |
 | 13 | Seek Head to Track | MOT | `Track+2` | yes | — | 15 |
-| 14 | Seek Load Point | MOT | — | cartridge | n | ~670 |
-| 15 | Enter Format Mode | MOD | — | — | — | 0 |
+| 14 | Seek Load Point | MOT | — | Ready + cartridge | n | ≤670 (~30 s on the bench, even from BOT) |
+| 15 | Enter Format Mode | MOD | — | Ready + cartridge, not write-protected | — (host refuses) | 0 |
 | 16 | Write Reference Burst | MOT | — | format | n | 940 |
 | 17 | Enter Verify Mode | MOD | — | yes | — | 0 |
 | 18 | Stop Tape | MOT | — | — | n | 8 |
-| 21 | Micro Step Head Up | MOT | — | — | n | 200 ms |
-| 22 | Micro Step Head Down | MOT | — | — | n | 200 ms |
+| 21 | Micro Step Head Up | MOT | — | — (illegal in F/N/H modes) | — | 200 ms |
+| 22 | Micro Step Head Down | MOT | — | — (illegal in F/N/H modes) | — | 200 ms |
 | 23 | Soft Select | SEL | **20 literal pulses** | — | — | 0 |
 | 24 | Soft Deselect | SEL | — | — | — | 0 |
-| 25 | Skip N Segs Reverse | MOT | `(N&15)+2, (N≫4)+2` | yes | n | tape-len/speed |
-| 26 | Skip N Segs Forward | MOT | `(N&15)+2, (N≫4)+2` | yes | n | tape-len/speed |
+| 25 | Skip N Segs Reverse | MOT | `(N&15)+2, (N≫4)+2`, N ≤ 255 | referenced (not Ready) | n | ≤650 |
+| 26 | Skip N Segs Forward | MOT | `(N&15)+2, (N≫4)+2`, N ≤ 255 | referenced (not Ready) | n | ≤650 |
 | 27 | Select Rate or Format | CFG | `N+2` (rate or format) | — | — | 0 |
-| 28 | Enter Diag Mode 1 | MOD | `28` (sent twice) | — | — | — |
-| 29 | Enter Diag Mode 2 | MOD | `29` (sent twice) | — | — | — |
+| 28 | Enter Diag Mode 1 | MOD | `28` (sent twice) | — | manufacturer-dependent; host refuses | — |
+| 29 | Enter Diag Mode 2 | MOD | `29` (sent twice) | — | manufacturer-dependent; host refuses | — |
 | 30 | Enter Primary Mode | MOD | — | — | — | 0 |
 | 32 | Report Vendor ID | RPT | — | — | — | 2.5 ms ack |
-| 33 | Report Tape Status | RPT | — | — | — | 2.5 ms ack |
+| 33 | Report Tape Status | RPT | — | cartridge | — | 2.5 ms ack |
 | 34 | Skip N Ext Reverse | MOT | 3 nibbles, each `+2` | yes | n | tape-len/speed |
 | 35 | Skip N Ext Forward | MOT | 3 nibbles, each `+2` | yes | n | tape-len/speed |
 | 36 | Calibrate Tape Length | MOT | — | yes | n | ~1300 |
 | 37 | Report Format Segments | RPT | — | — | — | 2.5 ms ack |
 | 38 | Set N Format Segments | CFG | 3 nibbles, each `+2` | — | — | 0 |
-| 46 | Phantom Select | SEL | `Unit+2` | — | — | 0 |
+| 46 | Phantom Select | SEL | `Unit+2` (**required**: a bare 46 is ignored; Colorado Jumbo 350 = unit 0) | — | — | 0 |
 | 47 | Phantom Deselect | SEL | — | — | — | 0 |
 
 (19–20, 39 reserved; 31, 40–45 vendor-unique.) Codes >32 unsupported by a drive are ignored; codes <32 that are undefined raise "undefined command." A command pulse-train >32 pulses is ignored.
@@ -959,10 +956,10 @@ Concrete data and algorithms so the modules in §5/§6/§6A can be generated dir
 
 **Report payloads (data bits between ACK and Final, LSB-first).**
 - `6` Drive Status (8b): 0 ready · 1 error · 2 cartridge-present · 3 write-protect · 4 new-cartridge · 5 referenced · 6 at-BOT · 7 at-EOT. (bits 1,5,6,7 valid only when ready.)
-- `7` Error Code (16b): bits 0–7 error code, 8–15 associated command.
+- `7` Error Code (16b): bits 0–7 error code, 8–15 associated command (0 = process error, 1 = initialization error). Undefined unless Error Detected + Ready; otherwise the drive repeats the last code. Resets are 26 (power-on), 27 (soft), 41 (wakeup) -- not 1.
 - `8` Drive Config (8b): bits 3–4 rate (00=4M/250k, 01=2M, 10=500k, 11=1M) · 6 extra-length · 7 QIC-80-mode.
 - `9` ROM Version (8b): 0–6 version, 7 beta.
-- `32` Vendor ID (16b): 0–5 model, 6–15 make.
+- `32` Vendor ID (16b): 0–5 model, 6–15 make. Exception: Colorado's legacy whole-word ID 71 (`0x0047`, seen on the Jumbo 350) -- Rev J lists Colorado as "4 & 71".
 - `33` Tape Status (8b): 0–3 format (0 unknown,1 QIC-40,2 QIC-80,3 QIC-3020,4 QIC-3010) · 4–6 type · 7 wide.
 - `37` Format Segments (16b): segments per tape track.
 
@@ -996,16 +993,17 @@ With ≤3 syndromes and ≤3 unknowns the system is square/over-determined and e
 
 ### 13.3 USB transaction wire protocol (Tapewyrm device protocol)
 
-Layered on GW's USB CDC-ACM transport. Host→device **request frames** `{opcode:u8, len:u16, payload}`; device→host **response frames** likewise; the capture path is a continuous stream. Opcodes/marker codes live in the generated `protocol.h`/`protocol.py` (§12.4); byte-level framing aligns with GW's existing command framing once §13.6/§9.1 is settled.
+Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verbs are grafted onto GW's `process_command()`): request `{cmd:u8, total_len:u8, payload}` (total_len includes the 2-byte header), response `{cmd_echo:u8, ack:u8, payload}` with the payload sent **only when ack == OKAY** and **no length field** -- the host knows each command's response size, as GW's own tools do. A response is one 64-byte USB packet, so every verb's response must fit in 64 bytes. (An earlier draft specified u16-length frames with JSON payloads; the firmware never implemented that, and the host now matches the firmware.) Opcodes/marker codes live in the generated `protocol.h`/`protocol.py` (§12.4); payload layouts are mirrored by hand between `qic/qic.c` and `link/device.py` for now.
 
 | Transaction | Request payload | Response | Notes |
 |---|---|---|---|
-| `INFO` | — | `DeviceInfo{model, mcu, fw, sram, caps, proto_ver}` | host capability gate (QIC bit + version) |
-| `SET_TIMING` | `TimingParams` | ok | idle-only |
-| `SELECT` | `SelectHint` | ok | idle-only; sticky-select optional |
-| `COMMAND_TXN` | `{cmd_n:u8, report_bits:u8}` | `{ack:bit, bits:u16, final:bit}` | verbs engine; ACK/Final checked device-side, raised on failure |
-| `WAIT_READY` | `{timeout_s:u16}` | `{status:u8}` | poll ready line |
-| `CAPTURE` | `{motion_n:u8, stop:StopCond}` | **stream** | arbiter holds lease whole session; stream = GW flux bytes + markers |
+| `INFO` | — | `{proto_ver:u8, caps:u32 bitmask, sram:u32, sample_hz:u32}` | capability gate; stock GW answers BAD_COMMAND. Board identity comes from GW `GET_INFO` |
+| `SET_TIMING` | `{pulse_us, inter_pulse_us, terminate_gap_us, tack_us, tbit_us:u16; report_on_index:u8}` | — | idle-only; pushed by `Qic117Drive.wake()` |
+| select | GW-native `SET_BUS_TYPE` + `SELECT` (+ `MOTOR`) | — | no Tapewyrm verb (0x85 is unimplemented); phantom drives want every DS idle |
+| `COMMAND_TXN` | `{cmd_n:u8, report_bits:u8}` | `{flags:u8 (b0 ack, b1 final, b2 timed-out), bits:u16, nbits:u8}` | verbs engine; host raises on missing ACK/Final |
+| `WAIT_READY` | `{timeout_s:u16}` | `{status:u8}` -- **0 = ready**, 1 = timed out | waits for cue INDEX (see §5.3) |
+| `CAPTURE` | `{motion_n:u8, rate:u16, tpt:u16, direction:u8, pass_id:u16, byte_budget:u32}` | `{echo, ack}` then **stream** | stream = GW flux bytes + markers; byte_budget 0 = free-run |
+| `SCOPE` | `{cmd_n:u8, duration_ms:u16}` | `{initial:u8, n_edges:u8, overflow:u8, counts:4×u16, edges:n×{t_us:u32, state:u8}}` (≤10 edges) | bench probe: edge-log TRK0/INDEX/WRPROT/pin34 after optional pulses |
 | `ABORT`/`STOP` | — (**out-of-band control**, not queued) | — | valid during CAPTURE; routes through Quiesce |
 
 **Capture stream** = verbatim GW flux bytes interleaved with opcode-escape **markers** (§7.2): `SESSION_START{rate, clock, TPT, direction, pass_id, utc}` · `SEGMENT{ticks, index}` (per hardware INDEX edge) · `EVENT{code}` · `END{reason, flux_count, byte_count, checksum}`. Backpressure: sustained overflow → `EVENT{overflow}` + clean abort (never silently drop). USB suspend/disconnect → device-side dead-man → Quiesce stop.

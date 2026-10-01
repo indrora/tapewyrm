@@ -187,23 +187,94 @@ def drive() -> None:
     """
 
 
+def _cmd_label(code: int) -> str:
+    from tapewyrm.qic117 import commands
+
+    cmd = commands.BY_CODE.get(code)
+    return f"cmd {code} {cmd.name}" if cmd else f"cmd {code}"
+
+
+def _decode_error(w: int) -> str:
+    from tapewyrm.qic117.status import error_name
+
+    code, assoc = w & 0xFF, (w >> 8) & 0xFF
+    if not code:
+        return f"{code} {error_name(code)}"
+    # Rev J p.13: "A process error returns a command code of zero and an
+    # initialization error returns the command code of one."
+    where = {0: "process error", 1: "initialization error"}.get(assoc) or (
+        f"from {_cmd_label(assoc)}"
+    )
+    return f"{code} {error_name(code)} ({where})"
+
+
+def _decode_config(b: int) -> str:
+    from tapewyrm.types import DriveConfig
+
+    cfg = DriveConfig.decode(b)
+    rate = f"{cfg.rate_kbps} kbps" + (" (or 4 Mbps)" if cfg.rate_ambiguous else "")
+    parts = [rate, "QIC-80 mode" if cfg.qic80_mode else "QIC-40 mode"]
+    if cfg.extra_length:
+        parts.append("extra-length tape")
+    return ", ".join(parts)
+
+
+def _decode_rom(b: int) -> str:
+    return f"version {b & 0x7F}" + (" (BETA)" if b & 0x80 else "")
+
+
+def _decode_vendor(w: int) -> str:
+    from tapewyrm.qic117.status import LEGACY_VENDOR_IDS, decode_vendor_id
+
+    make, model, name = decode_vendor_id(w)
+    if w in LEGACY_VENDOR_IDS:
+        return name
+    return f"make {make} {name}, model {model}"
+
+
+def _decode_tape(b: int) -> str:
+    from tapewyrm.qic117.status import TAPE_TYPES
+    from tapewyrm.types import TapeStatus
+
+    ts = TapeStatus.decode(b)
+    kind = TAPE_TYPES.get(ts.tape_type, f"reserved type {ts.tape_type}")
+    return f"format {ts.format.name}, {kind} tape" + (", wide (8mm)" if ts.wide else "")
+
+
 @drive.command("status")
 @click.pass_obj
 def drive_status(app: AppContext) -> None:
-    """Drive status, latched error, configuration and ROM version."""
+    """Every report the drive answers: status, error, config, ROM, vendor, tape.
+
+    Older drives don't implement every report (the Colorado Jumbo 350 predates
+    some of them); those print "not supported" and the latched error is
+    cleared so the remaining reports still work.
+    """
+    from tapewyrm.link.device import LinkError
     from tapewyrm.qic117 import commands
 
+    # (label, command, bits, decoder) -- QIC-117 Rev J Table 2c.
+    reports = (
+        # Rev J: the code is only meaningful while Error Detected is set; the
+        # drive otherwise repeats the last one it reported, hence "last error".
+        ("last error", "REPORT_ERROR_CODE", 16, _decode_error),
+        ("drive config", "REPORT_DRIVE_CONFIGURATION", 8, _decode_config),
+        ("rom version", "REPORT_ROM_VERSION", 8, _decode_rom),
+        ("vendor id", "REPORT_VENDOR_ID", 16, _decode_vendor),
+        ("tape status", "REPORT_TAPE_STATUS", 8, _decode_tape),
+    )
     with _drive_session(app) as d:
         if d.last_error is not None:
-            click.echo(
-                f"cleared on wake: error {d.last_error.code} "
-                f"(cmd {d.last_error.associated_command})"
-            )
-        click.echo(f"status : {_fmt_status(d.status())}")
-        cfg = d.config()
-        click.echo(f"config : 0x{cfg.raw:02x} rate={cfg.rate_kbps} kbps qic80={cfg.qic80_mode}")
-        rom = d.report(commands.TABLE["REPORT_ROM_VERSION"], 8)
-        click.echo(f"rom    : 0x{rom:02x} (version {rom & 0x7F}{', beta' if rom & 0x80 else ''})")
+            click.echo(f"{'cleared on wake':<13}: {_decode_error(d.last_error.raw)}")
+        click.echo(f"{'drive status':<13}: {_fmt_status(d.status())}")
+        for label, name, bits, decode in reports:
+            try:
+                val = d.report(commands.TABLE[name], bits)
+            except LinkError:
+                click.echo(f"{label:<13}: not supported by this drive (no ACK)")
+                d.status()  # clear whatever the unsupported command latched
+                continue
+            click.echo(f"{label:<13}: 0x{val:0{bits // 4}x} -> {decode(val)}")
 
 
 @drive.command("report")
@@ -270,7 +341,7 @@ def drive_stop(app: AppContext) -> None:
 
 
 @drive.command("track")
-@click.argument("track", type=click.IntRange(0, 254))
+@click.argument("track", type=click.IntRange(0, 63))  # 6-bit argument (Rev J §1.4.3)
 @click.pass_obj
 def drive_track(app: AppContext, track: int) -> None:
     """Seek Head to Track N."""

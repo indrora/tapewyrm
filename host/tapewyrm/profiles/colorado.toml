@@ -10,7 +10,8 @@
 
 name = "colorado"
 bit_order = "lsb"           # QIC-117 reports clock LSB-first off TRK0 (§2.1)
-report_strategy = "index_edge"  # prefer waiting on INDEX edge over a blind settle (§5.3)
+report_strategy = "fixed_settle"  # bench-proven on the Jumbo 350; "index_edge" waits for
+                                  # the cue INDEX each bit instead (Rev J §1.3), untested
 quirks = []                 # TODO(bench): e.g. "slow_wake", "no_ccs2_geometry"
 
 [timing]
