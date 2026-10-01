@@ -181,9 +181,35 @@ class SerialTransport:
         except Exception as exc:
             raise TransportError(f"frame write failed: {exc}") from exc
 
+    # Greaseweazle's out-of-band reset: a CDC SET_LINE_CODING to this baud makes
+    # the firmware run floppy_configure(), which halts the flux engine and (our
+    # graft) stops the tape -- see firmware/src/usb/cdc_acm.c and floppy.c.
+    # Upstream GW's host software stops a read the same way.
+    BAUD_CLEAR_COMMS = 10_000
+    _DRAIN_QUIET_S = 0.2
+
     def send_control(self, opcode: int, payload: bytes = b"") -> None:
-        # Same wire framing; a real device routes ABORT out-of-band (§5.2/§13.3).
-        self.send_frame(opcode, payload)
+        """Stop a capture mid-stream (the only control there is: ABORT).
+
+        A frame written mid-read is never parsed: GW's read loop only pumps
+        flux out and doesn't look at incoming data until the read ends. So the
+        abort goes out-of-band as a clear-comms baud change, then the stale
+        flux still in flight is drained so the next response starts clean.
+        """
+        ser = self._require()
+        try:
+            ser.baudrate = self.BAUD_CLEAR_COMMS  # type: ignore[attr-defined]
+            ser.baudrate = self.baud  # type: ignore[attr-defined]
+            old_timeout = ser.timeout  # type: ignore[attr-defined]
+            ser.timeout = self._DRAIN_QUIET_S  # type: ignore[attr-defined]
+            try:
+                while ser.read(65536):  # type: ignore[attr-defined]
+                    pass  # discard until the line has been quiet for a moment
+            finally:
+                ser.timeout = old_timeout  # type: ignore[attr-defined]
+            ser.reset_input_buffer()  # type: ignore[attr-defined]
+        except Exception as exc:
+            raise TransportError(f"clear-comms abort failed: {exc}") from exc
 
     def _read_exact(self, n: int) -> bytes:
         ser = self._require()

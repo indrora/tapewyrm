@@ -58,6 +58,10 @@ class ParsedStream:
     checksum: int = 0  # additive checksum of those bytes, & 0xFFFFFFFF
     terminated: bool = False  # saw the trailing NUL
     sample_clock_hz: int = 72_000_000  # from SESSION_START when present
+    # Ticks of trailing dead time: SPACE filler GW emits while no flux arrives,
+    # not yet attached to an interval when the stream ended. A capture with no
+    # transitions at all is ALL dead time, which is how a silent RDATA shows up.
+    trailing_ticks: int = 0
     end: StreamEnd | None = None
 
     @property
@@ -73,6 +77,11 @@ class ParsedStream:
     @property
     def duration_s(self) -> float:
         return sum(self.intervals) / self.sample_clock_hz
+
+    @property
+    def span_s(self) -> float:
+        """Stream time including trailing dead time (silence counts too)."""
+        return (sum(self.intervals) + self.trailing_ticks) / self.sample_clock_hz
 
 
 def _n28(b: bytes, i: int) -> int:
@@ -117,6 +126,8 @@ def parse(blob: bytes) -> ParsedStream:
             if i + 1 >= n:
                 break
             op = blob[i + 1]
+            if op in (_FLUXOP_INDEX, _FLUXOP_SPACE) and i + 6 > n:
+                break  # cut mid-opcode: an aborted capture ends wherever USB stopped
             if op == _FLUXOP_INDEX:
                 out.index_ticks.append(t + _n28(blob, i + 2))
                 i += 6
@@ -146,5 +157,6 @@ def parse(blob: bytes) -> ParsedStream:
             else:
                 raise ValueError(f"unknown stream opcode {op:#04x} at byte {i}")
     out.data_bytes = nbytes
+    out.trailing_ticks = pending
     out.checksum = csum & 0xFFFFFFFF
     return out

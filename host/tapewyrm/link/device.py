@@ -35,6 +35,7 @@ Typed errors form a small tree::
 from __future__ import annotations
 
 import struct
+import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -511,6 +512,31 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
                 self._closed = True
                 break
             yield data
+
+    def chunks_for(self, seconds: float) -> Iterator[bytes]:
+        """Yield flux chunks for ``seconds`` of wall time, then abort the session.
+
+        For probes that run the tape under a plain motion command, which (unlike
+        Logical Forward) doesn't end at logical EOT. An empty read here does NOT
+        end the session the way it does in :meth:`chunks`: a drive with a dead
+        read channel sends nothing while the tape is still moving, and that
+        silence is exactly what a probe wants to see. The deadline is checked
+        between reads, so the run may overshoot by one read timeout (2 s). The
+        abort always runs, even when the caller stops iterating early, and
+        stops the tape (the firmware's clear-comms path issues Stop Tape).
+        """
+        deadline = time.monotonic() + seconds
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    data = self._transport.read_stream()
+                except TransportError as exc:
+                    raise LinkError(f"capture stream read failed: {exc}") from exc
+                if data:
+                    yield data
+        finally:
+            self.abort()
+            self._closed = True
 
     def abort(self) -> None:
         """Out-of-band stop, valid mid-stream (routes through Quiesce; §5.2)."""

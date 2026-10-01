@@ -416,6 +416,36 @@ def drive_track(app: AppContext, track: int) -> None:
         click.echo(f"status : {_fmt_status(d.command(commands.SEEK_HEAD_TO_TRACK, arg=track))}")
 
 
+@drive.command("flux")
+@click.option(
+    "--motion",
+    type=click.Choice(["fwd", "rev", "logical"]),
+    default="fwd",
+    show_default=True,
+    help="Physical Forward/Reverse (works unreferenced) or Logical Forward",
+)
+@click.option("--seconds", default=5.0, show_default=True, help="how long to run the tape")
+@click.option(
+    "-o", "--out", type=click.Path(dir_okay=False, path_type=Path), default="flux-probe.twrf",
+    show_default=True, help="TWRF file to record into",
+)  # fmt: skip
+@click.pass_obj
+def drive_flux(app: AppContext, motion: str, seconds: float, out: Path) -> None:
+    """Run the tape for --seconds and record whatever comes off the head.
+
+    A diagnostic for drives that won't reference a tape: is there any signal at
+    all? Prints the amount of flux, a histogram of transition spacing, and how
+    many sectors decode. See tapewyrm/tape/fluxprobe.py for how to read it.
+    """
+    from tapewyrm.tape.fluxprobe import format_report, probe
+
+    with _drive_session(app) as d:
+        report = probe(d, motion, seconds, out, log=click.echo)
+        click.echo(f"status    : {_fmt_status(d.status())}")
+    for line in format_report(report):
+        click.echo(line)
+
+
 # Select Rate or Format (27) argument N for each data rate (QIC-117 Rev J
 # Table 2b). N = 0 means 250 kbps only on drives that can't do QIC-3020; on a
 # QIC-3020 drive it means 4 Mbps instead, so 250 is refused rather than guessed.
