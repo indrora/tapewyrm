@@ -1,0 +1,40 @@
+# Colorado 1400: a QIC-3010 floppy-tape drive that also reads QIC-80 tapes.
+#
+# Load with `--profile colorado.1400`. This starts as a copy of colorado.toml
+# (the Jumbo 350); see that file for why the wake sequence looks the way it
+# does. Bench notes, 2026-10-01:
+#   * Same addressing as the 350: a jumperless PHANTOM drive, selected by
+#     Phantom Select (46) plus N+2 unit address 0. It answered the 350's
+#     timings unchanged; its cue INDEX pulses are ~2.0 ms apart (the 350's
+#     are ~2.9 ms).
+#   * Identity: Report Drive Configuration 0x98, vendor ID 0x11C3.
+#     0x98 decodes (Rev J Table 2c) as QIC-80 mode set, rate bits 4,3 = 11
+#     -> 1 Mbps, the QIC-3010 rate.
+#   * A QIC-80 tape (jc) is recorded at 500 kbps. Rev J says the rate bits
+#     "may change upon insertion of a cartridge or after a Select Rate
+#     command", so reading QIC-80 may need `tw drive rate 500` (command 27,
+#     N = 2) after the tape is referenced. TODO(bench): confirm whether the
+#     drive picks 500 kbps itself once a QIC-80 tape is referenced.
+
+name = "colorado.1400"
+bit_order = "lsb"                 # QIC-117 reports clock LSB-first off TRK0
+report_strategy = "fixed_settle"  # as on the 350
+quirks = []
+
+[timing]
+pulse_us = 200              # STEP pulse width
+inter_pulse_us = 2000       # ~2.0 ms STEP interval (Rev J 0.9-2.1 ms)
+terminate_gap_us = 3000     # > 2.9 ms ends a command train (< => Soft Reset)
+report_settle_us = 900      # report bit appears within 900 us of 2nd pulse
+motion_timeout_s = 20       # generic motion ceiling; Table 2d covers the rest
+
+# Wake: Phantom Select unit 0, then Enter Primary Mode. No Soft Reset at the
+# end -- a Reset deselects a phantom drive (Rev J p.18).
+[[wake]]
+cmd = "phantom select"
+arg = 0
+delay_ms = 50
+
+[[wake]]
+cmd = "enter primary mode"
+delay_ms = 50

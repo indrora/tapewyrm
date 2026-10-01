@@ -416,6 +416,63 @@ def drive_track(app: AppContext, track: int) -> None:
         click.echo(f"status : {_fmt_status(d.command(commands.SEEK_HEAD_TO_TRACK, arg=track))}")
 
 
+# Select Rate or Format (27) argument N for each data rate (QIC-117 Rev J
+# Table 2b). N = 0 means 250 kbps only on drives that can't do QIC-3020; on a
+# QIC-3020 drive it means 4 Mbps instead, so 250 is refused rather than guessed.
+_RATE_ARG = {500: 2, 1000: 3, 2000: 1}
+
+
+@drive.command("rate")
+@click.argument("kbps", type=click.Choice([str(k) for k in _RATE_ARG]))
+@click.pass_obj
+def drive_rate(app: AppContext, kbps: str) -> None:
+    """Select the data rate (command 27), then confirm it from the config report.
+
+    The drive reports the rate it will use for Logical Forward in Report Drive
+    Configuration; Rev J says to check that after a Select Rate, so this does.
+    A drive that can't change rate latches error 31 (Rate or Format Selection
+    Error), shown in the status line.
+    """
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        d.command(commands.TABLE["SELECT_RATE_OR_FORMAT"], arg=_RATE_ARG[int(kbps)])
+        st = d.status()
+        click.echo(f"status : {_fmt_status(st)}")
+        if st.error and d.last_error is not None:
+            click.echo(f"error  : {_decode_error(d.last_error.raw)}")
+        config = d.report(commands.REPORT_DRIVE_CONFIGURATION, 8)
+        click.echo(f"config : 0x{config:02x} -> {_decode_config(config)}")
+
+
+# Select Format shares command 27 with Select Rate (Rev E and later drives):
+# N = tape format x 4 + increment, increment 1 = "standard" (Rev J Table 2b).
+_FORMAT_ARG = {"qic40": 1 * 4 + 1, "qic80": 2 * 4 + 1, "qic3020": 3 * 4 + 1, "qic3010": 4 * 4 + 1}
+
+
+@drive.command("format")
+@click.argument("fmt", metavar="FORMAT", type=click.Choice(list(_FORMAT_ARG)))
+@click.pass_obj
+def drive_format(app: AppContext, fmt: str) -> None:
+    """Select the tape format the drive works in (command 27). Writes nothing.
+
+    Rev J ties the selected format to formatting (load-zone layout, segment
+    counts). It is also our probe for whether a multi-format drive such as the
+    Colorado 1400 (QIC-3010) needs telling before it will reference an older
+    QIC-80 tape. Older drives latch error 31 (Rate or Format Selection Error).
+    """
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        d.command(commands.TABLE["SELECT_RATE_OR_FORMAT"], arg=_FORMAT_ARG[fmt])
+        st = d.status()
+        click.echo(f"status : {_fmt_status(st)}")
+        if st.error and d.last_error is not None:
+            click.echo(f"error  : {_decode_error(d.last_error.raw)}")
+        config = d.report(commands.REPORT_DRIVE_CONFIGURATION, 8)
+        click.echo(f"config : 0x{config:02x} -> {_decode_config(config)}")
+
+
 @drive.command("micro")
 @click.argument("direction", type=click.Choice(["up", "down"]))
 @click.pass_obj
