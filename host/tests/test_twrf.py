@@ -4,7 +4,7 @@ import io
 import json
 import struct
 
-from tapewyrm.codec import recover
+from tapewyrm.image import twti
 from tapewyrm.rawflux.container import RawFluxCapture, read_header, write_preamble
 from tapewyrm.types import CaptureHeader, Direction, TapeFormat
 
@@ -65,10 +65,12 @@ def test_v1_files_still_load_with_identity_unknown(tmp_path):
     assert cap.flux == b"\x05"
 
 
-def test_decoder_takes_each_captures_own_rate(tmp_path):
+def test_convert_reads_each_captures_own_rate(tmp_path):
     twrf = tmp_path / "track-00.twrf"
     RawFluxCapture(header=HDR, flux=b"\x00").save(twrf)
-    assert recover._capture_flux(twrf) == (b"\x00", 1000)
+    _, meta = twti._decode_capture(twrf)
+    assert meta["twrf"]["rate_kbps"] == 1000 and meta["twrf"]["drive_vendor_id"] == 0x11C3
     legacy = tmp_path / "track-00.raw"
     legacy.write_bytes(b"\x00")
-    assert recover._capture_flux(legacy) == (b"\x00", recover.LEGACY_RAW_RATE_KBPS)
+    _, meta = twti._decode_capture(legacy)
+    assert meta["twrf"]["rate_kbps"] == twti.LEGACY_RAW_RATE_KBPS

@@ -57,6 +57,6 @@ clean:
 ci: gen host
     git diff --exit-code
 
-# turn a `tw dump` directory into a tar of the backup's files (contrib/qic2tar.py)
-qic2tar dump out:
-    uv run --project host python contrib/qic2tar.py {{dump}} -o {{out}}
+# turn an extracted volume (`tw extract` -> vol-NN.twvl) into a tar (contrib/qic2tar.py)
+qic2tar volume out:
+    uv run --project host python contrib/qic2tar.py {{volume}} -o {{out}}

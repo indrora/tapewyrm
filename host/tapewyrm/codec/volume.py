@@ -163,13 +163,16 @@ def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None
 
 
 def parse_header(seg: Segment) -> tuple[VolumeInfo, BadSectorMap]:
+    """Parse a header :class:`Segment` (see :func:`parse_header_data`)."""
+    return parse_header_data(seg_mod.segment_data(seg))
+
+
+def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
     """Parse the header segment's format parameter record + bad-sector map.
 
-    The header segment's *data* area (29 sectors) is taken from the corrected
-    segment; sector 0 holds the format parameter record, sectors 0..28 hold the
-    ascending BSM entries.
+    ``data`` is the header segment's corrected data area (29 sectors); sector 0
+    holds the format parameter record, sectors 0..28 the bad-sector map.
     """
-    data = seg_mod.segment_data(seg)
     sector0 = data[:1024] if len(data) >= 1024 else data.ljust(1024, b"\x00")
 
     def u16(off: int) -> int:
@@ -295,13 +298,17 @@ def apply_bsm(segs: dict[tuple[int, int], Segment], bsm: BadSectorMap) -> int:
 
 
 def parse_volume_table(seg: Segment) -> list[VtblEntry]:
+    """Parse a volume-table :class:`Segment` (see :func:`parse_volume_table_data`)."""
+    return parse_volume_table_data(seg_mod.segment_data(seg))
+
+
+def parse_volume_table_data(data: bytes) -> list[VtblEntry]:
     """Parse 128-byte ``VTBL``/``XTBL``/``UTID``/``EXVT`` entries from a segment.
 
     The volume table is the first segment of the logical area. We scan its data
     area in 128-byte records, recognizing the four signatures; ``UTID`` (tape
     name) and ``EXVT`` (overflow) are recognized but yield no file-set range.
     """
-    data = seg_mod.segment_data(seg)
     entries: list[VtblEntry] = []
     off = 0
     n = len(data)

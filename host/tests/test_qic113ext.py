@@ -3,7 +3,7 @@
 import struct
 
 from tapewyrm.codec import qic113ext as q
-from tapewyrm.codec.recover import SparseVolume
+from tapewyrm.image.twvl import SparseVolume
 
 
 def _dd(ddid: int, area: int, st: bytes = b"", name: str = "") -> bytes:

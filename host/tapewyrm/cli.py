@@ -1,26 +1,24 @@
 """Tapewyrm CLI (DESIGN.md §6A.7).
 
 A single ``@click.group()`` named ``cli`` with shared ``--port`` / ``--profile``
-/ ``--config`` options carried on ``ctx.obj`` as an ``AppContext``. Five verbs,
-each mapping to a layer:
+/ ``--config`` options carried on ``ctx.obj`` as an ``AppContext``.
+
+The recovery workflow is three steps, each with its own file format:
+
+    dump     tape tracks -> TWRF flux captures (self-describing: rate, drive identity)
+    convert  TWRF captures -> TWTI logical tape image (sectors placed, RS-corrected;
+             several dumps of the same tape are merged)
+    extract  TWTI image -> TWVL volume files (QIC-113 volume table, QIC-122
+             decompression, holes recorded); contrib/qic2tar.py makes a tar
+
+plus the hardware side:
 
     info     host + firmware build identity, board, port and USB serial
-    dump     capture whole tracks to TWRF files (Logical Forward, tape-terminated)
-    probe    open device, wake, identify; print config / tape status / geometry
-    drive    poke the drive by hand: status, reports, motion, scope (read-only)
-    capture  sweep tracks -> write RawFluxCapture files
-    decode   RawFluxCapture(s) -> files + recovery report (no hardware)
-    recover  capture + decode + multi-pass retries on weak segments
-    replay   re-decode saved flux with different options
+    drive    poke the drive by hand: select, status, reports, motion, scope
     flash    update Tapewyrm firmware (app bootloader over USB)
     dfu      recovery/first flash via the AT32 ROM bootloader (dfu-util)
 
-The shipped command is ``tw`` (DESIGN.md §1): it owns all functionality —
-capture, decode, AND firmware flashing — so the ``gw`` tool is never required.
-
-The codec is being written concurrently, so ``decode`` / ``recover`` / ``replay``
-import it **lazily inside the function body** — this module imports cleanly even
-while ``tapewyrm.codec`` is incomplete (DESIGN.md §6A.7).
+Codec imports happen inside the commands, so ``tw --help`` stays fast.
 
 Config precedence: CLI flags -> config file -> profile defaults, resolved once in
 ``AppContext.load`` and carried on ``ctx.obj``.
@@ -113,23 +111,6 @@ def cli(ctx: click.Context, port: str | None, profile: str | None, config: str |
     Does not require the ``gw`` executable.
     """
     ctx.obj = AppContext.load(port, profile, config)
-
-
-# ---------------------------------------------------------------------------
-# Device-backed verbs (link + qic117 + tape)
-# ---------------------------------------------------------------------------
-
-
-def _open_stack(app: AppContext):
-    """Open the link and build a TapeTransport. Returns (link, transport)."""
-    from tapewyrm.link.device import DeviceLink
-    from tapewyrm.qic117.drive import Qic117Drive
-    from tapewyrm.tape.transport import TapeTransport
-
-    link = DeviceLink()
-    link.open(app.port)
-    drive = Qic117Drive(link, app.profile)
-    return link, TapeTransport(drive)
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +514,7 @@ def _parse_tracks(spec: str) -> list[int]:
 )
 @click.pass_obj
 def dump(app: AppContext, tracks: str, out: str) -> None:
-    """Capture whole tracks to raw files, one Logical Forward pass each.
+    """Capture whole tracks to TWRF files, one Logical Forward pass each.
 
     Each pass ends when the tape stops at logical EOT. After every track the
     capture is decoded and the dump stops early if the tape looks unhealthy.
@@ -552,132 +533,52 @@ def dump(app: AppContext, tracks: str, out: str) -> None:
     click.echo(f"done: {len(results)} tracks, {good}/{total} sectors CRC-clean -> {out}")
 
 
-@cli.command()
-@click.pass_obj
-def probe(app: AppContext) -> None:
-    """Open device, wake, identify; print config / tape status / geometry."""
-    link, transport = _open_stack(app)
-    try:
-        info = link.info
-        if info is not None:
-            click.echo(
-                f"device: {info.model} ({info.mcu}) fw={info.firmware} sram={info.sram_bytes}"
-            )
-            click.echo(f"caps: {sorted(info.qic_caps)} proto_ver={info.proto_ver}")
-        cfg, tape, geom = transport.identify()
-        click.echo(
-            f"config: rate={cfg.rate_kbps} kbps"
-            + (" (ambiguous 4M/250k)" if cfg.rate_ambiguous else "")
-        )
-        click.echo(f"tape: format={tape.format.name} type={tape.tape_type} wide={tape.wide}")
-        click.echo(
-            f"geometry: {geom.tracks} tracks x {geom.segments_per_track} segs/track "
-            f"= {geom.total_segments()} segments"
-        )
-    finally:
-        link.close()
-
-
-@cli.command()
-@click.option("--passes", default=None, type=int, help="passes per track")
-@click.option("-o", "--out", "out", type=click.Path(), required=True, help="output directory")
-@click.pass_obj
-def capture(app: AppContext, passes: int | None, out: str) -> None:
-    """Sweep tracks -> write RawFluxCapture files."""
-    n_passes = passes if passes is not None else app.passes
-    out_dir = Path(out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    link, transport = _open_stack(app)
-    try:
-        transport.identify()
-        count = 0
-        for cap in transport.walk_all(passes=n_passes):
-            hdr = cap.header
-            name = f"track{hdr.track:02d}_pass{hdr.pass_id}.twrf"
-            path = out_dir / name
-            cap.save(path)
-            count += 1
-            click.echo(f"wrote {path} ({len(cap.flux)} flux bytes)")
-        click.echo(f"captured {count} pass(es) to {out_dir}")
-    finally:
-        link.close()
-
-
-# ---------------------------------------------------------------------------
-# Codec-backed verbs (lazy codec import — it is being written concurrently)
-# ---------------------------------------------------------------------------
-
-
-@cli.command()
-@click.argument("inputs", nargs=-1, type=click.Path(exists=True), required=True)
-@click.option("-o", "--out", "out", type=click.Path(), required=True, help="output directory")
-@click.pass_obj
-def decode(app: AppContext, inputs: tuple[str, ...], out: str) -> None:
-    """Decode flux file(s) -> recovered files + recovery report (no hardware)."""
-    # Lazy import: codec may be incomplete while this module must still load.
-    from tapewyrm.codec import pipeline  # noqa: PLC0415
-    from tapewyrm.rawflux import RawFluxCapture
-    from tapewyrm.report import print_report
-
-    caps = [RawFluxCapture.load(p) for p in inputs]
-    out_dir = Path(out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    filesets, report = pipeline.decode(caps)
-    _write_filesets(filesets, out_dir)
-    print_report(report)
-
-
-@cli.command()
-@click.option("--passes", default=None, type=int, help="passes per track")
-@click.option("-o", "--out", "out", type=click.Path(), required=True, help="output directory")
-@click.pass_obj
-def recover(app: AppContext, passes: int | None, out: str) -> None:
-    """Capture + decode + multi-pass retries on weak segments (all layers)."""
-    from tapewyrm.codec import pipeline  # noqa: PLC0415
-    from tapewyrm.report import print_report
-
-    n_passes = passes if passes is not None else app.passes
-    out_dir = Path(out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    link, transport = _open_stack(app)
-    try:
-        transport.identify()
-        caps = list(transport.walk_all(passes=n_passes))
-        for cap in caps:
-            cap.save(out_dir / f"track{cap.header.track:02d}_pass{cap.header.pass_id}.twrf")
-    finally:
-        link.close()
-
-    filesets, report = pipeline.decode(caps)
-    _write_filesets(filesets, out_dir)
-    print_report(report)
-
-
-@cli.command()
-@click.argument("inputs", nargs=-1, type=click.Path(exists=True), required=True)
-@click.option("-o", "--out", "out", type=click.Path(), required=True, help="output directory")
-@click.pass_obj
-def replay(app: AppContext, inputs: tuple[str, ...], out: str) -> None:
-    """Re-decode saved flux with (potentially) different PLL/RS options."""
-    from tapewyrm.codec import pipeline  # noqa: PLC0415
-    from tapewyrm.rawflux import RawFluxCapture
-    from tapewyrm.report import print_report
-
-    caps = [RawFluxCapture.load(p) for p in inputs]
-    out_dir = Path(out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    filesets, report = pipeline.decode(caps)
-    _write_filesets(filesets, out_dir)
-    print_report(report)
-
-
 # ---------------------------------------------------------------------------
 # Firmware flashing (tw owns this — no dependency on the `gw` tool, DESIGN §12.3)
 # ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "-o", "--out", "out", required=True, type=click.Path(dir_okay=False, path_type=Path),
+    help="tape image to write (.twti)",
+)  # fmt: skip
+def convert(sources: tuple[Path, ...], out: Path) -> None:
+    """TWRF dump(s) -> TWTI logical tape image.
+
+    SOURCES are dump directories (or individual track-NN.twrf files). Every
+    capture is decoded at its own recorded bit rate; when several dumps of the
+    same tape are given, their sectors are merged so a re-read fills the gaps
+    of an earlier pass. No hardware needed.
+    """
+    from tapewyrm.image.twti import convert as do_convert
+
+    try:
+        do_convert(list(sources), out, log=click.echo)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-o", "--out", "out", required=True, type=click.Path(file_okay=False, path_type=Path),
+    help="directory for the volume files (vol-NN.twvl)",
+)  # fmt: skip
+def extract(image: Path, out: Path) -> None:
+    """TWTI tape image -> one TWVL file per backup volume.
+
+    Reads the volume table, decompresses QIC-122 data and lays each volume out
+    by its QIC-113 offsets, recording the byte ranges that were lost. Turn a
+    volume into a tar with contrib/qic2tar.py.
+    """
+    from tapewyrm.image.twvl import extract as do_extract
+
+    try:
+        do_extract(image, out, log=click.echo)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command()
@@ -716,20 +617,6 @@ def dfu(app: AppContext, image: str, dfu_util: str, vid_pid: str | None, alt: in
         click.echo(f"flashed {image} via DFU")
     except FlashError as exc:
         raise click.ClickException(str(exc)) from exc
-
-
-def _write_filesets(filesets: Any, out_dir: Path) -> None:
-    """Write recovered file sets to disk (best-effort; codec dataclasses)."""
-    for fs in filesets:
-        base = out_dir / getattr(fs, "name", "fileset").replace(":", "").replace("\\", "_")
-        base.mkdir(parents=True, exist_ok=True)
-        for entry in getattr(fs, "files", []):
-            if getattr(entry, "is_dir", False):
-                continue
-            rel = str(getattr(entry, "path", "")).lstrip("/\\")
-            dest = base / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(getattr(entry, "data", b""))
 
 
 if __name__ == "__main__":  # pragma: no cover

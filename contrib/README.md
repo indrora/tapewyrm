@@ -11,17 +11,22 @@ uv run --project host python contrib/<tool>.py ...
 (`tools/` at the repository root holds build helpers used by `just`; these are
 not those.)
 
-## qic2tar.py: QIC-80 backup to tar
+## qic2tar.py: QIC-113 backup volume to tar
 
-Turns a dump directory (`track-NN.raw` files) into a POSIX (pax) tar of the
-backup's files and directories, with original names (long Windows 95 names),
-modification times and DOS attributes (`TAPEWYRM.dos_attributes` pax header).
+The last step of the recovery workflow:
 
 ```bash
-uv run --project host python contrib/qic2tar.py captures/jc-1998 -o jc-1998.tar
-# or
-just qic2tar captures/jc-1998 jc-1998.tar
+cd host
+uv run tw dump --tracks 0-12 --out ../captures/jc     # tape -> TWRF flux captures
+uv run tw convert ../captures/jc -o ../captures/jc.twti   # -> logical tape image
+uv run tw extract ../captures/jc.twti -o ../captures/jc-vols  # -> vol-NN.twvl
+cd ..
+just qic2tar captures/jc-vols/vol-00.twvl jc.tar      # -> tar
 ```
+
+It turns a TWVL volume into a POSIX (pax) tar of the backup's files and
+directories, with original names (long Windows 95 names), modification times
+and DOS attributes (`TAPEWYRM.dos_attributes` pax header).
 
 It writes a damage report next to the tar (`jc-1998.tar.damaged.txt`):
 
@@ -33,5 +38,5 @@ It writes a damage report next to the tar (`jc-1998.tar.damaged.txt`):
 Supports QIC-113 extended-format volumes (as written by Colorado/HP backup
 software), compressed with QIC-122 or not; extracts the first volume.
 
-Decoding the flux is the slow part (about 20 s per track); the recovered
-sectors are cached in `DUMP_DIR/sectors.pkl`, so later runs take seconds.
+`tw convert` is the slow step (decoding flux, about 20 s per track);
+`tw extract` and qic2tar take seconds.
