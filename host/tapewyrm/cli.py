@@ -599,12 +599,18 @@ def _parse_tracks(spec: str) -> list[int]:
 @click.option(
     "--out", "out", type=click.Path(file_okay=False), required=True, help="output directory"
 )
+@click.option(
+    "--check", is_flag=True, help="also decode each pass and stop if < 80% of sectors CRC-clean"
+)
 @click.pass_obj
-def dump(app: AppContext, tracks: str, out: str) -> None:
+def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
     """Capture whole tracks to TWRF files, one Logical Forward pass each.
 
-    Each pass ends when the tape stops at logical EOT. After every track the
-    capture is decoded and the dump stops early if the tape looks unhealthy.
+    Each pass winds to its track's starting end, then ends when the tape stops
+    at logical EOT. Dump only reads transitions; `tw convert` judges the data.
+    After every pass it checks, without decoding, that the pass ended cleanly
+    and the drive found as many segments as before, and stops early if the
+    tape looks unhealthy. --check also decodes and checks sector CRCs.
     Serpentine order: run tracks in ascending order to avoid rewinds.
     """
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
@@ -612,12 +618,16 @@ def dump(app: AppContext, tracks: str, out: str) -> None:
     track_list = _parse_tracks(tracks)
     with _drive_session(app) as d:
         try:
-            results = dump_tracks(d, track_list, Path(out), log=click.echo)
+            results = dump_tracks(d, track_list, Path(out), log=click.echo, check=check)
         except DumpStopped as exc:
             raise click.ClickException(f"dump stopped: {exc}") from exc
-    good = sum(r.good for r in results)
-    total = sum(r.sectors for r in results)
-    click.echo(f"done: {len(results)} tracks, {good}/{total} sectors CRC-clean -> {out}")
+    segments = sum(r.index_pulses for r in results)
+    line = f"done: {len(results)} tracks, {segments} segments by INDEX"
+    if check:
+        good = sum(r.good or 0 for r in results)
+        total = sum(r.sectors or 0 for r in results)
+        line += f", {good}/{total} sectors CRC-clean"
+    click.echo(f"{line} -> {out}")
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,19 @@ this cartridge, QIC-117 Rev J (8)) -- plus the drive's raw status,
 configuration, ROM, vendor ID and tape status bytes and the tw/firmware
 commits that produced it.
 
+Dumping only gets transitions off the tape; judging the data is ``tw
+convert``'s job. What a dump does check after each pass is cheap and needs no
+decoding (:func:`stream_health`): did the pass end at logical EOT, does the
+stream match the firmware's END accounting, and how many segments did the drive
+find? During Logical Forward the drive pulses INDEX once at the start of every
+segment it finds (Rev J (10)), and nothing else: on the bench, 207 pulses for a
+207-segment track, ~710 ms apart, no idle cue pulses. So INDEX counts segments,
+and a long gap between pulses means segments the drive couldn't find. That
+catches a tape that is shedding or a head that has lost the track. It can't see
+garbage inside segments the drive still finds (the drive finds segments by
+their erased gaps, not their data), so ``--check`` additionally decodes each
+pass and applies a CRC rule.
+
 The firmware ends each pass by itself when the tape stops at logical EOT (no
 flux for 1 s), so nothing here depends on Stop Tape, which the bench drive
 ignored during Logical Forward.
@@ -21,9 +34,8 @@ stops is already past the next track's first few segments: the first dump of
 tape "jc" lost the first ~5 segments of every track after track 0 that way. So
 each pass first winds to the end of the tape where its track starts
 (:func:`wind_to_track_start`); in a sequential dump that is only the last few
-feet. Old tape is fragile; after every pass we check the drive and decode
-the capture, and stop the dump if anything looks worse rather than spending
-more passes on a tape that may be shedding.
+feet. Old tape is fragile: after every pass the dump stops if anything
+looks worse, rather than spending more passes on a tape that may be shedding.
 """
 
 from __future__ import annotations
@@ -51,9 +63,18 @@ from tapewyrm.types import (
     TapeStatus,
 )
 
-# A track whose decodable sectors are less than this fraction CRC-clean stops
-# the dump: something (head, tape, PLL) has degraded and we want a human first.
+# Stop rules (see check_pass). Each one means something on the tape or in the
+# drive has degraded and a human should look before the next pass.
+# --check only: fewer than this fraction of decoded sectors CRC-clean.
 MIN_GOOD_FRACTION = 0.80
+# Every track of one tape has the same segment count, so a pass whose INDEX
+# count falls below this fraction of the best pass so far has lost segments.
+MIN_INDEX_FRACTION = 0.90
+# Estimated segments missed inside the pass (long INDEX gaps), as a fraction of
+# the segments found.
+MAX_MISSING_FRACTION = 0.05
+# An INDEX gap this many times the pass's median gap hides missed segments.
+LONG_GAP_FACTOR = 1.5
 CAPTURE_SUFFIX = ".twrf"
 
 
@@ -70,15 +91,67 @@ class TrackResult:
     end_reason: str  # EndReason name, or "none" if the stream had no END
     verified: bool  # our parse matched the firmware's END accounting
     tape_seconds: float  # flux time in the capture
-    sectors: int
-    good: int  # ID and data CRC both OK
-    segments: int  # distinct segments seen
+    index_pulses: int  # segments the drive found (one INDEX per segment)
+    missing_est: int  # segments estimated missed from long INDEX gaps
     status_after: int  # raw Report Drive Status after the pass
     error_after: int | None  # latched error code after the pass, if any
+    # Only with --check (decoded); None otherwise.
+    sectors: int | None = None
+    good: int | None = None  # ID and data CRC both OK
+    segments: int | None = None  # distinct segments seen in the sector IDs
 
     @property
-    def good_fraction(self) -> float:
+    def good_fraction(self) -> float | None:
+        if self.sectors is None or self.good is None:
+            return None
         return self.good / self.sectors if self.sectors else 0.0
+
+
+def missing_segments(index_ticks: list[int]) -> int:
+    """Segments the drive probably skipped, from gaps between INDEX pulses.
+
+    Segments pass the head at a steady rate, so INDEX pulses are evenly spaced
+    (~710 ms on the 350 at 500 kbps). A gap of k median gaps hides k - 1
+    segments. Only gaps over LONG_GAP_FACTOR x median count, so ordinary
+    jitter (+-4% on the bench) never does. Segments missed before the first or
+    after the last pulse can't be seen here; the INDEX-count rule covers those.
+    """
+    gaps = [b - a for a, b in zip(index_ticks, index_ticks[1:], strict=False)]
+    if len(gaps) < 3:
+        return 0
+    median = sorted(gaps)[len(gaps) // 2]
+    return sum(round(g / median) - 1 for g in gaps if g > LONG_GAP_FACTOR * median)
+
+
+def check_pass(res: TrackResult, best_index: int, flux_ack: int = 0) -> str | None:
+    """Why the dump should stop after this pass, or None to carry on.
+
+    ``best_index`` is the highest INDEX count of the earlier passes in this
+    dump (0 if this is the first).
+    """
+    if flux_ack != 0:
+        return f"GW flux status {flux_ack} (overflow?)"
+    if res.end_reason != EndReason.EOT.name:
+        return f"pass ended with {res.end_reason}, not EOT"
+    if not res.verified:
+        return "stream did not verify against END marker"
+    if best_index and res.index_pulses < MIN_INDEX_FRACTION * best_index:
+        return (
+            f"drive found only {res.index_pulses} segments (best pass so far: "
+            f"{best_index}); stopping to protect the tape"
+        )
+    if res.missing_est > MAX_MISSING_FRACTION * max(res.index_pulses, 1):
+        return (
+            f"~{res.missing_est} segments missed inside the pass "
+            f"({res.index_pulses} found); stopping to protect the tape"
+        )
+    fraction = res.good_fraction
+    if fraction is not None and fraction < MIN_GOOD_FRACTION:
+        return (
+            f"only {fraction:.0%} of sectors CRC-clean (< {MIN_GOOD_FRACTION:.0%}); "
+            "stopping to protect the tape"
+        )
+    return None
 
 
 def _report(drive: Qic117Drive, name: str, bits: int) -> int | None:
@@ -168,8 +241,13 @@ def dump_tracks(
     out_dir: Path,
     *,
     log: Callable[[str], None] = print,
+    check: bool = False,
 ) -> list[TrackResult]:
-    """Capture each track in order; raise :class:`DumpStopped` on trouble."""
+    """Capture each track in order; raise :class:`DumpStopped` on trouble.
+
+    ``check`` also decodes every pass (~17 s each) and stops on a low
+    CRC-clean fraction; see the module docstring.
+    """
     from tapewyrm.qic117.status import error_name
     from tapewyrm.tape.geometry import coord_to_seg
 
@@ -223,8 +301,9 @@ def dump_tracks(
         st = drive.wait_ready(30)
         err = drive.last_error.code if (st.error and drive.last_error) else None
 
-        log(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; decoding...")
-        _, ps, sectors = summarize(path)
+        log(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
+        hdr_read, flux_at = read_header(path)
+        ps = gwstream.parse(path.read_bytes()[flux_at:])
         res = TrackResult(
             track=track,
             path=str(path),
@@ -233,30 +312,30 @@ def dump_tracks(
             end_reason=EndReason(ps.end.reason).name if ps.end else "none",
             verified=ps.verified,
             tape_seconds=round(ps.duration_s, 1),
-            sectors=len(sectors),
-            good=sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok),
-            segments=len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors}),
+            index_pulses=len(ps.index_ticks),
+            missing_est=missing_segments(ps.index_ticks),
             status_after=st.raw,
             error_after=err,
         )
+        summary = f"{res.index_pulses} segments by INDEX, {res.missing_est} missed in gaps"
+        if check:
+            log(f"track {track:2d}: decoding (--check)...")
+            sectors = mfm.recover_sectors_from_flux(
+                ps.intervals, ps.sample_clock_hz, hdr_read.rate_kbps
+            )
+            res.sectors = len(sectors)
+            res.good = sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok)
+            res.segments = len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors})
+            summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
+        best_index = max((r.index_pulses for r in results), default=0)
         results.append(res)
         with (out_dir / "dump.jsonl").open("a") as f:
             f.write(json.dumps(asdict(res)) + "\n")
         log(
-            f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, "
-            f"{res.good}/{res.sectors} sectors good across {res.segments} segments"
+            f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, {summary}"
             + (f", error {err} {error_name(err)}" if err else "")
         )
-
-        if flux_ack != 0:
-            raise DumpStopped(f"track {track}: GW flux status {flux_ack} (overflow?)")
-        if res.end_reason != EndReason.EOT.name:
-            raise DumpStopped(f"track {track}: pass ended with {res.end_reason}, not EOT")
-        if not res.verified:
-            raise DumpStopped(f"track {track}: stream did not verify against END marker")
-        if res.good_fraction < MIN_GOOD_FRACTION:
-            raise DumpStopped(
-                f"track {track}: only {res.good_fraction:.0%} of sectors CRC-clean "
-                f"(< {MIN_GOOD_FRACTION:.0%}); stopping to protect the tape"
-            )
+        reason = check_pass(res, best_index, flux_ack)
+        if reason is not None:
+            raise DumpStopped(f"track {track}: {reason}")
     return results
