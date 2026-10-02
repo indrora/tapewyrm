@@ -16,7 +16,7 @@ tape_format).
 
 from __future__ import annotations
 
-from tapewyrm.codec import flux, merge, mfm, place, qic113
+from tapewyrm.codec import flux, merge, mfm, qic113
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.codec import volume as volume_mod
 from tapewyrm.rawflux.container import RawFluxCapture
@@ -25,7 +25,6 @@ from tapewyrm.types import (
     FileSet,
     RawSector,
     RecoveryReport,
-    Segment,
     SegmentStatus,
 )
 
@@ -56,31 +55,17 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
     per_pass = [_recover_pass(cap) for cap in caps]
     merged = list(merge.union(per_pass))
 
-    # 2. Place self-locating sectors into segment bins (capture-order independent).
-    segs = place.place(merged, geom)
+    # 2-3. Place self-locating sectors into segment bins, find the header (the
+    #      first defect-free segment), and re-place under its geometry with the
+    #      bad-sector map applied. The map must land BEFORE RS -- an excluded
+    #      sector is not part of the codeword (QIC-80-MC Rev N 6.2.5).
     report = RecoveryReport()
-
-    # 3. Header segment first: it is the first defect-free segment, so it needs
-    #    no correction, and its bad-sector map must be applied BEFORE RS -- an
-    #    excluded sector is not part of the codeword (QIC-80-MC Rev N 6.2.5).
-    header_seg = _find_header_segment(segs)
-    if header_seg is None:
+    located = volume_mod.locate_header(merged, geom)
+    if located is None:
         report.notes.append("no header segment found; cannot reassemble volumes")
         return [], report
-    vol, bsm = volume_mod.parse_header(header_seg)
+    vol, bsm, segs = located.vol, located.bsm, located.segs
     report.expected_bad = len(bsm.bad_segments) + len(bsm.bad_lsns)
-
-    # The header (segment 0, side 0) places correctly under any geometry; every
-    # other sector needs the header's: floppy tracks per side = max_ftk + 1
-    # (150 on the bench tape, not Rev N's 255). Re-place with it.
-    if vol.segments_per_track:
-        geom = Geometry(
-            tracks=vol.tracks or geom.tracks,
-            segments_per_track=vol.segments_per_track,
-            ftk_per_side=vol.max_ftk + 1 if vol.max_ftk else geom.ftk_per_side,
-        )
-        segs = place.place(merged, geom)
-    volume_mod.apply_bsm(segs, bsm)
 
     # 4. RS erasure-decode each segment; record per-segment status.
     for key, seg in segs.items():
@@ -101,13 +86,3 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
         filesets.append(qic113.extract(byte_stream, vtbl))
 
     return filesets, report
-
-
-def _find_header_segment(segs: dict[tuple[int, int], Segment]) -> Segment | None:
-    """Find the header segment: the first defect-free segment whose sector 0 holds
-    the format parameter record signature (DESIGN.md §7.3)."""
-    for seg in sorted(segs.values(), key=lambda s: s.seg):
-        data = seg_mod.segment_data(seg)
-        if data[:4] == volume_mod.FPR_SIGNATURE:
-            return seg
-    return None

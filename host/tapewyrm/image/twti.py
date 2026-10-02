@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 
-from tapewyrm.codec import gwstream, merge, mfm, place
+from tapewyrm.codec import gwstream, merge, mfm
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.codec import volume as volume_mod
 from tapewyrm.rawflux.container import header_to_dict, read_header
@@ -138,7 +138,7 @@ def capture_files(sources: Iterable[Path]) -> list[Path]:
     return out
 
 
-def _decode_capture(path: Path) -> tuple[list[RawSector], dict]:
+def decode_capture(path: Path) -> tuple[list[RawSector], dict]:
     blob = path.read_bytes()
     if path.suffix == ".twrf":
         hdr, flux_at = read_header(path)
@@ -164,22 +164,19 @@ def convert(sources: Iterable[Path], out: Path, *, log: Callable[[str], None] = 
         raise ValueError("no track captures found")
     passes, source_meta = [], []
     for path in files:
-        sectors, meta = _decode_capture(path)
+        sectors, meta = decode_capture(path)
         log(f"{path.name}: {meta['sectors']} sectors at {meta['twrf']['rate_kbps']} kbps")
         passes.append(sectors)
         source_meta.append(meta)
     merged = list(merge.union(passes))
 
-    # The header (segment 0, side 0) places right under any geometry; then the
-    # header's own geometry places everything else (floppy tracks per side).
-    segs = place.place(merged, Geometry(tracks=28, segments_per_track=207))
-    header_seg = next((s for s in segs.values() if s.seg == 0), None)
-    if header_seg is None:
-        raise ValueError("no header segment (segment 0) in these captures")
-    vol, bsm = volume_mod.parse_header(header_seg)
-    geom = Geometry(vol.tracks, vol.segments_per_track, ftk_per_side=vol.max_ftk + 1)
-    segs = place.place(merged, geom)
-    volume_mod.apply_bsm(segs, bsm)
+    # The header places right under any geometry; then the header's own
+    # geometry places everything else (floppy tracks per side). See
+    # volume.locate_header, shared with the pipeline and `tw identify`.
+    located = volume_mod.locate_header(merged, Geometry(tracks=28, segments_per_track=207))
+    if located is None:
+        raise ValueError("no header segment in these captures")
+    vol, bsm, geom, segs = located.vol, located.bsm, located.geometry, located.segs
     by_seg = {s.seg: s for s in segs.values()}
 
     total = geom.total_segments()

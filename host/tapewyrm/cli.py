@@ -679,6 +679,31 @@ def extract(image: Path, out: Path) -> None:
 
 
 @cli.command()
+@click.argument("source", type=click.Path(exists=True, path_type=Path))
+@click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
+def identify(source: Path, as_json: bool) -> None:
+    """What is on a tape: name, dates, bad sectors and the volume table.
+
+    SOURCE is a TWTI image, a TWRF (or legacy .raw) capture, or a dump
+    directory. Only the header segment and the volume table at the start of
+    track 0 are corrected, so a short capture of BOT is enough.
+    """
+    import json
+
+    from tapewyrm.image.identify import format_info, identify, to_dict
+
+    try:
+        info = identify(source, log=None if as_json else click.echo)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(to_dict(info), indent=1))
+    else:
+        for line in format_info(info):
+            click.echo(line)
+
+
+@cli.command()
 @click.argument("image", type=click.Path(exists=True))
 @click.option("--dfu", "use_dfu", is_flag=True, help="flash via DFU instead of the app bootloader")
 @click.pass_obj

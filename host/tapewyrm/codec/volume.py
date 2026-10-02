@@ -15,11 +15,13 @@ file set's Volume Data Area byte stream (DESIGN.md §7.5 input).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
+from tapewyrm.codec import place
 from tapewyrm.codec import segment as seg_mod
-from tapewyrm.tape.geometry import coord_to_lsn
-from tapewyrm.types import Segment
+from tapewyrm.tape.geometry import Geometry, coord_to_lsn
+from tapewyrm.types import RawSector, Segment, SegmentStatus
 
 # Format parameter record (DESIGN.md §7.3) ----------------------------------
 FPR_SIGNATURE = b"\x55\xaa\x55\xaa"
@@ -210,6 +212,86 @@ def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
     return vol, bsm
 
 
+@dataclass
+class LocatedHeader:
+    """The header segment found in a set of sectors, plus everything placed by it.
+
+    ``segs`` is the full placement re-done under the header's own geometry, with
+    the bad-sector map already applied (so it is ready for RS correction).
+    ``header`` is the segment the format parameter record came from -- the first
+    copy, or the duplicate when the first could not be read -- and
+    ``header_status`` says whether RS had to rebuild any of it.
+    """
+
+    vol: VolumeInfo
+    bsm: BadSectorMap
+    geometry: Geometry
+    segs: dict[tuple[int, int], Segment]
+    header: Segment
+    header_status: SegmentStatus
+
+
+def locate_header(sectors: Iterable[RawSector], fallback: Geometry) -> LocatedHeader | None:
+    """Find the header segment and re-place every sector under its geometry.
+
+    This is the "header first" step every decode starts with (DESIGN.md §7.3):
+
+    1. Place the sectors under ``fallback`` geometry. The header lives at the
+       very start of track 0, which places correctly under any geometry -- but
+       nothing past it does until we know the tape's floppy tracks per side.
+    2. Walk segments in ascending order and take the first one whose data area
+       starts with the format parameter record signature. The header is "the
+       first defect-free segment", so normally its raw sector 0 already reads.
+       When sector 0 is missing or failed its CRC we try an RS correction
+       before giving up on that segment; if that fails too, the walk simply
+       moves on and finds the duplicate copy one segment later.
+    3. Re-place under the header's geometry (floppy tracks per side =
+       ``max_ftk + 1`` -- 150 on the bench tape, not Rev N's 255) and apply the
+       bad-sector map, which must happen before any RS correction of the data
+       segments (see :func:`apply_bsm`).
+
+    Returns ``None`` when no segment carries the signature.
+    """
+    merged = list(sectors)
+    segs = place.place(merged, fallback)
+    found = _find_header(segs)
+    if found is None:
+        return None
+    header, header_status, header_data = found
+    vol, bsm = parse_header_data(header_data)
+
+    geom = fallback
+    if vol.segments_per_track:
+        geom = Geometry(
+            tracks=vol.tracks or fallback.tracks,
+            segments_per_track=vol.segments_per_track,
+            ftk_per_side=vol.max_ftk + 1 if vol.max_ftk else fallback.ftk_per_side,
+        )
+        segs = place.place(merged, geom)
+    apply_bsm(segs, bsm)
+    return LocatedHeader(vol, bsm, geom, segs, header, header_status)
+
+
+def _find_header(
+    segs: dict[tuple[int, int], Segment],
+) -> tuple[Segment, SegmentStatus, bytes] | None:
+    """First segment whose (possibly RS-corrected) data begins with the FPR signature."""
+    for seg in sorted(segs.values(), key=lambda s: s.seg):
+        data = seg_mod.segment_data(seg)
+        if data[:4] == FPR_SIGNATURE:
+            return seg, seg_mod.classify(seg), data
+        sector0 = seg.sectors[0]
+        if sector0 is not None and sector0.data_crc_ok and not sector0.deleted:
+            continue  # sector 0 read fine and is not a header: not this one
+        # Sector 0 is unreadable. Only RS can say whether this was the header.
+        # (Deleted-data segments before the header land here too; they are all
+        # erasures, so the solve gives up at once.)
+        res = seg_mod.correct_segment(seg)
+        if res.status is not SegmentStatus.UNCORRECTABLE and res.data[:4] == FPR_SIGNATURE:
+            return seg, res.status, res.data
+    return None
+
+
 # Rev N §7.1: the format parameter record is bytes 0-255 of sector 0 (234-255
 # unused), so the map -- "sectors 0-28" -- can only begin at offset 256. (We used
 # to start at 128, which read the lifetime-segments counter and the initial
@@ -395,7 +477,7 @@ def volume_streams(
     spt = vol.segments_per_track or 1
     by_abs = _segments_by_abs(segs)
 
-    vtbl_seg = _find_volume_table_segment(segs)
+    vtbl_seg = find_volume_table_segment(segs)
     if vtbl_seg is None:
         return []
     entries = parse_volume_table(vtbl_seg)
@@ -421,7 +503,7 @@ def _segments_by_abs(segs: dict[tuple[int, int], Segment]) -> dict[int, Segment]
     return {s.seg: s for s in segs.values()}
 
 
-def _find_volume_table_segment(segs: dict[tuple[int, int], Segment]) -> Segment | None:
+def find_volume_table_segment(segs: dict[tuple[int, int], Segment]) -> Segment | None:
     """Find the segment whose data area begins with a VTBL/XTBL signature."""
     # Prefer the lowest absolute segment that looks like a volume table.
     candidates = sorted(segs.values(), key=lambda s: s.seg)

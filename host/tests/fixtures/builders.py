@@ -7,8 +7,11 @@ exercise the parsers end-to-end with no hardware.
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 
+from tapewyrm.codec import rs
 from tapewyrm.codec.volume import FPR_SIGNATURE, SIG_VTBL, VTBL_ENTRY_LEN
+from tapewyrm.tape.geometry import FTK_PER_SIDE, seg_to_coord
 from tapewyrm.types import RawSector, Segment
 
 SECTOR = 1024
@@ -58,6 +61,9 @@ def build_format_parameter_record(
     format_date: int = 0,
     bad_lsns: list[int] | None = None,
     bad_segments: list[int] | None = None,
+    header_seg: int = 0,
+    dup_header_seg: int = 1,
+    first_data_seg: int = 2,
 ) -> bytes:
     """Build sector 0 of the header segment: FPR + bad-sector map.
 
@@ -77,6 +83,7 @@ def build_format_parameter_record(
     name = tape_name.encode("ascii")[:44]
     sec[30 : 30 + len(name)] = name
     struct.pack_into("<I", sec, 14, format_date)  # Rev N: most recent format
+    struct.pack_into("<HHH", sec, 6, header_seg, dup_header_seg, first_data_seg)  # 6-11
 
     # Bad-sector map at offset 256.
     off = 256
@@ -144,6 +151,40 @@ def build_volume_table_segment(seg_abs: int, vtbl_entries: list[bytes]) -> Segme
     tpt = seg_abs // 207
     tps = seg_abs % 207
     return make_segment_from_sectors(tpt, tps, seg_abs, sectors)
+
+
+def with_parity(seg: Segment) -> Segment:
+    """Give a segment real RS parity in slots 29-31 (no BSM exclusions).
+
+    Encoding a systematic code is solving for 3 erased parity symbols, so the
+    column decoder does it (same trick as tests/test_rs_segment.py). Builders
+    above leave the parity sectors zero, which only works while nothing needs
+    correcting.
+    """
+    rows = [sec.data if sec is not None else bytes(SECTOR) for sec in seg.sectors]
+    n = Segment.SECTORS
+    cols = [[rows[r][c] for r in range(n)] for c in range(SECTOR)]
+    cols = [rs.correct_codeword(col, [n - 3, n - 2, n - 1], n) for col in cols]
+    for r in range(n - 3, n):
+        seg.sectors[r] = RawSector(
+            fsd=0, ftk=0, fsc=r + 1, data=bytes(cols[c][r] for c in range(SECTOR)),
+            id_crc_ok=True, data_crc_ok=True, deleted=False,
+        )  # fmt: skip
+    return seg
+
+
+def segment_raw_sectors(seg: Segment, ftk_per_side: int = FTK_PER_SIDE) -> list[RawSector]:
+    """The segment's sectors as a capture would yield them: each stamped with
+    the (FSD, FTK, FSC) ID that places it back at ``seg.seg``.
+
+    Lets tests feed ``place``/``locate_header`` exactly as decoded flux would.
+    """
+    fsd, ftk, fsc0 = seg_to_coord(seg.seg, ftk_per_side)
+    return [
+        replace(sec, fsd=fsd, ftk=ftk, fsc=fsc0 + slot)
+        for slot, sec in enumerate(seg.sectors)
+        if sec is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
