@@ -241,7 +241,7 @@ class TapeStatus:
 
 
 # ---------------------------------------------------------------------------
-# Drive profile (DESIGN.md §6A.3) — data, not code; loaded from profiles/*.toml
+# Drive profile (DESIGN.md §6A.3) — data, not code; loaded from profiles/drive/*.toml
 # ---------------------------------------------------------------------------
 
 

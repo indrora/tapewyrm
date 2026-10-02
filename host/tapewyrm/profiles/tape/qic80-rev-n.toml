@@ -1,0 +1,20 @@
+# QIC-80-MC Revision N §8 volume table entries (docs/qic-standards/qic80n.pdf).
+#
+# The spec layout, for software that follows it to the letter: vendor-specific
+# bit clear, every field at its Rev N offset. codec.volume._parse_vtbl_entry
+# uses the same offsets for `tw extract`; tests/test_tape_profile.py keeps the
+# two in step.
+
+name = "qic80-rev-n"
+description = "QIC-80-MC Rev N volume table (vendor bit clear)"
+
+[match]
+vendor_bit = false
+
+[vtbl]
+multi_cartridge_seq = [57, 1]
+dir_section_size = [92, 4]      # doubleword
+data_section_size = [96, 8]     # quadword
+source_label = [106, 16]
+compression = [124, 1]          # bit 7 = compressed, bits 0-5 = QIC-123 code
+os_type = [125, 1]              # 1 = DOS

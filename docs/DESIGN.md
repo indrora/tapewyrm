@@ -262,9 +262,11 @@ tapewyrm/
   rawflux/
     container.py      # RawFluxCapture read/write, marker parsing, verify()
   profiles/
-    colorado.toml     # per-drive wake/timing data (one file per drive family)
-    iomega.toml
-    conner.toml
+    drive/            # per-drive wake/timing data (one file per drive family)
+      colorado.toml
+      iomega.toml
+      conner.toml
+    tape/             # per-tape quirks: VTBL layout, BSM layout (`tw identify --tape-profile`)
   cli.py              # probe / capture / decode / recover / replay
 tests/
   fixtures/           # golden RawFluxCaptures, recorded transaction logs
@@ -377,7 +379,7 @@ class Qic117Drive:
     def reset(self) -> None: ...
 ```
 
-- **`DriveProfile` — the injection seam (data, not code).** Per-drive wake/select quirk + timing envelope, loaded from `profiles/*.toml`. This is the analogue of ftape `vendors.h`; a new drive is a new TOML file, never a code change.
+- **`DriveProfile` — the injection seam (data, not code).** Per-drive wake/select quirk + timing envelope, loaded from `profiles/drive/*.toml`. This is the analogue of ftape `vendors.h`; a new drive is a new TOML file, never a code change.
 
 ```python
 @dataclass(frozen=True)
@@ -586,7 +588,7 @@ The dataclasses that cross module boundaries (all in `types.py` unless noted):
 | `ErrorCode` | QIC error + fatal flag | `qic117` | `tape` |
 | `DriveConfig` | data rate | `qic117` | `tape`, `codec` (rate) |
 | `TapeStatus` | format (QIC-40/80/3010/3020), length | `qic117` | `tape` (geometry) |
-| `DriveProfile` | wake seq, timing, quirks | `profiles/*.toml` | `qic117` |
+| `DriveProfile` | wake seq, timing, quirks | `profiles/drive/*.toml` | `qic117` |
 | `Geometry` | tracks, segs/track, direction() | `tape` | `tape`, `codec` |
 | `CaptureHeader` | rate, clock, track, direction, pass-id, utc | `tape` | `rawflux`, `codec` |
 | `Marker` | session-start / heartbeat / event / end | `rawflux` (parse) | `codec`, reports |
@@ -1046,7 +1048,7 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 | `codec/merge.py` | multi-pass union of good sectors before RS |
 | `report.py` | `RecoveryReport` (per-segment/track quality) |
 | `cli.py` | Click CLI: `probe` / `capture` / `decode` / `recover` / `replay` |
-| `profiles/*.toml` | per-drive `DriveProfile` data |
+| `profiles/drive/*.toml` | per-drive `DriveProfile` data |
 
 ### 13.5 Decode stack (one ladder, with the module at each rung)
 

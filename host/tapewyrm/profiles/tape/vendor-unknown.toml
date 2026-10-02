@@ -1,0 +1,12 @@
+# A vendor-specific entry we have no layout for.
+#
+# QIC-80-MC Rev N §8: when byte 56 bit 0 is set, "only this bit and the
+# previous bytes (0-55) are defined". So this profile reads nothing past byte
+# 56 -- the honest answer for an unknown vendor. It always loses to a profile
+# whose extra fields check out, and wins over one whose fields read garbage.
+
+name = "vendor-unknown"
+description = "Vendor-specific entry with an unknown layout: bytes 0-56 only"
+
+[match]
+vendor_bit = true

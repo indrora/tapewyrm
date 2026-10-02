@@ -15,6 +15,7 @@ from tapewyrm.codec.volume import SIG_EXVT, VTBL_ENTRY_LEN
 from tapewyrm.image import identify as ident
 from tapewyrm.image.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, TapeImage
 from tapewyrm.types import RawSector, Segment
+from tests.fixtures import bench_3m
 from tests.fixtures.builders import (
     build_header_segment,
     build_volume_table_segment,
@@ -187,3 +188,80 @@ def test_cli_text(tmp_path):
     result = CliRunner().invoke(cli, ["identify", str(path)])
     assert result.exit_code == 0, result.output
     assert "tape name     BACKUP" in result.output
+
+
+# ---------------------------------------------------------------------------
+# The 3M DC2120 bench tape: factory stamp, cartridge, tape profile
+# ---------------------------------------------------------------------------
+
+
+def _3m_sectors() -> list[RawSector]:
+    data = bench_3m.header_data()
+    header = make_segment_from_sectors(
+        0, 0, 0, [data[k * 1024 : (k + 1) * 1024] for k in range(29)]
+    )
+    vtbl = make_segment_from_sectors(0, 2, 2, [bench_3m.VTBL])
+    return _sectors(header, vtbl)
+
+
+def test_3m_tape_end_to_end():
+    info = ident.from_sectors(_3m_sectors())
+    assert info.vol.manufacturer == "3M     QIC80-I IO80Fi@68IPS V1.11.22A ID5"
+    assert info.vol.lot_code == "0001"
+    assert info.cartridge.cartridge is not None
+    assert info.cartridge.cartridge.name == "DC2120"
+    assert info.profile == "mtn"
+    assert info.volumes[0].source_label == "DISK1_VOL1"
+    assert (len(info.bsm.bad_lsns), info.notes) == (2, [])
+    text = "\n".join(ident.format_info(info))
+    assert "factory pre-formatted" in text and "DC2120 class" in text
+    assert "QIC-122" in text and "164.2 MB" in text
+
+
+def test_forced_profile_is_used_even_when_it_scores_badly():
+    info = ident.from_sectors(_3m_sectors(), tape_profile="qic80-rev-n")
+    assert info.profile == "qic80-rev-n" and len(info.verdicts) == 1
+    assert info.verdicts[0].failures
+
+
+def test_verbose_dumps_raw_bytes_and_unused_fields():
+    info = ident.from_sectors(_3m_sectors())
+    text = "\n".join(ident.format_info(info, verbose=True))
+    assert "78-127: 03" in text and "144-145: 02" in text  # Rev N "unused", set here
+    assert "DISK1_VOL1" in text and "profile mtn: score" in text
+    assert "FAIL" in text  # the losing profiles show why they lost
+
+
+def test_owner_formatted_tape_has_no_stamp():
+    info = ident.from_sectors(_sectors(_header(0), _vtbl()))
+    assert info.vol.manufacturer == ""
+    assert "no factory stamp" in "\n".join(ident.format_info(info))
+
+
+def test_drive_reports_are_shown():
+    drive = {"tape_status": 0x22, "drive_config": 0xD0, "drive_vendor_id": 71}
+    info = ident.from_sectors(_3m_sectors(), drive=drive)
+    line = next(x for x in ident.format_info(info) if x.startswith("drive saw"))
+    assert "307.5 ft" in line and "extra-length" in line
+
+
+def test_cli_tape_profile_and_json(tmp_path):
+    data = bench_3m.header_data()
+    header = make_segment_from_sectors(
+        0, 0, 0, [data[k * 1024 : (k + 1) * 1024] for k in range(29)]
+    )
+    vtbl = make_segment_from_sectors(0, 2, 2, [bench_3m.VTBL])
+    path = _write_image(tmp_path / "t.twti", {0: header, 2: vtbl})
+    result = CliRunner().invoke(cli, ["identify", "--json", str(path)])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.output)
+    assert doc["tape_profile"] == "mtn"
+    assert doc["header"]["lot_code"] == "0001"
+    assert doc["cartridge"]["catalogue"]["name"] == "DC2120"
+    assert doc["volumes"][0]["raw_hex"].startswith("5654424c")
+
+    forced = CliRunner().invoke(cli, ["identify", "--tape-profile", "cms-qic113", str(path)])
+    assert forced.exit_code == 0 and "tape profile  cms-qic113" in forced.output
+
+    bad = CliRunner().invoke(cli, ["identify", "--tape-profile", "nope", str(path)])
+    assert bad.exit_code != 0 and "no tape profile 'nope'" in bad.output

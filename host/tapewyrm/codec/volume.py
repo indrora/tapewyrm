@@ -68,6 +68,11 @@ class VolumeInfo:
     segments_written: int = 0  # 130-133: written/formatted/verified, lifetime
     initial_format_date: int = 0  # 138-141
     format_count: int = 0  # 142-143
+    # Pre-formatted tapes only ("All zero if tape not pre-formatted"): the
+    # duplicator's identification, e.g. the 3M DC2120's
+    # "3M     QIC80-I IO80Fi@68IPS V1.11.22A ID5" with lot "0001".
+    manufacturer: str = ""  # 146-189: original manufacturer name/code
+    lot_code: str = ""  # 190-233: original manufacturer lot code
 
 
 @dataclass
@@ -164,6 +169,11 @@ def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None
 # ---------------------------------------------------------------------------
 
 
+def _ascii(raw: bytes) -> str:
+    """A space-filled ASCII field: up to the first NUL, trailing blanks dropped."""
+    return raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
+
+
 def parse_header(seg: Segment) -> tuple[VolumeInfo, BadSectorMap]:
     """Parse a header :class:`Segment` (see :func:`parse_header_data`)."""
     return parse_header_data(seg_mod.segment_data(seg))
@@ -183,7 +193,6 @@ def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
     def u32(off: int) -> int:
         return int.from_bytes(sector0[off : off + 4], "little")
 
-    name_raw = sector0[30:74]
     vol = VolumeInfo(
         format_code=sector0[4],
         segments_per_track=u16(24),
@@ -191,7 +200,7 @@ def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
         max_fsd=sector0[27],
         max_ftk=sector0[28],
         max_fsc=sector0[29],
-        tape_name=name_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip(),
+        tape_name=_ascii(sector0[30:74]),
         # Offset 14, not 74: 74-77 is when the *tape name* was written (Rev N).
         format_date=u32(14),
         valid_signature=sector0[0:4] == FPR_SIGNATURE,
@@ -206,6 +215,8 @@ def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
         segments_written=u32(130),
         initial_format_date=u32(138),
         format_count=u16(142),
+        manufacturer=_ascii(sector0[146:190]),
+        lot_code=_ascii(sector0[190:234]),
     )
 
     bsm = _parse_bsm(data, vol.format_code)
@@ -391,14 +402,23 @@ def parse_volume_table_data(data: bytes) -> list[VtblEntry]:
     area in 128-byte records, recognizing the four signatures; ``UTID`` (tape
     name) and ``EXVT`` (overflow) are recognized but yield no file-set range.
     """
-    entries: list[VtblEntry] = []
+    return [_parse_vtbl_entry(rec) for rec in vtbl_records(data)]
+
+
+def vtbl_records(data: bytes) -> list[bytes]:
+    """The raw 128-byte ``VTBL`` records of a volume-table data area, in order.
+
+    Tape profiles (``codec.tape_profile``) decode these themselves, so this is
+    the one place that knows how the table is walked.
+    """
+    records: list[bytes] = []
     off = 0
     n = len(data)
     while off + VTBL_ENTRY_LEN <= n:
         rec = data[off : off + VTBL_ENTRY_LEN]
         sig = rec[0:4]
         if sig == SIG_VTBL:
-            entries.append(_parse_vtbl_entry(rec))
+            records.append(rec)
         elif sig in (SIG_XTBL, SIG_UTID, SIG_EXVT):
             # Rev N §8.1-8.3: XTBL extends the preceding VTBL (unicode name and
             # password), UTID is a unicode tape name, EXVT chains the table into
@@ -410,31 +430,42 @@ def parse_volume_table_data(data: bytes) -> list[VtblEntry]:
             break  # empty record => end of table
         # Unknown 4cc: skip this record and continue scanning.
         off += VTBL_ENTRY_LEN
-    return entries
+    return records
 
 
-def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
-    """Decode one 128-byte VTBL/XTBL entry (DESIGN.md §7.3, §7.5)."""
+def parse_vtbl_base(rec: bytes) -> VtblEntry:
+    """Decode only bytes 0-56 of a VTBL record, which every layout agrees on.
 
-    def text(b: bytes) -> str:
-        return b.split(b"\x00", 1)[0].decode("ascii", errors="replace").rstrip()
-
-    flags = rec[56]
-    entry = VtblEntry(
+    QIC-80-MC Rev N §8: bytes 0-56 are always defined, even for vendor-specific
+    entries. Everything later (sizes, label, compression, OS type) is left
+    ``None`` for the caller -- the built-in Rev N / QIC-113 logic below, or a
+    tape profile -- to fill in.
+    """
+    return VtblEntry(
         signature=rec[0:4],
         # Words, not doublewords: Rev N §8 (the old 4-byte read at 4/8 gave
         # 172425219 -> 1701603654 on the bench tape instead of 3 -> 2631).
         start_seg=int.from_bytes(rec[4:6], "little"),
         end_seg=int.from_bytes(rec[6:8], "little"),
-        description=text(rec[8:52]),
-        flags=flags,
+        description=_ascii(rec[8:52]),
+        flags=rec[56],
         date=int.from_bytes(rec[52:56], "little"),
         os_type=None,
         compressed=None,
         dir_section_size=None,
         raw=rec,
     )
-    if flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:
+
+
+def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
+    """Decode one 128-byte VTBL entry (DESIGN.md §7.3, §7.5).
+
+    The fixed Rev N / QIC-113 interpretation, used by ``tw extract``. The
+    ``qic80-rev-n`` and ``cms-qic113`` tape profiles encode the same offsets as
+    data (tests/test_tape_profile.py keeps the two in step).
+    """
+    entry = parse_vtbl_base(rec)
+    if entry.flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:
         # Vendor specific and NOT a QIC-113 volume: per QIC-80 Rev N nothing
         # past byte 56 is defined.
         return entry
@@ -450,7 +481,7 @@ def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
         multi_cartridge_seq=rec[57],
         data_section_size=int.from_bytes(rec[96:104], "little"),
         compression_code=rec[124] & 0x3F,
-        source_label=text(rec[106:122]),
+        source_label=_ascii(rec[106:122]),
     )
 
 

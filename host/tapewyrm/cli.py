@@ -681,8 +681,13 @@ def extract(image: Path, out: Path) -> None:
 @cli.command()
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
-def identify(source: Path, as_json: bool) -> None:
-    """What is on a tape: name, dates, bad sectors and the volume table.
+@click.option(
+    "--tape-profile", default="guess", show_default=True,
+    help="volume-table layout: a profile name or path, or 'guess' to try them all",
+)  # fmt: skip
+@click.option("-v", "--verbose", is_flag=True, help="also dump raw records and profile scoring")
+def identify(source: Path, as_json: bool, tape_profile: str, verbose: bool) -> None:
+    """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
 
     SOURCE is a TWTI image, a TWRF (or legacy .raw) capture, or a dump
     directory. Only the header segment and the volume table at the start of
@@ -690,16 +695,17 @@ def identify(source: Path, as_json: bool) -> None:
     """
     import json
 
+    from tapewyrm.codec.tape_profile import TapeProfileError
     from tapewyrm.image.identify import format_info, identify, to_dict
 
     try:
-        info = identify(source, log=None if as_json else click.echo)
-    except ValueError as exc:
+        info = identify(source, tape_profile=tape_profile, log=None if as_json else click.echo)
+    except (ValueError, TapeProfileError) as exc:
         raise click.ClickException(str(exc)) from exc
     if as_json:
         click.echo(json.dumps(to_dict(info), indent=1))
     else:
-        for line in format_info(info):
+        for line in format_info(info, verbose=verbose):
             click.echo(line)
 
 

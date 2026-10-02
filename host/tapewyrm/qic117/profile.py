@@ -1,9 +1,9 @@
 """DriveProfile TOML loader (DESIGN.md §6A.3) — data, not code.
 
-A new drive is a new ``profiles/<name>.toml``, never a code change (the analogue
+A new drive is a new ``profiles/drive/<name>.toml``, never a code change (the analogue
 of ftape's ``vendors.h``). This loads a TOML file into the ``DriveProfile``
 dataclass from ``tapewyrm.types``. A bare name resolves against the packaged
-``tapewyrm/profiles/<name>.toml``; a path is loaded directly. ``default`` falls
+``tapewyrm/profiles/drive/<name>.toml``; a path is loaded directly. ``default`` falls
 back to ``DriveProfile.default()``.
 
 TOML schema (all keys optional except ``name``)::
@@ -34,7 +34,7 @@ from pathlib import Path
 
 from tapewyrm.types import DriveProfile, TimingParams
 
-PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles"
+PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles" / "drive"
 
 
 class ProfileError(Exception):

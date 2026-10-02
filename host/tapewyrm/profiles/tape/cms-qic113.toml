@@ -1,0 +1,21 @@
+# Colorado Memory Systems backup (and anything else writing QIC-113 volumes).
+#
+# The entry sets the vendor-specific bit (byte 56 bit 0) and carries the QIC-113
+# signature: word 113 at byte 58, the QIC-113 revision at 60 (F = 6, G = 7).
+# QIC-113 Rev G §6 then defines bytes 84-127 with the Rev N offsets. Seen on the
+# bench Colorado tape "jc" (QIC-113 Rev F, DOS extended format).
+
+name = "cms-qic113"
+description = "Vendor-specific entry carrying the QIC-113 signature (Colorado CMS backup)"
+
+[match]
+vendor_bit = true
+vtbl_bytes = [[58, "7100"]]     # word 113, little endian
+
+[vtbl]
+multi_cartridge_seq = [57, 1]
+dir_section_size = [92, 4]
+data_section_size = [96, 8]
+source_label = [106, 16]
+compression = [124, 1]
+os_type = [125, 1]

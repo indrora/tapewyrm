@@ -1,0 +1,36 @@
+# Volume tables carrying "MTN" at VTBL bytes 58-60.
+#
+# Seen on the 3M DC2120 "XIMAT" tape labelled "WIN3.11 Office Borland WP6.0"
+# (captures/3m-unknown-1, format code 2, written 1998-11-10). Who wrote it is
+# not confirmed -- "MTN" may well be Mountain Network Solutions' backup
+# software -- so the name stays the bytes we saw.
+#
+# The vendor bit is CLEAR, yet the layout is not Rev N. Worked out from that
+# one record (bench, 2026-10-01); every offset below is a reading of real
+# bytes, not a spec:
+#   57       01                    -> 1: cartridge 1 of the set (plausible)
+#   92-95    00 e0 00 00           -> 57,344: directory section size
+#   96-99    05 8e 41 0a           -> 172,068,357: data section size (~164 MB);
+#                                     a doubleword here, since the label
+#                                     starts at 102, not Rev N's 106
+#   100-101  06 16                 -> unknown
+#   102-117  "DISK1_VOL1      "    -> source label
+#   118-119  03 00                 -> unknown
+#   120      81                    -> compressed, QIC-123 code 1 (QIC-122)
+# 164 MB in 3458 segments (~98 MB) is a 1.7:1 ratio, typical for QIC-122, which
+# is what makes this reading believable. TODO(bench): confirm by decompressing
+# segment 4 with codec.qic122.
+
+name = "mtn"
+description = "'MTN' at VTBL byte 58, vendor bit clear, label at 102 (3M DC2120 bench tape)"
+
+[match]
+vendor_bit = false
+vtbl_bytes = [[58, "4d544e"]]   # "MTN"
+
+[vtbl]
+multi_cartridge_seq = [57, 1]
+dir_section_size = [92, 4]
+data_section_size = [96, 4]
+source_label = [102, 16]
+compression = [120, 1]
