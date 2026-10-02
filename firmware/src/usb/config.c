@@ -185,7 +185,7 @@ const uint8_t config_hs_descriptor[] aligned(2) = {
 char serial_string[32];
 char * const string_descriptors[] = {
     "\x09\x04", /* LANGID: US English */
-    "Keir Fraser", /* iManufacturer: firmware base author (kept as credit) */
+    "Indrora", /* iManufacturer: firmware base author (kept as credit) */
     "Tapewyrm",    /* iProduct: rebranded; VID/PID below unchanged for gw-compat */
     serial_string,
 };
