@@ -38,12 +38,22 @@ class TapeFormat(IntEnum):
 
     @property
     def rate_kbps(self) -> int:
-        """Nominal bitcell rate for this format (DESIGN.md §2.2, §7.3)."""
+        """The standard's intended transfer rate, in kbit/s (each spec's §3.4).
+
+        QIC-40-MC Rev M: 250 kb/s (25 ips; 500 kb/s at 50 ips is also given).
+        QIC-80-MC Rev N: 500 kb/s at 34 ips. QIC-3010-MC Rev H: 500 kb/s and
+        QIC-3020-MC Rev H: 1 Mb/s, both at 22.6 ips. Every one adds "other
+        speeds and compatible transfer rates are possible", and drives use
+        that: this used to say 1000 / 2000 for 3010 / 3020, which are faster
+        drive modes, not the standards' rates. The bench QIC-Extra tape (3020)
+        was read at 1000 kb/s. For a capture, trust the drive's configuration
+        report (TWRF ``rate_kbps``), not this.
+        """
         return {
             TapeFormat.QIC40: 250,
             TapeFormat.QIC80: 500,
-            TapeFormat.QIC3010: 1000,
-            TapeFormat.QIC3020: 2000,
+            TapeFormat.QIC3010: 500,
+            TapeFormat.QIC3020: 1000,
             TapeFormat.UNKNOWN: 500,
         }[self]
 

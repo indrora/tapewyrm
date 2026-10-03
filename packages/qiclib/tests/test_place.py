@@ -83,3 +83,26 @@ def test_deleted_sector_kept():
     sectors = [_sector(0, 0, 1, deleted=True)]
     segs = place(sectors, geom)
     assert segs[(0, 0)].sectors[0].deleted is True
+
+
+def test_ids_outside_the_coordinate_space_are_dropped_not_placed():
+    """FSC 0 used to land in segment -1, and the header search walked it."""
+    from dataclasses import replace
+
+    from qiclib.geometry import Geometry
+    from qiclib.place import place
+    from qiclib.types import RawSector
+
+    good = RawSector(
+        fsd=0, ftk=0, fsc=1, data=bytes(1024), id_crc_ok=True, data_crc_ok=True, deleted=False
+    )
+    geom = Geometry(tracks=28, segments_per_track=207)
+    bad = [
+        replace(good, fsc=0),  # -> segment -1
+        replace(good, fsc=129),  # past the 128 sectors of a floppy track
+        replace(good, ftk=geom.ftk_per_side),
+        replace(good, fsd=-1),
+    ]
+    segs = place([good, *bad], geom)
+    assert [s.seg for s in segs.values()] == [0]
+    assert sum(sec is not None for sec in next(iter(segs.values())).sectors) == 1

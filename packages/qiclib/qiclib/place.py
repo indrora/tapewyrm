@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
-from qiclib.geometry import Geometry
+from qiclib.geometry import SECTORS_PER_FTK, Geometry
 from qiclib.types import RawSector, Segment
 
 log = logging.getLogger(__name__)
@@ -25,18 +25,25 @@ log = logging.getLogger(__name__)
 def place(sectors: Iterable[RawSector], geom: Geometry) -> dict[tuple[int, int], Segment]:
     """Bin sectors by tape coordinate into ``{(tpt, tps): Segment}``.
 
-    Sectors with an unreadable ID (``id_crc_ok`` false and an all-zero/origin
-    coordinate that is really an orphan) still place at whatever coordinate their
-    ID decoded to; a genuinely unusable ID lands at (0,0,1) and is harmless (it
-    will collide only with the true origin sector, which, if present and CRC-good,
-    wins — see the slot-fill rule below).
+    A sector whose ID lies outside QIC's coordinate space is **dropped**, not
+    placed: FSC outside 1-128 (a floppy track holds 4 segments x 32 sectors),
+    FTK outside 0..ftk_per_side-1, or a negative FSD. Such IDs are misreads;
+    placed, an FSC of 0 used to compute segment -1 (``(fsc - 1) // 32``) and
+    the header search walked a phantom segment. No upper bound is put on the
+    segment number here: the header search places under a 28-track fallback
+    geometry first, and a QIC-3010/3020 tape's real segments lie past it.
     """
     segments: dict[tuple[int, int], Segment] = {}
     # Slot collisions are tallied and logged once after the loop.
-    n_placed = n_replaced = n_kept = 0
+    n_placed = n_replaced = n_kept = n_invalid = 0
     log.debug("placing sectors into segment bins")
 
     for sec in sectors:
+        if not (
+            1 <= sec.fsc <= SECTORS_PER_FTK and 0 <= sec.ftk < geom.ftk_per_side and sec.fsd >= 0
+        ):
+            n_invalid += 1  # counted; the summary below says how many
+            continue
         seg_abs, tpt, tps, slot = geom.place(sec.fsd, sec.ftk, sec.fsc)
         key = (tpt, tps)
         segment = segments.get(key)
@@ -55,11 +62,12 @@ def place(sectors: Iterable[RawSector], geom: Geometry) -> dict[tuple[int, int],
 
     log.debug(
         "placed %d sectors into %d segments; %d slot collisions replaced a CRC-bad copy, "
-        "%d kept the existing copy",
+        "%d kept the existing copy; %d dropped for an ID outside QIC's coordinate space",
         n_placed,
         len(segments),
         n_replaced,
         n_kept,
+        n_invalid,
     )
     return segments
 
