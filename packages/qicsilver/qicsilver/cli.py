@@ -1,7 +1,7 @@
 """qicsilver: what is on a QIC tape image, and getting the files back out.
 
-Works on TWTI tape images (``tw convert`` output); no hardware, no flux. The
-steps after ``tw dump -> tw convert``:
+Works on TWTI tape images (``tw convert`` output, or its zstd-compressed
+.twtz); no hardware, no flux. The steps after ``tw dump -> tw convert``:
 
     identify  TWTI image -> cartridge, header, dates, bad sectors, volumes
     extract   TWTI image -> one TWVL file per backup volume (QIC-122 decoded,
@@ -53,7 +53,7 @@ class AppContext:
 @click.option("-q", "--quiet", count=True, help="less log output (-q warnings, -qq errors)")
 @click.pass_context
 def cli(ctx: click.Context, show_progress: bool, verbose: int, quiet: int) -> None:
-    """qicsilver: read QIC tape images (TWTI) and recover the files on them."""
+    """qicsilver: read QIC tape images (TWTI/TWTZ) and recover the files on them."""
     app = AppContext(show_progress=show_progress)
     setup_logging(app.console, verbose, quiet)
     ctx.obj = app
@@ -72,7 +72,7 @@ _VOLUME_PROFILE_HELP = "volume-table layout: a profile name or path, or 'guess' 
 def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, raw: bool) -> None:
     """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
 
-    IMAGE is a TWTI tape image. To identify raw captures, `tw convert` them
+    IMAGE is a TWTI tape image (or a .twtz). To identify raw captures, `tw convert` them
     first; only the header segment and the volume table at the start of
     track 0 are needed, so a short capture of BOT is enough.
     """

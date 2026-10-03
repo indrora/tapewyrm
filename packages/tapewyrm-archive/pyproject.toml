@@ -7,10 +7,15 @@ requires-python = ">=3.11"
 license = "Unlicense"
 authors = [{ name = "Tapewyrm contributors" }]
 
-# Deliberately empty. This is the base every other package depends on (tapewyrm
-# CLI, qiclib, qicsilver), so it is stdlib-only: no rich, click or other
-# presentation libraries (STYLE.md §2), and nothing from the hardware stack.
-dependencies = []
+# This is the base every other package depends on (tapewyrm CLI, qiclib,
+# qicsilver), so it is stdlib-only: no rich, click or other presentation
+# libraries (STYLE.md §2), and nothing from the hardware stack. The one
+# exception is backports.zstd, the official backport of the stdlib
+# `compression.zstd` module (PEP 784, Python 3.14+) for TWTZ images; on 3.14+
+# it is not installed and the stdlib module is used (tapewyrm_archive/_zstd.py).
+dependencies = [
+    "backports.zstd; python_version < '3.14'",
+]
 
 [project.optional-dependencies]
 dev = [

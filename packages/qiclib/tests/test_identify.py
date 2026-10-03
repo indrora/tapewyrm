@@ -170,6 +170,16 @@ def test_image_detected_by_magic_not_suffix(tmp_path):
     assert ident.identify(path).vol.tape_name == "BACKUP"
 
 
+def test_zstd_image_twtz(tmp_path):
+    """A .twtz (zstd TWTI) identifies like the plain image, renamed or not."""
+    path = _write_image(tmp_path / "t.twtz", {0: _header(0), 1: _header(1), 2: _vtbl()})
+    assert path.read_bytes()[:4] == b"\x28\xb5\x2f\xfd"
+    info = ident.identify(path)
+    assert info.vol.tape_name == "BACKUP" and len(info.volumes) == 2
+    renamed = path.rename(tmp_path / "t.twti")
+    assert ident.identify(renamed).vol.tape_name == "BACKUP"
+
+
 # ---------------------------------------------------------------------------
 # The 3M DC2120 bench tape: factory stamp, cartridge, volume profile
 # ---------------------------------------------------------------------------

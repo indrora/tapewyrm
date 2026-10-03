@@ -90,7 +90,9 @@ def extract(
     middle of the label, compression read as off.
     """
     log.info("extracting volumes from %s...", image_path.name)
-    img = TapeImage.open(image_path)
+    # A TWTZ image is decompressed to a temp file here; its finalizer deletes it
+    # when img goes out of scope at return.
+    img = TapeImage.open(image_path, progress=progress)
     q80 = img.header["qic80_header"]
     vt_seg = q80["first_data_seg"]
     vt_entry = img.entries[vt_seg]

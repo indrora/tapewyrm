@@ -150,23 +150,23 @@ def identify(
     volume_profile: str = vp.GUESS,
     progress: Progress = NULL_PROGRESS,
 ) -> TapeInfo:
-    """Identify a tape from a TWTI image.
+    """Identify a tape from a TWTI image, or a zstd-compressed TWTZ one.
 
-    TWTI is recognised by its magic rather than its suffix, so a renamed image
-    still works. Raw captures need the physical decoder: ``tw convert`` them
-    first .
+    The image is recognised by its magic rather than its suffix, so a renamed
+    image still works (``twti.sniff``). Raw captures need the physical
+    decoder: ``tw convert`` them first.
     """
     if path.is_file():
-        log.debug("%s: reading magic to check for a TWTI image", path)
-        with path.open("rb") as f:
-            magic = f.read(len(twti.MAGIC))
-        if magic == twti.MAGIC:
-            log.debug("%s: TWTI magic; identifying from the image", path)
-            return from_image(twti.TapeImage.open(path), volume_profile=volume_profile)
-        log.debug("%s: magic %r != %r; refusing", path, magic, twti.MAGIC)
+        log.debug("%s: reading magic to check for a TWTI/TWTZ image", path)
+        kind = twti.sniff(path)
+        if kind is not None:
+            log.debug("%s: %s magic; identifying from the image", path, kind)
+            with twti.TapeImage.open(path, progress=progress) as img:
+                return from_image(img, volume_profile=volume_profile)
+        log.debug("%s: not a TWTI or TWTZ image; refusing", path)
     else:
         log.debug("%s: not a file; refusing", path)
-    raise ValueError(f"{path} is not a TWTI tape image; run `tw convert` on captures first")
+    raise ValueError(f"{path} is not a TWTI/TWTZ tape image; run `tw convert` on captures first")
 
 
 def from_sectors(

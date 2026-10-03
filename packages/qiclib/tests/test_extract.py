@@ -102,6 +102,16 @@ def test_mtn_volume_extracts_with_four_byte_extent_offsets(tmp_path):
     assert vol.header["lost_segments"] == []
 
 
+def test_extract_from_a_zstd_compressed_image(tmp_path):
+    """`zstd x.twti` output (TWTZ) extracts exactly like the plain image."""
+    from tapewyrm_archive._zstd import zstd
+
+    twtz = tmp_path / "mtn.twtz"
+    twtz.write_bytes(zstd.compress(_mtn_image(tmp_path).read_bytes()))
+    [path] = extract(twtz, tmp_path / "out")
+    assert Volume.load(path).data == b"HELLO" + b"ABAAAAAACABABABA"
+
+
 def test_wrong_profile_size_is_refused_not_a_memory_error(tmp_path):
     # Read as Rev N, bytes 96-103 hold the size *and* "SB" of the label: ~10^18.
     with pytest.raises(ValueError, match="wrong layout"):

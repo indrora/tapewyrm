@@ -820,9 +820,9 @@ tapewyrm/
   firmware/        # hard fork of GW firmware (vendored) + Tapewyrm QIC sources
     vendor-seam/   # the few GW primitives kept pristine for cherry-picking upstream
   packages/tapewyrm-cli/            # the uv Python project (tapewyrm, `tw`)
-  packages/tapewyrm-archive/        # TWRF/TWTI/TWVL formats (tapewyrm_archive), stdlib-only
+  packages/tapewyrm-archive/        # TWRF/TWTI(+TWTZ, zstd)/TWVL formats (tapewyrm_archive), stdlib-only
   packages/qiclib/                  # QIC layout + backup formats (qiclib), stdlib-only
-  packages/qicsilver/               # `qicsilver` CLI: TWTI -> identify / extract / tar
+  packages/qicsilver/               # `qicsilver` CLI: TWTI/TWTZ -> identify / extract / tar
   protocol/        # source-of-truth opcode/marker defs + generator
   docs/            # this document and design notes
   justfile         # task runner (below)

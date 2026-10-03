@@ -715,11 +715,11 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
 @click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option(
     "-o", "--out", "out", required=True, type=click.Path(dir_okay=False, path_type=Path),
-    help="tape image to write (.twti)",
+    help="tape image to write: .twti (sparse) or .twtz (zstd-compressed)",
 )  # fmt: skip
 @click.pass_obj
 def convert(app: AppContext, sources: tuple[Path, ...], out: Path) -> None:
-    """TWRF dump(s) -> TWTI logical tape image.
+    """TWRF dump(s) -> TWTI logical tape image (.twtz: zstd-compressed).
 
     SOURCES are dump directories (or individual track-NN.twrf files). Every
     capture is decoded at its own recorded bit rate; when several dumps of the

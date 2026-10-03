@@ -1,4 +1,4 @@
-"""TWTI: the logical tape image (`tw convert` output).
+"""TWTI / TWTZ: the logical tape image (`tw convert` output).
 
 Step two of ``tw dump -> tw convert -> qicsilver extract``. A TWTI file is the tape
 after the QIC-80 layer is done with it: every sector placed by its own address
@@ -23,6 +23,38 @@ The fixed stride gives random access by segment number. A segment's data is
 its corrected data rows (29 sectors, fewer when the bad-sector map excludes
 some); missing segments are all zero. The JSON header carries the drive
 identity and the source TWRF headers, so provenance survives every step.
+
+Sparse TWTI
+-----------
+The fixed stride is expensive on paper: a QIC-3020 tape has ~59,000 segments,
+so one captured track still makes a 1.75 GB image, nearly all zeros.
+:meth:`TapeImage.save` therefore *seeks over* every slot that is empty or
+all-zero instead of writing it, and sets the final length with ``truncate``.
+On filesystems with holes (APFS, ext4, XFS, btrfs, ZFS) the zeros cost no
+disk; holes read back as zeros, so the bytes are identical to a dense file
+and readers need not care. (NTFS only makes holes for files flagged sparse,
+which Python cannot do portably; there the file is simply dense. APFS also
+densifies files of 16 MiB or less that have interior holes -- measured, not
+documented -- which only matters for toy images.) ``ls`` shows the logical
+length; ``du`` shows what it really costs.
+
+TWTZ: zstd-compressed TWTI
+--------------------------
+A ``.twtz`` file is a TWTI byte stream through one Zstandard compressor --
+exactly what ``.tar.zst`` is to ``.tar`` -- so ``zstd -d x.twtz`` gives a valid
+``x.twti``. It is for moving and archiving images: the zero slots compress to
+almost nothing, wherever the file lands.
+
+- Writing is chosen by suffix: :meth:`TapeImage.save` to a ``*.twtz`` path
+  streams through the compressor (``tapewyrm_archive._zstd``), never holding
+  the image in memory.
+- Reading is chosen by *magic*, not suffix (:func:`sniff`): ``b"TWTI"`` is
+  mapped directly; the zstd frame magic ``28 B5 2F FD`` is stream-decompressed
+  into a temporary sparse ``.twti`` (zero runs skipped, as above) which is
+  then mapped like any other image and deleted on :meth:`TapeImage.close`,
+  on garbage collection, or at interpreter exit. Random access into a zstd
+  stream would need a seekable-frame index; a sparse temp file gets the same
+  ``segment(n)`` API for the cost of one sequential pass.
 """
 
 from __future__ import annotations
@@ -30,21 +62,36 @@ from __future__ import annotations
 import json
 import logging
 import mmap
+import os
 import struct
+import tempfile
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import IO, Any
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
 log = logging.getLogger(__name__)
 
 MAGIC = b"TWTI"
+# Every Zstandard frame starts with this magic number (RFC 8878 §3.1.1,
+# 0xFD2FB528 little endian). A TWTZ file is one or more such frames.
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+COMPRESSED_SUFFIX = ".twtz"
 VERSION = 1
 SEGMENT_STRIDE = 29 * 1024
 _PREAMBLE = struct.Struct("<4sHI")
 _ENTRY = struct.Struct("<BBHI")
+
+# Decompression granularity for TWTZ -> sparse temp file. Chunks are read at
+# _CHUNK and, unless wholly zero, scanned in _BLOCK pieces so a mostly-empty
+# chunk still leaves holes. 4 KiB is the allocation block of APFS and ext4;
+# a smaller block could not make a smaller hole.
+_CHUNK = 1 << 20
+_BLOCK = 4096
 
 
 class SegmentState(IntEnum):
@@ -63,12 +110,55 @@ class SegmentEntry:
     excluded_mask: int = 0
 
 
+def sniff(path: Path) -> str | None:
+    """Which tape image ``path`` is by its magic: ``"TWTI"``, ``"TWTZ"`` or None.
+
+    Suffixes are ignored on purpose: a renamed image must still open. Any
+    zstd stream is reported as TWTZ here; :meth:`TapeImage.open` checks the
+    TWTI preamble inside once it is decompressed.
+    """
+    with path.open("rb") as f:
+        magic = f.read(4)
+    if magic == MAGIC:
+        return "TWTI"
+    if magic == ZSTD_MAGIC:
+        return "TWTZ"
+    log.debug("%s: magic %r is neither %r nor zstd %r", path, magic, MAGIC, ZSTD_MAGIC)
+    return None
+
+
+def _is_zero(buf: bytes | memoryview) -> bool:
+    # bytes.count runs in C; a Python any() over 29 KB per segment would not.
+    # bytes(b) of a bytes is b itself; of a memoryview block, a 4 KiB copy.
+    return bytes(buf).count(0) == len(buf)
+
+
+def _release(mm: mmap.mmap | None, f: IO[bytes] | None, temp: str | None) -> None:
+    """Finalizer body: unmap, close and (for TWTZ) delete the temp image.
+
+    Module-level and given only what it frees, never the TapeImage itself, or
+    ``weakref.finalize`` would keep the image alive forever.
+    """
+    if mm is not None:
+        mm.close()
+    if f is not None:
+        f.close()
+    if temp is not None:
+        log.debug("removing temporary decompressed image %s", temp)
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
 @dataclass
 class TapeImage:
     header: dict
     entries: list[SegmentEntry] = field(default_factory=list)
     _data: bytes | mmap.mmap = b""
     _data_at: int = 0
+    # Set by open(): releases the mapping (and a TWTZ temp file). Not data.
+    _finalizer: weakref.finalize | None = field(default=None, repr=False, compare=False)
 
     def segment(self, n: int) -> bytes:
         """Segment ``n``'s data (``data_len`` bytes; empty if missing)."""
@@ -82,6 +172,17 @@ class TapeImage:
             out[e.state.name] = out.get(e.state.name, 0) + 1
         return out
 
+    def close(self) -> None:
+        """Unmap the image and delete a TWTZ's temporary file (idempotent)."""
+        if self._finalizer is not None:
+            self._finalizer()
+
+    def __enter__(self) -> TapeImage:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     # --- persistence ---
 
     def save(
@@ -93,31 +194,109 @@ class TapeImage:
     ) -> None:
         """Write the image; ``segment_data(n)`` supplies each segment's bytes.
 
-        ``progress`` gets one "writing image" task in segments: each is a
-        29 KB write, so a per-segment update is far off any hot path.
+        A ``.twtz`` path is written zstd-compressed, anything else as a
+        sparse TWTI (module docstring). ``progress`` gets one "writing image"
+        task in segments: each is at most a 29 KB write, so a per-segment
+        update is far off any hot path.
         """
         hdr = json.dumps(self.header, indent=1).encode("utf-8")
+        compressed = path.suffix.lower() == COMPRESSED_SUFFIX
         log.debug(
-            "writing TWTI image %s: %d-byte header, %d segments",
+            "writing %s image %s: %d-byte header, %d segments",
+            "TWTZ" if compressed else "sparse TWTI",
             path,
             len(hdr),
             len(self.entries),
         )
-        with path.open("wb") as f:
-            f.write(_PREAMBLE.pack(MAGIC, VERSION, len(hdr)))
-            f.write(hdr)
-            for e in self.entries:
-                f.write(_ENTRY.pack(e.state, e.erasures, e.data_len, e.excluded_mask))
-            with progress.task("writing image", total=len(self.entries), unit="segments") as bar:
-                for n in range(len(self.entries)):
-                    f.write(segment_data(n).ljust(SEGMENT_STRIDE, b"\x00"))
-                    bar.advance()
+        if compressed:
+            from tapewyrm_archive._zstd import zstd
+
+            with zstd.ZstdFile(path, "wb") as zf:
+                self._write(zf, hdr, segment_data, progress, sparse=False)
+        else:
+            with path.open("wb") as f:
+                self._write(f, hdr, segment_data, progress, sparse=True)
+
+    def _write(
+        self,
+        f: IO[bytes],
+        hdr: bytes,
+        segment_data: Callable[[int], bytes],
+        progress: Progress,
+        *,
+        sparse: bool,
+    ) -> None:
+        """The TWTI byte stream, to a seekable file (``sparse``) or a compressor.
+
+        Sparse: each slot is written only if it holds a non-zero byte, at its
+        absolute offset; the rest are left as holes and the length is fixed
+        by ``truncate`` at the end (seeking past EOF alone does not extend a
+        file). Streamed: every slot is written in full, padding and all --
+        a zstd stream cannot seek, and zeros compress to almost nothing.
+        """
+        f.write(_PREAMBLE.pack(MAGIC, VERSION, len(hdr)))
+        f.write(hdr)
+        for e in self.entries:
+            f.write(_ENTRY.pack(e.state, e.erasures, e.data_len, e.excluded_mask))
+        base = _PREAMBLE.size + len(hdr) + len(self.entries) * _ENTRY.size
+        skipped = 0
+        with progress.task("writing image", total=len(self.entries), unit="segments") as bar:
+            for n in range(len(self.entries)):
+                data = segment_data(n)
+                if not sparse:
+                    f.write(data.ljust(SEGMENT_STRIDE, b"\x00"))
+                elif data and not _is_zero(data):
+                    f.seek(base + n * SEGMENT_STRIDE)
+                    f.write(data)
+                else:
+                    skipped += 1
+                bar.advance()
+        if sparse:
+            end = base + len(self.entries) * SEGMENT_STRIDE
+            log.debug(
+                "left %d of %d segment slots as holes; setting length to %d bytes",
+                skipped,
+                len(self.entries),
+                end,
+            )
+            f.truncate(end)
 
     @classmethod
-    def open(cls, path: Path) -> TapeImage:
-        log.debug("opening TWTI image %s", path)
-        f = path.open("rb")
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    def open(cls, path: Path, *, progress: Progress = NULL_PROGRESS) -> TapeImage:
+        """Map a TWTI image, or a TWTZ one via a temporary sparse TWTI.
+
+        The format comes from the magic (:func:`sniff`), not the suffix.
+        ``progress`` gets a "decompressing image" task in compressed bytes
+        for TWTZ, and nothing for TWTI (mapping is instant).
+        """
+        log.debug("opening tape image %s", path)
+        kind = sniff(path)
+        temp: str | None = None
+        if kind == "TWTZ":
+            temp = _decompress_to_temp(path, progress)
+            source = Path(temp)
+        else:
+            source = path
+        f = None
+        try:
+            f = source.open("rb")
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        except BaseException:
+            _release(None, f, temp)
+            raise
+        img = cls._parse(path, mm)
+        if img is None:
+            _release(mm, f, temp)
+            raise ValueError(f"{path}: not a TWTI v{VERSION} tape image")
+        img._finalizer = weakref.finalize(img, _release, mm, f, temp)
+        return img
+
+    @classmethod
+    def _parse(cls, path: Path, mm: mmap.mmap) -> TapeImage | None:
+        """Preamble, header and segment table out of a mapped TWTI; None if not one."""
+        if len(mm) < _PREAMBLE.size:
+            log.debug("%s: %d bytes is shorter than the TWTI preamble; refusing", path, len(mm))
+            return None
         magic, version, hlen = _PREAMBLE.unpack_from(mm, 0)
         if magic != MAGIC or version != VERSION:
             log.debug(
@@ -128,7 +307,7 @@ class TapeImage:
                 MAGIC,
                 VERSION,
             )
-            raise ValueError(f"{path}: not a TWTI v{VERSION} tape image")
+            return None
         header = json.loads(mm[_PREAMBLE.size : _PREAMBLE.size + hlen])
         at = _PREAMBLE.size + hlen
         count = header["segment_count"]
@@ -138,6 +317,60 @@ class TapeImage:
             for s, e, n, m in _ENTRY.iter_unpack(mm[at : at + count * _ENTRY.size])
         ]
         return cls(header=header, entries=entries, _data=mm, _data_at=at + count * _ENTRY.size)
+
+
+def _temp_image(path: Path) -> tuple[Any, str]:
+    """A new temp ``.twti`` in the system temp dir, else next to ``path``."""
+    try:
+        fd, name = tempfile.mkstemp(prefix=f"{path.stem}-", suffix=".twti")
+    except OSError as exc:
+        log.debug("no temp file in %s (%r); using %s", tempfile.gettempdir(), exc, path.parent)
+        fd, name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".twti", dir=path.parent)
+    return os.fdopen(fd, "wb"), name
+
+
+def _decompress_to_temp(path: Path, progress: Progress) -> str:
+    """Stream-decompress a TWTZ into a sparse temp TWTI; return its path.
+
+    Zero runs are seeked over (whole chunks first, then 4 KiB blocks) so a
+    mostly-blank tape costs only its real data on disk, then ``truncate``
+    sets the length a trailing hole would otherwise leave short.
+    """
+    from tapewyrm_archive._zstd import zstd
+
+    packed = path.stat().st_size
+    out, name = _temp_image(path)
+    log.info("decompressing %s (%.1f MB) to %s", path.name, packed / 1e6, name)
+    length = written = 0
+    try:
+        with (
+            out,
+            path.open("rb") as raw,
+            zstd.ZstdFile(raw, "rb") as zf,
+            progress.task("decompressing image", total=packed, unit="bytes") as bar,
+        ):
+            while chunk := zf.read(_CHUNK):
+                if not _is_zero(chunk):
+                    view = memoryview(chunk)
+                    for at in range(0, len(chunk), _BLOCK):
+                        block = view[at : at + _BLOCK]
+                        if not _is_zero(block):
+                            out.seek(length + at)
+                            out.write(block)
+                            written += len(block)
+                length += len(chunk)
+                bar.update(raw.tell())
+            out.truncate(length)
+    except BaseException:
+        _release(None, None, name)
+        raise
+    log.info(
+        "decompressed %s: %.1f MB image, %.1f MB of it non-zero",
+        path.name,
+        length / 1e6,
+        written / 1e6,
+    )
+    return name
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,13 @@ def test_cli_text(tmp_path):
     assert "tape name     BACKUP" in result.output
 
 
+def test_cli_identify_twtz(tmp_path):
+    path = _write_image(tmp_path / "t.twtz", {0: _header(0), 2: _vtbl()})
+    result = CliRunner().invoke(cli, ["identify", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "tape name     BACKUP" in result.output
+
+
 def test_cli_volume_profile_and_json(tmp_path):
     data = bench_3m.header_data()
     header = make_segment_from_sectors(

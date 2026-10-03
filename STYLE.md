@@ -84,7 +84,10 @@ Package graph (arrows = "depends on"); nothing may point the other way:
 - **tapewyrm-archive** and **qiclib** are libraries and are **stdlib-only**:
   no rich, click, rich-click or any other presentation or CLI library, and no
   hardware code. They log through `logging` and report through
-  `tapewyrm_archive.progress`, and nothing else.
+  `tapewyrm_archive.progress`, and nothing else. The one third-party
+  exception is `backports.zstd` in tapewyrm-archive, and only below Python
+  3.14: it is the official backport of the stdlib `compression.zstd` (PEP
+  784) that TWTZ images use. Import zstd only via `tapewyrm_archive._zstd`.
 - The CLIs (`tapewyrm-cli`, `qicsilver`) own all terminal presentation. Each
   has its own `console.py` (rich console, `RichHandler`, progress bars); the
   two copies are kept identical by hand -- change one, change the other.
