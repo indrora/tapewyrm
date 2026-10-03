@@ -19,6 +19,7 @@ jobs:
           - { package: tapewyrm-archive, module: tapewyrm_archive }
           - { package: qiclib, module: qiclib }
           - { package: tapewyrm-cli, module: tapewyrm }
+          - { package: qicsilver, module: qicsilver }
     defaults:
       run:
         working-directory: packages/${{ matrix.package }}

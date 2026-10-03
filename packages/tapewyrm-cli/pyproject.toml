@@ -17,8 +17,7 @@ dependencies = [
     "rich>=15.0.0",
     "rich-click>=1.9.9",
     "tapewyrm-archive",
-    # Only `tw convert` (sectors -> TWTI) and the identify/extract front ends
-    # (until they move to qicsilver) use it. STYLE.md §2.
+    # Only `tw convert` (sectors -> TWTI) uses it. STYLE.md §2.
     "qiclib",
 ]
 

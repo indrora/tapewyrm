@@ -41,19 +41,21 @@ check pkg module:
     cd packages/{{pkg}} && uv run pytest
 
 # every Python package, base first (the same set CI's packages.yml runs)
-host: (check "tapewyrm-archive" "tapewyrm_archive") (check "qiclib" "qiclib") (check "tapewyrm-cli" "tapewyrm")
+host: (check "tapewyrm-archive" "tapewyrm_archive") (check "qiclib" "qiclib") (check "tapewyrm-cli" "tapewyrm") (check "qicsilver" "qicsilver")
 
 # just the tests of every package (fast loop)
 test:
     cd packages/tapewyrm-archive && uv run pytest -q
     cd packages/qiclib && uv run pytest -q
     cd packages/tapewyrm-cli && uv run pytest -q
+    cd packages/qicsilver && uv run pytest -q
 
 # lint + typecheck every package without tests
 lint:
     cd packages/tapewyrm-archive && uv run ruff check . && uv run mypy tapewyrm_archive
     cd packages/qiclib && uv run ruff check . && uv run mypy qiclib
     cd packages/tapewyrm-cli && uv run ruff check . && uv run mypy tapewyrm
+    cd packages/qicsilver && uv run ruff check . && uv run mypy qicsilver
 
 # remove build, package, and cache artifacts (keeps the uv venv)
 clean:
@@ -63,6 +65,6 @@ clean:
 ci: gen host
     git diff --exit-code
 
-# turn an extracted volume (`tw extract` -> vol-NN.twvl) into a tar (contrib/qic2tar.py)
-qic2tar volume out:
-    uv run --project packages/tapewyrm-cli python contrib/qic2tar.py {{volume}} -o {{out}}
+# run qicsilver (TWTI image -> identify / extract / tar), e.g. `just qicsilver identify captures/jc.twti`
+qicsilver *args:
+    uv run --project packages/qicsilver qicsilver {{args}}

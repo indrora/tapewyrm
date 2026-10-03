@@ -517,7 +517,7 @@ def parse_vtbl_base(rec: bytes) -> VtblEntry:
 def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
     """Decode one 128-byte VTBL entry (DESIGN.md §7.3, §7.5).
 
-    The fixed Rev N / QIC-113 interpretation, used by ``tw extract``. The
+    The fixed Rev N / QIC-113 interpretation, once used by ``tw extract`` (extract now reads through tape profiles). The
     ``qic80-rev-n`` and ``cms-qic113`` tape profiles encode the same offsets as
     data (tests/test_tape_profile.py keeps the two in step).
     """

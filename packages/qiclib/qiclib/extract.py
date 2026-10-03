@@ -1,4 +1,4 @@
-"""`tw extract`: TWTI tape image -> TWVL volume files.
+"""`qicsilver extract`: TWTI tape image -> TWVL volume files.
 
 Reads the volume table through a tape profile, decodes QIC-122 extents and
 lays each volume out with the TWVL format from ``tapewyrm_archive.twvl``.
@@ -38,7 +38,7 @@ def extract(
 ) -> list[Path]:
     """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``.
 
-    The volume table is read through a tape profile, exactly as ``tw identify``
+    The volume table is read through a tape profile, exactly as ``qicsilver identify``
     reads it (``tape_profile`` is a name, a path, or ``"guess"``). Only bytes
     0-56 of a VTBL entry are universal: section sizes, the compression flag and
     the extent offset width differ by the software that wrote the tape, and the

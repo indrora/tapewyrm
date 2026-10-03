@@ -35,6 +35,7 @@ FW = ROOT / "firmware"
 HOST = ROOT / "packages" / "tapewyrm-cli"
 ARCHIVE = ROOT / "packages" / "tapewyrm-archive"
 QICLIB = ROOT / "packages" / "qiclib"
+QICSILVER = ROOT / "packages" / "qicsilver"
 DIST = ROOT / "dist"
 
 sys.path.insert(0, str(ROOT / "tools"))
@@ -143,14 +144,14 @@ def make_upd(fw: dict[str, dict[str, Path]], major: int, minor: int) -> bytes:
 
 
 def build_host() -> list[Path]:
-    print("== host wheels + sdists (tapewyrm-archive, qiclib, tapewyrm) ==")
+    print("== host wheels + sdists (tapewyrm-archive, qiclib, tapewyrm, qicsilver) ==")
     uv = tool("uv")
-    # The tapewyrm wheel depends on tapewyrm-archive and qiclib, which are not on
-    # PyPI, so the bundle ships all three; `pip install host/*.whl` then resolves locally.
-    for pkg in (ARCHIVE, QICLIB, HOST):
+    # tapewyrm and qicsilver depend on tapewyrm-archive and qiclib, which are not
+    # on PyPI, so the bundle ships all four; `pip install host/*.whl` then resolves locally.
+    for pkg in (ARCHIVE, QICLIB, HOST, QICSILVER):
         subprocess.run([uv, "build", "--out-dir", str(HOST / "dist")], cwd=str(pkg), check=True)
     dist = HOST / "dist"
-    return sorted([*dist.glob("tapewyrm-*"), *dist.glob("tapewyrm_archive-*"), *dist.glob("qiclib-*")])
+    return sorted([*dist.glob("tapewyrm-*"), *dist.glob("tapewyrm_archive-*"), *dist.glob("qiclib-*"), *dist.glob("qicsilver-*")])
 
 
 def assemble(

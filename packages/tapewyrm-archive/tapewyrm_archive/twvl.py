@@ -1,6 +1,6 @@
-"""TWVL: one extracted backup volume (`tw extract` output).
+"""TWVL: one extracted backup volume (`qicsilver extract` output).
 
-Step three of ``tw dump -> tw convert -> tw extract``. Extraction is the
+Step three of ``tw dump -> tw convert -> qicsilver extract``. Extraction is the
 QIC-113 layer: read the volume table from a TWTI tape image, decompress each
 volume's segments (QIC-122 extents, QIC-113 section 9) and lay the bytes out
 by their uncompressed offsets. Segments that couldn't be read leave holes,
@@ -14,10 +14,10 @@ The header carries the volume-table entry (description, date, flags, section
 sizes, the raw 128-byte record), the tape's identity, the byte ranges that are
 missing, and the source image. The volume bytes are the File Set Data Section
 followed by the File Set Directory Section (QIC-113 "directory last" order),
-which is what ``contrib/qic2tar.py`` turns into a tar.
+which is what ``qicsilver tar`` turns into a tar.
 
 This module is the file format only; extraction from a TWTI image lives
-in ``tapewyrm.image.extract`` (tapewyrm-host) for now.
+in ``qiclib.extract``.
 """
 
 from __future__ import annotations

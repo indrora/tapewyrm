@@ -1,10 +1,10 @@
 """TWTI: the logical tape image (`tw convert` output).
 
-Step two of ``tw dump -> tw convert -> tw extract``. A TWTI file is the tape
+Step two of ``tw dump -> tw convert -> qicsilver extract``. A TWTI file is the tape
 after the QIC-80 layer is done with it: every sector placed by its own address
 using the header segment's geometry, the bad-sector map applied, every segment
 Reed-Solomon corrected, in segment order -- plus how sure we are of each one.
-It knows nothing about backup formats; that is ``tw extract``'s job.
+It knows nothing about backup formats; that is ``qicsilver extract``'s job.
 
 This module is the file format only (read, write, random access). Building
 an image from flux lives in ``tapewyrm.image.convert`` (tapewyrm-host).

@@ -1,6 +1,6 @@
 """`tw dump`: whole tape tracks -> TWRF captures, gently.
 
-Step one of ``tw dump -> tw convert -> tw extract``. One Logical Forward pass
+Step one of ``tw dump -> tw convert -> qicsilver extract``. One Logical Forward pass
 per track, streamed straight to disk as a TWRF container (``track-NN.twrf``:
 :mod:`tapewyrm.rawflux.container`). Its header records everything needed to
 decode the flux later without guessing -- above all the bit rate, taken from

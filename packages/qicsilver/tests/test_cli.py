@@ -1,4 +1,4 @@
-"""`tw identify` front end (moves to qicsilver)."""
+"""qicsilver CLI: identify on TWTI images (moved from `tw identify`)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from qiclib.testing.builders import (
 from qiclib.types import Segment
 from tapewyrm_archive.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, TapeImage
 
-from tapewyrm.cli import cli
+from qicsilver.cli import cli
 
 FORMAT_DATE = make_short_date(1998, 3, 14, 12, 30, 0)
 

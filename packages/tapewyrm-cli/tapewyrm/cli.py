@@ -3,13 +3,14 @@
 A single ``@click.group()`` named ``cli`` with shared ``--port`` / ``--profile``
 / ``--config`` options carried on ``ctx.obj`` as an ``AppContext``.
 
-The recovery workflow is three steps, each with its own file format:
+The recovery workflow starts here with two steps, each with its own file format:
 
     dump     tape tracks -> TWRF flux captures (self-describing: rate, drive identity)
     convert  TWRF captures -> TWTI logical tape image (sectors placed, RS-corrected;
              several dumps of the same tape are merged)
-    extract  TWTI image -> TWVL volume files (QIC-113 volume table, QIC-122
-             decompression, holes recorded); contrib/qic2tar.py makes a tar
+
+and continues offline in **qicsilver** (packages/qicsilver): ``identify``,
+``extract`` (TWTI -> TWVL volumes) and ``tar``. tw ends at the TWTI image.
 
 plus the hardware side:
 
@@ -726,75 +727,6 @@ def convert(app: AppContext, sources: tuple[Path, ...], out: Path) -> None:
     except ValueError as exc:
         log.debug("convert failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
-
-
-@cli.command()
-@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option(
-    "-o", "--out", "out", required=True, type=click.Path(file_okay=False, path_type=Path),
-    help="directory for the volume files (vol-NN.twvl)",
-)  # fmt: skip
-@click.option(
-    "--tape-profile", default="guess", show_default=True,
-    help="volume-table layout: a profile name or path, or 'guess' (as tw identify)",
-)  # fmt: skip
-@click.pass_obj
-def extract(app: AppContext, image: Path, out: Path, tape_profile: str) -> None:
-    """TWTI tape image -> one TWVL file per backup volume.
-
-    Reads the volume table through the tape profile `tw identify` would pick,
-    decompresses QIC-122 data and lays each volume out by its QIC-113 offsets,
-    recording the byte ranges that were lost. Turn a volume into a tar with
-    contrib/qic2tar.py.
-    """
-    from qiclib.extract import extract as do_extract
-    from qiclib.tape_profile import TapeProfileError
-
-    log.debug("extracting %s to %s (tape profile %r)", image, out, tape_profile)
-    try:
-        with app.progress() as prog:
-            do_extract(image, out, tape_profile=tape_profile, progress=prog)
-    except (ValueError, TapeProfileError) as exc:
-        log.debug("extract failed: %r", exc)
-        raise click.ClickException(str(exc)) from exc
-
-
-@cli.command()
-@click.argument("source", type=click.Path(exists=True, path_type=Path))
-@click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
-@click.option(
-    "--tape-profile", default="guess", show_default=True,
-    help="volume-table layout: a profile name or path, or 'guess' to try them all",
-)  # fmt: skip
-# Not -v/--verbose: that is the global log-level flag on `tw` itself.
-@click.option("--raw", is_flag=True, help="also dump raw records and profile scoring")
-@click.pass_obj
-def identify(app: AppContext, source: Path, as_json: bool, tape_profile: str, raw: bool) -> None:
-    """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
-
-    SOURCE is a TWTI image, a TWRF (or legacy .raw) capture, or a dump
-    directory. Only the header segment and the volume table at the start of
-    track 0 are corrected, so a short capture of BOT is enough.
-    """
-    import json
-
-    from qiclib.identify import format_info, to_dict
-    from qiclib.tape_profile import TapeProfileError
-
-    from tapewyrm.image.identify import identify
-
-    log.debug("identifying %s (tape profile %r)", source, tape_profile)
-    try:
-        with app.progress() as prog:
-            info = identify(source, tape_profile=tape_profile, progress=prog)
-    except (ValueError, TapeProfileError) as exc:
-        log.debug("identify failed: %r", exc)
-        raise click.ClickException(str(exc)) from exc
-    if as_json:
-        click.echo(json.dumps(to_dict(info), indent=1))
-    else:
-        for line in format_info(info, verbose=raw):
-            click.echo(line)
 
 
 @cli.command()

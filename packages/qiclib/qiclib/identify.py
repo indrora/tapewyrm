@@ -1,4 +1,4 @@
-"""`tw identify`: what is on a tape, read from its first few segments.
+"""`qicsilver identify`: what is on a tape, read from its first few segments.
 
 Everything that describes a QIC-40/80 tape sits at the very start of track 0
 (DESIGN.md §7.3):
@@ -135,7 +135,7 @@ def identify(
 
     TWTI is recognised by its magic rather than its suffix, so a renamed image
     still works. Raw captures need the physical decoder: ``tw convert`` them
-    first (or use ``tapewyrm.image.identify.from_captures``).
+    first .
     """
     if path.is_file():
         log.debug("%s: reading magic to check for a TWTI image", path)
@@ -586,7 +586,7 @@ def _verbose(info: TapeInfo) -> list[str]:
 
 
 def to_dict(info: TapeInfo) -> dict[str, Any]:
-    """JSON-ready form for ``tw identify --json``: raw fields plus decoded values."""
+    """JSON-ready form for ``qicsilver identify --json``: raw fields plus decoded values."""
     vol = asdict(info.vol)
     for key in ("format_date", "write_date", "name_date", "initial_format_date"):
         vol[key + "_decoded"] = _date(vol[key])

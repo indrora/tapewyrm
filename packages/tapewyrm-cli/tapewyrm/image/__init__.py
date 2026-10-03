@@ -1,1 +1,1 @@
-"""Tape images (TWTI) and extracted volumes (TWVL): tw convert / tw extract."""
+"""`tw convert`: TWRF captures -> TWTI tape image (formats in tapewyrm-archive)."""

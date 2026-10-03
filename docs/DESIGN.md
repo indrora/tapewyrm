@@ -266,7 +266,7 @@ tapewyrm/
       colorado.toml
       iomega.toml
       conner.toml
-    tape/             # per-tape quirks: VTBL layout, BSM layout (`tw identify --tape-profile`)
+    tape/             # per-tape quirks: VTBL layout, BSM layout (`qicsilver identify --tape-profile`)
   cli.py              # probe / capture / decode / recover / replay
 tests/
   fixtures/           # golden RawFluxCaptures, recorded transaction logs
@@ -822,6 +822,7 @@ tapewyrm/
   packages/tapewyrm-cli/            # the uv Python project (tapewyrm, `tw`)
   packages/tapewyrm-archive/        # TWRF/TWTI/TWVL formats (tapewyrm_archive), stdlib-only
   packages/qiclib/                  # QIC layout + backup formats (qiclib), stdlib-only
+  packages/qicsilver/               # `qicsilver` CLI: TWTI -> identify / extract / tar
   protocol/        # source-of-truth opcode/marker defs + generator
   docs/            # this document and design notes
   justfile         # task runner (below)

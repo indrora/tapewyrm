@@ -55,7 +55,7 @@ def build_image(
 
     # The header places right under any geometry; then the header's own
     # geometry places everything else (floppy tracks per side). See
-    # volume.locate_header, shared with the pipeline and `tw identify`.
+    # volume.locate_header, shared with the pipeline and `qicsilver identify`.
     located = volume_mod.locate_header(merged, Geometry(tracks=28, segments_per_track=207))
     if located is None:
         log.debug(

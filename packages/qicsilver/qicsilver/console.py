@@ -1,4 +1,9 @@
-"""Terminal presentation for ``tw``: logging, progress bars (STYLE.md §2.5).
+"""Terminal presentation for ``qicsilver``: logging, progress bars (STYLE.md §2.5).
+
+A deliberate copy of ``tapewyrm/console.py`` (tapewyrm-cli), so both CLIs look
+and behave the same without either depending on the other. Keep the two in
+step: a change here belongs there too, and vice versa. Only ``_OUR_LOGGERS``
+differs.
 
 This is the only module (with ``cli``) that imports ``rich``. The library logs
 through :mod:`logging` and reports progress through :mod:`tapewyrm.progress`;
@@ -10,7 +15,7 @@ is live is inserted above the bars; anything printed around it (``print``,
 another console) tears the display. So the log handler and the progress
 renderer must share it.
 
-Why stderr: stdout is the data channel -- ``tw drive report``, status
+Why stderr: stdout is the data channel -- ``qicsilver identify --json``, status
 tables, summaries -- and must stay pipeable. Logs and bars are diagnostics.
 
 Verbosity: ``-v`` / ``-q`` move the ``tapewyrm`` logger's level around INFO,
@@ -43,9 +48,9 @@ from tapewyrm_archive.progress import NULL_PROGRESS, Progress, ProgressTask
 
 # Every package whose library code this CLI runs. Each logs under its own
 # top-level name (logging.getLogger(__name__)), so each needs the handler: a
-# package left out here goes silent below WARNING. qicsilver's copy of this
-# module lists its own set; keep the two files otherwise identical.
-_OUR_LOGGERS = ("tapewyrm", "tapewyrm_archive", "qiclib")
+# package left out here goes silent below WARNING. tapewyrm-cli's copy of this
+# module lists its own set.
+_OUR_LOGGERS = ("qicsilver", "qiclib", "tapewyrm_archive")
 
 # -v/-q steps, centred on INFO (index 2): -qq ERROR ... -v DEBUG.
 _LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]

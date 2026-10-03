@@ -42,9 +42,11 @@ check +1 / -1. The best total wins. A wrong layout reads neighbouring fields as
 sizes and labels, which fail these checks loudly (the 3M tape under Rev N
 claims a 4.9-billion-GB volume), so the margin is usually wide.
 
-Scope: this is used by ``tw identify``. ``tw extract`` still uses the fixed
-Rev N / QIC-113 logic in ``codec.volume``; tests/test_tape_profile.py checks
-that the ``qic80-rev-n`` and ``cms-qic113`` profiles agree with it.
+Scope: ``qicsilver identify`` and ``qicsilver extract`` both read volume
+tables through this (``qiclib.identify``, ``qiclib.extract``). The fixed Rev N
+/ QIC-113 parser in ``qiclib.volume`` remains as the reference;
+tests/test_tape_profile.py checks that the ``qic80-rev-n`` and ``cms-qic113``
+profiles agree with it.
 """
 
 from __future__ import annotations
