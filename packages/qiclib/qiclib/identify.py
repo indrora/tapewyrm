@@ -54,6 +54,7 @@ from qiclib import cartridge
 from qiclib import segment as seg_mod
 from qiclib import volume as volume_mod
 from qiclib import volume_profile as vp
+from qiclib.build import reporting_drive
 from qiclib.geometry import Geometry
 from qiclib.types import RawSector, SegmentStatus
 from qiclib.volume import BadSectorMap, VolumeInfo, VtblEntry
@@ -304,12 +305,12 @@ def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeIn
         else:
             log.debug("volume table segment %d is %s; continuing without volumes", vt, vtbl_state)
             notes.append(f"volume table segment {vt} is {vtbl_state} in this image")
-    # TWTI keeps the drive's reports per source capture; the first one with
-    # them speaks for the drive, as in from_captures.
-    drive = next(
-        (s["twrf"] for s in img.header.get("sources", []) if "tape_status" in s.get("twrf", {})),
-        None,
-    )
+    # TWTI keeps the drive's reports per source capture; the first one whose
+    # reports are non-null speaks for the drive, the same rule build_image
+    # used for the header's "drive" object. Re-deriving it from the sources
+    # (rather than trusting header["drive"]) also fixes images written before
+    # that rule, which could carry an all-null drive.
+    drive = reporting_drive(img.header.get("sources", []))
     return _assemble(
         vol,
         bsm,

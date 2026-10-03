@@ -36,6 +36,75 @@ _FROM_RS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Drive identity: which source capture speaks for the drive
+# ---------------------------------------------------------------------------
+
+# The QIC-117 reports a TWRF header carries (TWS-1). A TWRF v2 header always
+# has every one of these keys, with null for a report the drive did not
+# answer, so *presence* of a key says nothing; only a non-null value means
+# "the drive reported". rate_kbps, device_serial and firmware_commit are
+# deliberately absent: they describe the capture device, not the drive, and a
+# legacy .raw source's synthetic {"rate_kbps": 500} must never count.
+DRIVE_REPORTS = ("drive_status", "drive_config", "drive_rom", "drive_vendor_id", "tape_status")
+
+# Members that identify *which* drive and tape a capture came from. Two
+# reporting captures that disagree on any of them were made on different
+# Greaseweazles, drives or cartridges, and merging them is suspicious.
+DRIVE_IDENTITY = ("device_serial", "drive_vendor_id", "tape_status")
+
+
+def reporting_drive(sources: list[dict]) -> dict | None:
+    """The TWRF header of the first source whose drive reported anything.
+
+    ``sources`` is a TWTI ``sources`` array (TWS-2 section 4.5). A source
+    "reported" when at least one of :data:`DRIVE_REPORTS` is non-null in its
+    ``twrf``; legacy .raw sources and v2 captures whose drive stayed silent
+    are skipped. Returns None when no source reported.
+
+    When later reporting sources disagree with the chosen one on a member of
+    :data:`DRIVE_IDENTITY` (each side non-null and non-empty), the first is
+    still kept and a WARNING names every disagreeing member. Nothing extra is
+    recorded in the image: the ``sources`` array already keeps every capture's
+    reports, so the disagreement stays recoverable from the header itself.
+    """
+    reporting = []
+    for n, source in enumerate(sources):
+        twrf = source.get("twrf") or {}
+        if all(twrf.get(key) is None for key in DRIVE_REPORTS):
+            log.debug("source %d (%s): no drive reports; skipped", n, source.get("file", "?"))
+            continue
+        reporting.append((n, source, twrf))
+    if not reporting:
+        log.debug(
+            "none of %d sources carries a drive report; drive identity left null", len(sources)
+        )
+        return None
+    first_n, first_source, first = reporting[0]
+    log.debug("source %d (%s) speaks for the drive", first_n, first_source.get("file", "?"))
+    for n, source, twrf in reporting[1:]:
+        differing = [
+            f"{key} {first[key]!r} vs {twrf[key]!r}"
+            for key in DRIVE_IDENTITY
+            if first.get(key) not in (None, "")
+            and twrf.get(key) not in (None, "")
+            and first[key] != twrf[key]
+        ]
+        if differing:
+            log.warning(
+                "source %d (%s) disagrees with source %d (%s): %s; "
+                "keeping source %d's drive identity -- were these captures of the same tape "
+                "on the same drive?",
+                n,
+                source.get("file", "?"),
+                first_n,
+                first_source.get("file", "?"),
+                ", ".join(differing),
+                first_n,
+            )
+    return first
+
+
 def build_image(
     passes: list[list[RawSector]],
     out: Path,
@@ -139,7 +208,7 @@ def build_image(
         ),
     )
 
-    first: dict = next((m["twrf"] for m in source_meta if "drive_config" in m["twrf"]), {})
+    first = reporting_drive(source_meta) or {}
     header = {
         "format": "TWTI",
         "version": VERSION,
@@ -164,8 +233,6 @@ def build_image(
         },  # fmt: skip
         "sources": source_meta,
     }
-    if not first:
-        log.debug("no source capture carries drive_config; drive identity left empty")
     img = TapeImage(header=header, entries=entries)
     log.info("writing %s segments (%s) to %s...", f"{total:,}", _mb(total * SEGMENT_STRIDE), out)
     started = time.perf_counter()

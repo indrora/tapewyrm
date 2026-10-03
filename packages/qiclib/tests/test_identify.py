@@ -129,8 +129,13 @@ def test_bench_tape_bytes():
 # ---------------------------------------------------------------------------
 
 
-def _write_image(path: Path, segs: dict[int, Segment | None], count: int = 4) -> Path:
-    """Save a small TWTI whose segment n holds ``segs[n]``'s data (None = missing)."""
+def _write_image(
+    path: Path, segs: dict[int, Segment | None], count: int = 4, sources: list | None = None
+) -> Path:
+    """Save a small TWTI whose segment n holds ``segs[n]``'s data (None = missing).
+
+    ``sources`` becomes the header's sources array (TWS-2 section 4.5) when given.
+    """
     data: dict[int, bytes] = {}
     entries: list[SegmentEntry] = []
     for n in range(count):
@@ -146,6 +151,8 @@ def _write_image(path: Path, segs: dict[int, Segment | None], count: int = 4) ->
         "segment_stride": SEGMENT_STRIDE,
         "qic80_header": {"header_seg": 0, "dup_header_seg": 1},
     }
+    if sources is not None:
+        header["sources"] = sources
     TapeImage(header=header, entries=entries).save(path, lambda n: data.get(n, b""))
     return path
 
@@ -283,3 +290,61 @@ def test_unknown_40_track_format_names_both_standards():
     assert info.standard is None
     line = next(x for x in ident.format_info(info) if x.startswith("format"))
     assert "(QIC-3010-MC Rev H or QIC-3020-MC Rev H)" in line
+
+
+# ---------------------------------------------------------------------------
+# Which source capture of an image speaks for the drive
+# ---------------------------------------------------------------------------
+
+_NULL_TWRF = {
+    "device_serial": "",
+    "drive_status": None,
+    "drive_config": None,
+    "drive_rom": None,
+    "drive_vendor_id": None,
+    "tape_status": None,
+    "rate_kbps": 500,
+    "firmware_commit": "abc123",
+}
+_REAL_TWRF = {
+    **_NULL_TWRF,
+    "device_serial": "GW-0001",
+    "drive_status": 0x25,
+    "drive_config": 0xD8,
+    "drive_rom": 0x40,
+    "drive_vendor_id": 4550,
+    "tape_status": 0x63,
+}
+_LEGACY_TWRF = {"rate_kbps": 500}
+
+
+def _image_drive(tmp_path, *twrfs: dict) -> dict | None:
+    """identify an image whose sources carry ``twrfs``; return the drive it chose."""
+    sources = [{"file": f"c{n}.twrf", "twrf": dict(t)} for n, t in enumerate(twrfs)]
+    segs = {0: _header(0), 1: _header(1), 2: _vtbl()}
+    return ident.identify(_write_image(tmp_path / "t.twti", segs, sources=sources)).drive
+
+
+def test_image_drive_skips_null_reports(tmp_path):
+    """tape_status present but null is not a report; the later real capture wins."""
+    assert _image_drive(tmp_path, _NULL_TWRF, _REAL_TWRF) == _REAL_TWRF
+
+
+def test_image_drive_is_never_a_legacy_source(tmp_path):
+    assert _image_drive(tmp_path, _LEGACY_TWRF, _REAL_TWRF) == _REAL_TWRF
+
+
+def test_image_drive_disagreement_keeps_first_and_warns(tmp_path, caplog):
+    """Sources from two tapes: the first reporting capture wins, with a warning."""
+    import logging
+
+    other = {**_REAL_TWRF, "tape_status": 0x62}
+    with caplog.at_level(logging.WARNING):
+        drive = _image_drive(tmp_path, _NULL_TWRF, _REAL_TWRF, other)
+    assert drive == _REAL_TWRF
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("tape_status" in w for w in warnings)
+
+
+def test_image_drive_none_when_nothing_reported(tmp_path):
+    assert _image_drive(tmp_path, _NULL_TWRF, _LEGACY_TWRF) is None

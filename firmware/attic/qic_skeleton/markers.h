@@ -9,7 +9,9 @@
  * (TW_MARK_*) and the little-endian payload LAYOUTS below are the firmware<->host
  * CONTRACT — they must stay byte-for-byte identical to what the host parses in
  * packages/tapewyrm-cli/tapewyrm/rawflux/container.py. Only the opcode-escape *framing* (the
- * escape byte + stuffing) is bench-dependent (§13.6 item 1).
+ * escape byte + stuffing) is bench-dependent (§13.6 item 1). [Retired skeleton:
+ * as built, the escape is GW's 0xFF and there is no stuffing; the host reader
+ * is tapewyrm_archive/twrf.py, the format docs/spec/twrf.md.]
  *
  * Payload layouts (little-endian) — keep in sync with container.py:
  *   SESSION_START : rate:u16, clock:u32, tpt:u16, direction:u8, pass_id:u16   (11 bytes)
@@ -65,7 +67,8 @@ void mk_session_start(gw_usb_ctx_t *usb,
                       uint16_t tpt, uint8_t direction, uint16_t pass_id);
 
 /* SEGMENT — one per hardware INDEX edge (from cap_on_index). `ticks` is the
- * sample-clock delta since the previous segment; `index` is the running count. */
+ * sample-clock delta from the previous flux transition (GW's sample cursor) to
+ * the INDEX edge, not since the previous segment; `index` is the running count. */
 void mk_segment(gw_usb_ctx_t *usb, uint32_t ticks, uint32_t index);
 
 /* EVENT — an observed bus/drive event (TW_EVT_*). */

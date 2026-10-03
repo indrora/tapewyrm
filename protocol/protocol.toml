@@ -74,7 +74,7 @@ desc = "rate, sample clock, TPT, direction, pass-id, UTC — anchors t=0"
 [[marker]]
 name = "SEGMENT"
 code = 0xF1
-desc = "tick count since previous + running index — each hardware INDEX edge"
+desc = "ticks from previous transition (GW sample cursor) to INDEX + running index"
 
 [[marker]]
 name = "EVENT"

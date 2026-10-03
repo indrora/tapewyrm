@@ -11,7 +11,7 @@ from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
 
 from tapewyrm.codec import mfm
-from tapewyrm.codec.pipeline import decode
+from tapewyrm.codec.pipeline import _geometry_for, decode
 
 SPT = 207  # segments per track for the synthetic tape
 
@@ -141,3 +141,41 @@ def test_capture_order_independence_end_to_end():
     p1 = {f.path: f.data for f in fs1[0].files}
     p2 = {f.path: f.data for f in fs2[0].files}
     assert p1 == p2
+
+
+def _bare_capture(tape_format, tape_status=None, tracks=0, spt=0):
+    hdr = CaptureHeader(
+        rate_kbps=500,
+        sample_clock_hz=72_000_000,
+        track=0,
+        direction=Direction.FORWARD,
+        pass_id=0,
+        utc="",
+        tape_format=tape_format,
+        segments_per_track=spt,
+        tracks=tracks,
+        tape_status=tape_status,
+    )
+    return RawFluxCapture(header=hdr, flux=b"")
+
+
+def test_geometry_fallback_uses_format_and_wide_bit_from_tape_status():
+    """No tracks in the header: derive them from format + Report Tape Status bit 7."""
+    # 0x83 = wide (bit 7) | format 3 (QIC-3020).
+    geom = _geometry_for([_bare_capture(TapeFormat.QIC3020, tape_status=0x83, spt=500)])
+    assert (geom.tracks, geom.segments_per_track) == (50, 500)
+    geom = _geometry_for([_bare_capture(TapeFormat.QIC3010, tape_status=0x04, spt=300)])
+    assert geom.tracks == 40
+    geom = _geometry_for([_bare_capture(TapeFormat.QIC80, tape_status=0x82, spt=300)])
+    assert geom.tracks == 36
+
+
+def test_geometry_fallback_assumes_narrow_without_tape_status():
+    """No Report Tape Status recorded: width unknown, assume 0.250 in."""
+    assert _geometry_for([_bare_capture(TapeFormat.QIC3020, spt=500)]).tracks == 40
+    assert _geometry_for([_bare_capture(TapeFormat.QIC80, spt=207)]).tracks == 28
+
+
+def test_geometry_from_header_tracks_wins():
+    geom = _geometry_for([_bare_capture(TapeFormat.QIC3020, tape_status=0x83, tracks=40, spt=9)])
+    assert geom.tracks == 40

@@ -13,10 +13,10 @@ from qiclib.geometry import Geometry
 from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
 from tapewyrm_archive.twrf import (
     RawFluxCapture,
+    encode_interval,
     flux_checksum,
     flux_data_only,
     frame_marker,
-    stuff_flux,
 )
 from tapewyrm_archive.types import Direction, MarkerKind, TapeFormat
 
@@ -29,19 +29,20 @@ from tapewyrm.types import ErrorCode
 
 
 def _synth_flux(tpt: int, direction: int, n_segments: int = 3) -> bytes:
-    raw_flux = b"\x01\x02\x03"  # a little raw flux between markers
+    raw_flux = b"".join(encode_interval(t) for t in (1, 504, 3))  # 504 ends in 0xFF
     out = bytearray()
     out += frame_marker(
         MarkerKind.SESSION_START,
         struct.pack("<HIHBH", 500, 72_000_000, tpt, direction, 0),
     )
     for i in range(n_segments):
-        out += stuff_flux(raw_flux)
+        out += raw_flux
         out += frame_marker(MarkerKind.SEGMENT, struct.pack("<II", 100 + i, i))
-    data = flux_data_only(bytes(out) + stuff_flux(raw_flux))
-    out += stuff_flux(raw_flux)
+    data = flux_data_only(bytes(out) + raw_flux)
+    out += raw_flux
+    n_intervals = 3 * (n_segments + 1)
     out += frame_marker(
-        MarkerKind.END, struct.pack("<BIII", 0, n_segments, len(data), flux_checksum(data))
+        MarkerKind.END, struct.pack("<BIII", 0, n_intervals, len(data), flux_checksum(data))
     )
     return bytes(out)
 
@@ -176,6 +177,28 @@ def test_identify_falls_back_when_drive_lacks_tape_status():
     assert tape.format is TapeFormat.QIC80
     assert g.tracks == 28
     assert drive.status_reads == 1  # error-clearing status read happened
+
+
+@pytest.mark.parametrize(
+    ("fmt", "wide", "tracks"),
+    [
+        (TapeFormat.QIC80, True, 36),
+        (TapeFormat.QIC3010, False, 40),
+        (TapeFormat.QIC3020, False, 40),
+        (TapeFormat.QIC3020, True, 50),
+    ],
+)
+def test_identify_passes_the_wide_bit_to_geometry(fmt, wide, tracks):
+    """Report Tape Status bit 7 (wide) picks the 0.315 in track count."""
+
+    class WideDrive(FakeDrive):
+        def tape_status(self):
+            return TapeStatus(format=self._fmt, tape_type=0, wide=wide)
+
+    drive = WideDrive(FakeLink(), Geometry(tracks=4, segments_per_track=10), fmt)
+    _cfg, tape, g = TapeTransport(drive).identify()
+    assert tape.wide is wide
+    assert g.tracks == tracks
 
 
 # ---------------------------------------------------------------------------

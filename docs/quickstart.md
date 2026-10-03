@@ -76,28 +76,84 @@ Choose the profile with the global `--profile` flag, before the subcommand:
 
 | `--profile` | Drive |
 |---|---|
+| `auto` (the default) | Tries the wake-ups the Linux ftape driver tries, in ftape's order, and keeps the first the drive answers. See below. |
 | `colorado` | Colorado Jumbo 350 (and family). Tested. |
 | `colorado.1400` | Colorado 1400 (QIC-3010). Tested. |
-| `conner`, `iomega` | Untested placeholders. |
+| `mountain` | ftape's "Mountain" wake (Soft Select): Conner, Archive, Summit. Untested. |
+| `insight` | ftape's "Motor-on" wake: Irwin/Insight 80, early Iomega. Untested. |
+| `conner`, `iomega` | Untested placeholders (Soft Reset wake; not from ftape). |
+| `default` | No wake sequence at all (ftape's "None"). |
 
 The profiles live in
 [`packages/tapewyrm-cli/tapewyrm/profiles/drive/`](../packages/tapewyrm-cli/tapewyrm/profiles/drive/);
-`--profile path/to/my-drive.toml` loads your own. Without `--profile`, `tw`
-uses `default`, which has **no** wake sequence.
+`--profile path/to/my-drive.toml` loads your own.
 
-**Colorado drives are "phantom" drives.** They ignore the floppy drive-select
-lines and are selected by a QIC-117 command instead: Phantom Select (command
-46) followed by a unit-address argument (unit 0 for the Jumbo 350 and the
-1400). The `colorado` profiles do this. A drive selected that way **stays
-selected** after `tw` exits, until `tw drive deselect`, a reset, or a power
-cycle. `tw drive select --unit N` tries another unit address.
+**`auto`**, used when no profile is named anywhere, does what the Linux
+floppy-tape driver ftape does when it does not know the drive yet
+(`ftape_activate_drive()` in ftape-ctl.c, Linux 2.6.19): it tries ftape's four
+wake-up methods in ftape's order and keeps the first one the drive answers.
+"Answers" is ftape's test: Report Drive Status succeeds within 4 tries and is
+not 0xff. ftape's behaviour is the safety precedent: these are the wakes it
+sent, unasked, to any drive on the cable.
+
+| Try | Profile | ftape method | What `tw` sends |
+|---|---|---|---|
+| 1 | `default` | None | nothing; just Report Drive Status |
+| 2 | `colorado` | Colorado | Phantom Select (46) + unit 0, then Enter Primary Mode (30) |
+| 3 | `mountain` | Mountain | Soft Select (23) + its 20-pulse train |
+| 4 | `insight` | Motor-on | wait 100 ms, then the drive-select and motor-enable lines of unit 0 |
+
+Like ftape, `tw` undoes nothing between tries except the motor: after a
+Motor-on try that gets no answer it switches the motor off and deselects. It
+also switches that motor off at the end of every session. If no drive
+answers, it stops with an error. Each try and its result is logged:
 
 ```console
-$ tw --profile colorado drive select
+$ tw drive select
+[12:00:00] INFO     auto: trying default: no wake steps
+           INFO     auto: default: no answer (command 6: no ACK bit -- ...)
+           INFO     auto: trying colorado: phantom select 0, enter primary mode
+           INFO     auto: drive answered colorado; using profile 'colorado'
 status : 0x25 [ready cartridge_present referenced]
 select : yes -- cue INDEX every 2.9 ms
 ```
 (example output)
+
+A phantom drive that an earlier session left selected answers try 1, so
+the second `tw` command after a cold start usually reports `using profile
+'default'`. That is expected (ftape does the same); `default` has the same
+timings. A Colorado 1400 is picked up as `colorado`, which has the same wake
+and timings as `colorado.1400`. `conner` and `iomega` are never tried
+automatically: ftape does not wake drives with a Soft Reset, and a Soft Reset
+deselects a phantom drive. Name them with `--profile`.
+
+**Not yet checked on hardware:** `auto` as a whole. Only the Colorado wake
+has met real drives (the 350 and the 1400). The None, Mountain and Motor-on
+tries, the order, the 4-try status test and the Motor-on undo have only run
+against simulated drives. Motor-on drives the Greaseweazle's IBM PC bus unit
+0 lines (cable pins 14 and 10); that this matches what a PC floppy controller
+does under ftape is our reading, not tested. If `auto` misbehaves, name the
+profile with `--profile NAME` and report it.
+
+**Set it once.** Instead of passing `--profile` every time, put it in the
+per-user config file, which `tw` reads when `--config` is not given:
+`~/.config/tapewyrm/config.toml` (or `$XDG_CONFIG_HOME/tapewyrm/config.toml`;
+on Windows `%APPDATA%\tapewyrm\config.toml`):
+
+```toml
+profile = "colorado.1400"
+# port = "/dev/cu.usbmodem1234"   # optional, as --port
+```
+
+`--profile` on the command line still wins over the file, and `--config FILE`
+reads that file instead of the per-user one.
+
+**Colorado drives are "phantom" drives.** They ignore the floppy drive-select
+lines and are selected by a QIC-117 command instead: Phantom Select (command
+46) followed by a unit-address argument (unit 0 for the Jumbo 350 and the
+1400). The `colorado` profiles (and `auto`'s second try) do this. A drive selected that
+way **stays selected** after `tw` exits, until `tw drive deselect`, a reset,
+or a power cycle. `tw drive select --unit N` tries another unit address.
 
 A selected, ready drive pulses INDEX every few milliseconds; seeing that is
 the proof it is listening. Then read everything the drive reports:
@@ -311,8 +367,17 @@ captures/info.json` stays clean.
 ### The drive does not answer
 
 - `tw info` first: if the board does not answer, check USB and `--port`.
-- Did you pass `--profile`? Without it, a phantom-select drive (every Colorado)
-  never gets selected.
+- Read the `auto:` log lines. `no drive answered auto-detection` means none
+  of ftape's four wake-ups got an answer: check the points below. A drive
+  that needs something else (`conner`, `iomega`, your own TOML) needs
+  `--profile NAME` (or `profile = ...` in `~/.config/tapewyrm/config.toml`).
+  `auto: skipping insight: ...` means the board refused the motor lines; the
+  other three were still tried.
+- Does `--profile colorado` (or `mountain`, `insight`) behave differently from
+  the default? It should not; if it does, `auto` is at fault (it is not yet
+  checked on hardware): name the profile and report it.
+- A config file can override the default: `tw -v drive status` logs which
+  config file and profile were picked up.
 - Is the drive powered (5 V and 12 V), and is the cable the right way round?
 - Try other unit addresses: `tw --profile colorado drive select --unit 1`.
 - Another phantom drive on the same cable may still be selected:

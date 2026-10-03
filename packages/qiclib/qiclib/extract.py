@@ -11,6 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+from tapewyrm_archive.provenance import provenance_path
 from tapewyrm_archive.twti import SegmentState, TapeImage
 from tapewyrm_archive.twvl import VERSION, SparseVolume, Volume, find_holes
 
@@ -320,9 +321,15 @@ def extract(
                     # when that is known exactly (uncompressed Directory-Last);
                     # None = consumers locate it (qiclib.qic113 does).
                     "directory_offset": directory_offset,
+                    # The length of the volume bytes, so a reader can tell a
+                    # truncated file from a short volume (TWS-3 3.1, 6.2).
+                    "volume_size": size,
                     "holes": holes,
                     "lost_segments": lost,
-                    "source_image": str(image_path),
+                    # Only the image's directory name and file name: the
+                    # full path as given would put the user's home directory
+                    # (and user name) into every volume (TWS-3 8.2).
+                    "source_image": provenance_path(image_path),
                     "drive": img.header.get("drive"),
                 },
                 data=body,

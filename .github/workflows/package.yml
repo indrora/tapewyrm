@@ -1,6 +1,8 @@
 name: package
 
 # Build the WHOLE project as one package (host wheel + firmware images) -> dist/.
+# The firmware half goes through PlatformIO (tools/package.py), which fetches its
+# own pinned ARM GCC; installing `pio` itself is out of this workflow's scope.
 
 on:
   push:
@@ -12,10 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install ARM GNU toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-none-eabi
       - name: Install uv
         uses: astral-sh/setup-uv@v5
       - name: Build the full release (all MCUs + .upd + host wheel)

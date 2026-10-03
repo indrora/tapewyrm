@@ -22,7 +22,10 @@ plus the hardware side:
 Codec imports happen inside the commands, so ``tw --help`` stays fast.
 
 Config precedence: CLI flags -> config file -> profile defaults, resolved once in
-``AppContext.load`` and carried on ``ctx.obj``.
+``AppContext.load`` and carried on ``ctx.obj``. The config file is ``--config``
+if given, else the per-user file from ``default_config_path()`` if it exists.
+The drive profile defaults to ``auto`` (try ftape's wake-up methods in ftape's
+order, ``qic117.profile.AUTO_ORDER``) when neither names one.
 
 Output channels (STYLE.md §2.5): command results -- status lines, summaries,
 ``--json`` -- go to **stdout** via ``click.echo``. The library's narrative goes
@@ -35,6 +38,7 @@ errors.
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -47,10 +51,34 @@ from rich.console import Console
 from tapewyrm_archive.progress import Progress
 
 from tapewyrm.console import make_console, progress_display, setup_logging
-from tapewyrm.qic117.profile import load_profile
+from tapewyrm.qic117.profile import AUTO, load_profile
 from tapewyrm.types import DriveProfile
 
 log = logging.getLogger(__name__)
+
+
+def default_config_path() -> Path:
+    """The per-user config file read when ``--config`` is not given.
+
+    Stdlib only, no platformdirs: one small file does not justify a dependency,
+    and CLI users expect the XDG location on every Unix, macOS included (git,
+    gh and uv all use ~/.config there too).
+
+    * Windows: ``%APPDATA%\\tapewyrm\\config.toml``
+    * elsewhere: ``$XDG_CONFIG_HOME/tapewyrm/config.toml``, defaulting to
+      ``~/.config/tapewyrm/config.toml``. The XDG spec says a relative
+      ``XDG_CONFIG_HOME`` is invalid and must be ignored, so it is.
+    """
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME", "")
+        if xdg and not Path(xdg).is_absolute():
+            log.debug("XDG_CONFIG_HOME=%r is relative; ignoring it per the XDG spec", xdg)
+            xdg = ""
+        base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "tapewyrm" / "config.toml"
 
 
 @dataclass
@@ -59,7 +87,9 @@ class AppContext:
 
     port: str | None
     profile_name: str
-    profile: DriveProfile
+    # None means ``--profile auto``: the profile is picked per drive session by
+    # probing (``qic117.drive.auto_wake``), because it depends on the hardware.
+    profile: DriveProfile | None
     passes: int = 1
     out_dir: Path | None = None
     settings: dict[str, Any] = field(default_factory=dict)
@@ -84,7 +114,10 @@ class AppContext:
         """Resolve config precedence CLI -> file -> profile defaults.
 
         A value set on the CLI wins; otherwise the config file supplies it;
-        otherwise the profile / built-in defaults apply.
+        otherwise the profile / built-in defaults apply. The config file is
+        ``config`` when given (and then only that file), else the per-user
+        ``default_config_path()`` when it exists. With no profile named
+        anywhere the profile is ``auto`` and ``self.profile`` is None.
 
         ``console`` is the stderr console logging was already routed to; the
         group builds it and calls ``setup_logging`` *before* this, so the
@@ -94,21 +127,35 @@ class AppContext:
         file_settings: dict[str, Any] = {}
         if config is not None:
             cfg_path = Path(config)
-            if cfg_path.exists():
-                log.debug("loading config %s", cfg_path)
+        else:
+            cfg_path = default_config_path()
+            log.debug("no --config; looking for the per-user config at %s", cfg_path)
+        if cfg_path.exists():
+            log.debug("loading config %s", cfg_path)
+            try:
                 with cfg_path.open("rb") as f:
                     file_settings = tomllib.load(f)
-            else:
-                log.debug("config %s does not exist; using CLI/profile defaults", cfg_path)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                # The per-user file is read on every run, so a typo in it must
+                # say which file to fix rather than end in a traceback.
+                log.debug("config %s failed to load: %r", cfg_path, exc)
+                raise click.ClickException(f"could not read config {cfg_path}: {exc}") from exc
+        else:
+            log.debug("config %s does not exist; using CLI/profile defaults", cfg_path)
 
         # Precedence for each resolvable setting.
         resolved_port = port if port is not None else file_settings.get("port")
-        resolved_profile_name = (
-            profile if profile is not None else file_settings.get("profile", "default")
+        resolved_profile_name = str(
+            profile if profile is not None else file_settings.get("profile", AUTO)
         )
-        log.debug("loading drive profile %r", resolved_profile_name)
+        prof: DriveProfile | None = None
+        if resolved_profile_name == AUTO:
+            log.debug("drive profile is %r: picked by probing at session time", AUTO)
+        else:
+            log.debug("loading drive profile %r", resolved_profile_name)
         try:
-            prof = load_profile(resolved_profile_name)
+            if resolved_profile_name != AUTO:
+                prof = load_profile(resolved_profile_name)
         except Exception as exc:  # ProfileError or IO — surface as a CLI error
             log.debug("profile %r failed to load: %r", resolved_profile_name, exc)
             raise click.ClickException(
@@ -136,8 +183,17 @@ class AppContext:
 @click.group()
 @click.version_option(package_name="tapewyrm", prog_name="tw")
 @click.option("--port", default=None, help="GW serial port (autodetect if unset)")
-@click.option("--profile", default=None, help="drive profile name or path")
-@click.option("--config", type=click.Path(), default=None, help="config TOML file")
+@click.option(
+    "--profile",
+    default=None,
+    help="drive profile name or path; default 'auto' (tries ftape's wake-ups, see docs)",
+)
+@click.option(
+    "--config",
+    type=click.Path(),
+    default=None,
+    help="config TOML file (default: ~/.config/tapewyrm/config.toml if present)",
+)
 @click.option("--progress", "show_progress", is_flag=True, help="show progress bars (stderr)")
 @click.option("-v", "--verbose", count=True, help="more log output (-v for debug)")
 @click.option("-q", "--quiet", count=True, help="less log output (-q warnings, -qq errors)")
@@ -183,9 +239,19 @@ _REPORT_BITS = {6: 8, 7: 16, 8: 8, 9: 8, 32: 16, 33: 8, 37: 16}
 
 @contextmanager
 def _drive_session(
-    app: AppContext, *, wake: bool = True, profile: DriveProfile | None = None
+    app: AppContext,
+    *,
+    wake: bool = True,
+    profile: DriveProfile | None = None,
+    candidates: tuple[DriveProfile, ...] | None = None,
 ) -> Iterator[Any]:
     """Open the link, wake the drive with the profile, yield a Qic117Drive.
+
+    The profile is ``profile`` if given, else ``app.profile``. If both are None
+    (``--profile auto``) the session probes ``candidates`` (default: the
+    ``AUTO_ORDER`` profiles) with ``auto_wake`` and keeps the one that answers;
+    with ``wake=False`` there is nothing to probe and the built-in ``default``
+    profile (no wake steps) carries the link.
 
     Every ``tw drive`` command is one short session. On the way out we always
     release the GW drive-select lines and the port; commands that move tape
@@ -195,27 +261,39 @@ def _drive_session(
     ``wake=False`` skips the profile's wake sequence (for select/deselect).
     """
     from tapewyrm.link.device import DeviceLink, LinkError
-    from tapewyrm.qic117.drive import DriveError, Qic117Drive
+    from tapewyrm.qic117.drive import DriveError, Qic117Drive, auto_wake
+    from tapewyrm.qic117.profile import ProfileError, auto_candidates
 
+    chosen = profile or app.profile
     link = DeviceLink()
+    drive: Qic117Drive | None = None
     try:
         log.debug("opening link on port %r", app.port)
         link.open(app.port)
         log.debug("releasing drive-select lines before wake")
         link.deselect()  # phantom drives want every DS line idle
-        drive = Qic117Drive(link, profile or app.profile)
-        if wake:
-            log.debug("waking drive with profile %r", (profile or app.profile).name)
-            drive.wake()
-        else:
+        if not wake:
             log.debug("skipping wake sequence (wake=False)")
+            drive = Qic117Drive(link, chosen or DriveProfile.default())
+        elif chosen is None:
+            log.debug("profile auto: probing for a drive that answers")
+            drive = auto_wake(link, candidates or auto_candidates())
+        else:
+            log.debug("waking drive with profile %r", chosen.name)
+            drive = Qic117Drive(link, chosen)
+            drive.wake()
         yield drive
+    except ProfileError as exc:
+        log.debug("auto-detect profile failed to load: %r", exc)
+        raise click.ClickException(str(exc)) from exc
     except (LinkError, DriveError) as exc:
         log.debug("drive session failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     finally:
-        log.debug("closing drive session: deselect and close link")
+        log.debug("closing drive session: motor off, deselect and close link")
         try:
+            if drive is not None:
+                drive.release_lines()  # a Motor-on wake's motor (ftape's sleep)
             link.deselect()
         except Exception as exc:
             log.debug("deselect on close failed (ignored): %r", exc)
@@ -239,7 +317,11 @@ def drive() -> None:
     """Poke the tape drive by hand: status, reports, motion, scope.
 
     Read-only: commands that write to tape are refused by the drive layer.
-    Wakes the drive with --profile first (e.g. --profile colorado).
+    Wakes the drive with --profile first. The default, auto, tries the wake-ups
+    the Linux ftape driver tries, in its order -- none, Colorado (Phantom
+    Select), Mountain (Soft Select), Motor-on -- and stops at the first the
+    drive answers; pass --profile NAME (default, colorado, colorado.1400,
+    mountain, insight, conner, iomega or a .toml path) to skip the probe.
     """
 
 
@@ -310,6 +392,10 @@ def _cue_period_ms(trace: Any) -> float | None:
     return (rises[-1] - rises[0]) / (len(rises) - 1) / 1000
 
 
+def _has_phantom_select(profile: DriveProfile) -> bool:
+    return any(name.strip().lower() == "phantom select" for name, _a, _d in profile.wake_sequence)
+
+
 def _with_phantom_unit(profile: DriveProfile, unit: int) -> DriveProfile:
     """The profile's wake sequence, with Phantom Select addressing ``unit``."""
     from dataclasses import replace
@@ -341,8 +427,22 @@ def drive_select(app: AppContext, unit: int | None) -> None:
     emits every few ms (QIC-117 Rev J Fig. 6). The drive stays selected after
     this command exits.
     """
-    profile = _with_phantom_unit(app.profile, unit) if unit is not None else app.profile
-    with _drive_session(app, profile=profile) as d:
+    from tapewyrm.qic117.profile import auto_candidates
+
+    profile: DriveProfile | None = app.profile
+    candidates: tuple[DriveProfile, ...] | None = None
+    if unit is not None and profile is not None:
+        profile = _with_phantom_unit(profile, unit)
+    elif unit is not None:
+        # --profile auto with --unit: probe the usual candidates; the ones that
+        # Phantom Select address the requested unit instead of their own. The
+        # others are left as they are, so each still sends only its own ftape
+        # method (inserting a Phantom Select would blur them together).
+        log.debug("profile auto with --unit %d: re-addressing phantom candidates", unit)
+        candidates = tuple(
+            _with_phantom_unit(p, unit) if _has_phantom_select(p) else p for p in auto_candidates()
+        )
+    with _drive_session(app, profile=profile, candidates=candidates) as d:
         st = d.status()
         click.echo(f"status : {_fmt_status(st)}")
         period = _cue_period_ms(d.link.scope(0, 30))

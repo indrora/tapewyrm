@@ -174,8 +174,9 @@ property is normative.
 ### 2.3. Volume Bytes
 
 The Volume Bytes run from offset `10 + Header Length` to the end of the
-file. Their length is the volume size (Section 4.1). There is no length
-field; the file's end delimits them.
+file. Their length is the volume size (Section 4.1), which the header
+also records as `volume_size` so that a reader can tell a truncated file
+from a short volume (Section 6.2). The file's end delimits them.
 
 ## 3. The JSON Header
 
@@ -194,9 +195,10 @@ All members below are REQUIRED of a writer. A member whose value is
 | `data_section_size` | integer or null            | File Set Data Section size from the VTBL entry (copy of `vtbl.data_section_size`). `null` when the volume profile does not define the field. |
 | `dir_section_size`  | integer or null            | File Set Directory Section size from the VTBL entry (copy of `vtbl.dir_section_size`). `null` when the volume profile does not define the field. |
 | `directory_offset`  | integer or null            | Offset in the volume bytes at which the File Set Directory Section starts, when the writer knows it exactly; otherwise `null` (Section 4.4). |
+| `volume_size`       | integer                    | Length in bytes of the volume bytes (Section 4.1). Files written before this member was added lack it; readers MUST accept its absence (Section 6.2, rule 6). |
 | `holes`             | array of [integer, integer]| Byte ranges `[start, end)` of the volume bytes that were not recovered (Section 5). Empty array when none. |
 | `lost_segments`     | array of integer           | Segment numbers, within the source image, of the volume's segments that were not recovered (Section 5). Empty array when none. |
-| `source_image`      | string                     | Path of the TWTI or TWTZ image the volume was extracted from, as given to the extractor. Informative only. |
+| `source_image`      | string                     | The TWTI or TWTZ image the volume was extracted from, as the name of the directory that held it, `/`, and its file name (e.g. `tapes/jc.twtz` for `/Users/x/tapes/jc.twtz`), or the bare file name when it was given without a directory (`jc.twtz`). Never an absolute path, and nothing above that one directory (Section 8.2). Informative only. |
 | `drive`             | object or null             | The `drive` member of the source image's header ([TWS-2]), copied verbatim, or `null` if the image has none (Section 3.3). |
 
 ### 3.2. The vtbl Object
@@ -394,7 +396,8 @@ can have holes and no lost segments.
 3. The header's `format` MUST be `"TWVL"` and its `version` MUST equal
    the preamble Version.
 4. The volume bytes MUST be laid out as Section 4 specifies, and MUST
-   be exactly the volume size long.
+   be exactly the volume size long. `volume_size` MUST equal that
+   length.
 5. Every hole MUST be zero-filled and MUST be listed in `holes`
    (Section 5). A writer MUST NOT list a recovered byte as a hole and
    MUST NOT close up or shift data around a hole.
@@ -406,6 +409,10 @@ can have holes and no lost segments.
    lies past the end of the source image, or whose size fails the bound
    in Section 4.1, rather than write a misleading file.
 9. A writer SHOULD write one file per VTBL entry.
+10. A writer MUST record `source_image` as Section 3.1 describes: the
+    name of the image's directory and its file name only, derived from
+    the path as given without resolving it, so that neither an absolute
+    path nor the current directory's name is ever written.
 
 ### 6.2. Reader Requirements
 
@@ -413,20 +420,27 @@ can have holes and no lost segments.
    not `TWVL`.
 2. A reader MUST reject a file whose preamble Version it does not
    implement. A version-1 reader MUST reject every other version.
-3. A reader MUST reject a file whose Header Length exceeds the bytes
-   remaining after the preamble, or whose header is not a valid UTF-8
-   JSON object.
+3. A reader MUST reject a file shorter than the 10-byte preamble,
+   a file whose Header Length exceeds the bytes remaining after the
+   preamble, and a file whose header is not a valid UTF-8 JSON object or
+   whose `format` member, when present, is not `"TWVL"`.
 4. A reader MUST ignore header members it does not recognize, at the
    top level and inside `vtbl` and `drive`.
 5. A reader MUST treat bytes inside a hole as missing. When it returns
    any range of the volume bytes, it MUST be able to report how many of
-   those bytes fall in holes, and MUST NOT present zeros from a hole as
+   those bytes fall in holes, counting each byte once even where ranges
+   overlap, and MUST NOT present zeros from a hole as
    recovered data. A file whose content overlaps a hole MUST be
    reported as damaged (for example, in a damage report), even if the
    reader still writes it out zero-filled.
-6. A reader MUST treat bytes past the end of the file (a volume shorter
-   than its `holes` or its section sizes imply) as missing, exactly as
-   if they were in a hole.
+6. A reader MUST reject a truncated file: one whose volume bytes are
+   shorter than `volume_size`, or, when `volume_size` is absent, shorter
+   than the largest `end` in `holes` or than `directory_offset` (no
+   writer puts either past the end, Section 5). The error MUST name the
+   file and SHOULD state the length expected and the length found. When
+   a reader is asked for a range that extends past the end of the volume
+   bytes, it MUST count the bytes past the end as missing, exactly as if
+   they were in a hole.
 7. A reader MUST NOT decompress the volume bytes (Section 4).
 8. When `directory_offset` is an integer, a reader SHOULD start the
    directory section there; if no Directory Entry parses at that
@@ -437,9 +451,10 @@ can have holes and no lost segments.
    when it needs a field the header leaves `null`.
 10. A reader MUST NOT rely on `source_image` or `drive` for anything
     but display and provenance.
-11. On a truncated or damaged file whose preamble and header are
-    intact, a reader SHOULD recover what it can, treating absent bytes
-    as missing (rule 6), and SHOULD say so.
+11. A reader MUST NOT recover data from a truncated file (rule 6): a
+    file cut short is a failed copy, and the remedy is to copy it, or
+    extract it from its image, again. Damage inside a complete file is
+    what `holes` records.
 
 ## 7. Versioning and Extensibility
 
@@ -505,10 +520,12 @@ consented to their data being read.
   (Appendix A).
 - Tools SHOULD NOT send volume contents or listings to remote
   services.
-- `source_image` records a local path, which can reveal a user name or
-  directory layout of the machine that ran the extractor. Writers
-  SHOULD record a relative path or a bare file name; users sharing a
-  file SHOULD check it.
+- `source_image` records where the image was, which could reveal a
+  user name or directory layout of the machine that ran the extractor.
+  Writers therefore record only the image's directory name and file name
+  (Section 3.1, Section 6.1 rule 10), never an absolute path. Those two
+  names can still identify a tape or its owner; users sharing a file
+  SHOULD check them.
 - `tape_name`, `vtbl.description`, `vtbl.source_label` and `vtbl.raw`
   can identify the original owner (for example, a name or company as
   the tape or volume label).
@@ -572,19 +589,19 @@ table, segments 3-5 one compressed Directory-Last volume. Segment 4 is
 32-byte data section and a 16-byte directory section. The volume bytes
 are placeholder text, not a parseable File Set.
 
-The file is 1182 bytes: 10 bytes of preamble, a 1124-byte header, and
+The file is 1202 bytes: 10 bytes of preamble, a 1144-byte header, and
 48 volume bytes.
 
 Preamble:
 
 ```text
-00000000: 5457 564c 0100 6404 0000                 TWVL..d...
+00000000: 5457 564c 0100 7804 0000                 TWVL..x...
           \_______/ \__/ \_______/
-           magic     |    header length = 0x00000464 = 1124
+           magic     |    header length = 0x00000478 = 1144
                      version = 1
 ```
 
-Header (offsets 0x0a-0x46d), shown as written:
+Header (offsets 0x0a-0x481), shown as written:
 
 ```json
 {
@@ -619,6 +636,7 @@ Header (offsets 0x0a-0x46d), shown as written:
  "data_section_size": 32,
  "dir_section_size": 16,
  "directory_offset": null,
+ "volume_size": 48,
  "holes": [
   [
    16,
@@ -655,14 +673,14 @@ Notes on the header:
 - `holes` is `[[16, 32]]`: the bytes the missing segment 4 would have
   supplied. Segment 4 is in `lost_segments`.
 
-Volume bytes (offsets 0x46e-0x49d, volume offsets 0-47):
+Volume bytes (offsets 0x482-0x4b1, volume offsets 0-47):
 
 ```text
 file      volume
 offset    offset  bytes                                            ASCII
-0000046e  0000    45 58 41 4d 50 4c 45 2e 54 58 54 20 30 31 32 33  EXAMPLE.TXT 0123
-0000047e  0010    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
-0000048e  0020    44 49 52 45 43 54 4f 52 59 2d 42 59 54 45 53 21  DIRECTORY-BYTES!
+00000482  0000    45 58 41 4d 50 4c 45 2e 54 58 54 20 30 31 32 33  EXAMPLE.TXT 0123
+00000492  0010    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+000004a2  0020    44 49 52 45 43 54 4f 52 59 2d 42 59 54 45 53 21  DIRECTORY-BYTES!
                   \_____________________________________________/
   0x00-0x0f  data section, from segment 3's extent (offset 0)
   0x10-0x1f  HOLE [16, 32): zero filler, NOT data (segment 4 lost)
@@ -677,7 +695,7 @@ bytes missing.
 
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
-| 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. |
+| 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. Same date, before release: added `volume_size`; readers MUST reject truncated files (Section 6.2); `source_image` records only the directory name and file name. |
 
 ## Author's Address
 

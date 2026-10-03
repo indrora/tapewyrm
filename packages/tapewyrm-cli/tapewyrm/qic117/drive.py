@@ -20,10 +20,17 @@ follow-up policy lives here. Report bytes are converted to ints honoring
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
 
-from tapewyrm.link.device import DeviceLink
+from tapewyrm.link.device import (
+    DeviceLink,
+    LinkClosed,
+    LinkError,
+    LinkTimeout,
+    LinkVersionError,
+)
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.commands import Cmd, Kind, encode_arg
 from tapewyrm.qic117.status import classify_error
@@ -38,6 +45,22 @@ class DriveError(Exception):
     def __init__(self, message: str, error: ErrorCode | None = None) -> None:
         super().__init__(message)
         self.error = error
+
+
+class WakeUnsupported(DriveError):
+    """A wake step needs something this link or board cannot do (e.g. motor lines)."""
+
+
+#: Wake steps that drive a cable line instead of sending a QIC-117 command
+#: (keys as ``_step_key`` spells them). ``DELAY`` does nothing but its own
+#: ``delay_ms``; ``MOTOR_ON`` asserts an IBM PC bus unit's drive-select and
+#: motor-enable lines (``arg`` = unit, default 0). See ``Qic117Drive._line_step``.
+LINE_STEPS = frozenset({"DELAY", "MOTOR_ON"})
+
+
+def _step_key(name: str) -> str:
+    """Normalize a profile step name: "motor on" -> "MOTOR_ON" (as ``_lookup`` does)."""
+    return name.strip().upper().replace(" ", "_").replace("-", "_")
 
 
 def bits_to_int(raw: bytes, bit_order: str) -> int:
@@ -76,6 +99,9 @@ class Qic117Drive:
         # a long motion doesn't log two lines per poll (the loops log start and
         # outcome themselves).
         self._polling = False
+        # The IBM PC bus unit whose motor a "motor on" wake step switched on,
+        # or None; release_lines() switches it back off.
+        self.motor_unit: int | None = None
 
     @property
     def last_error(self) -> ErrorCode | None:
@@ -280,14 +306,28 @@ class Qic117Drive:
     # --- lifecycle ---
 
     def wake(self) -> None:
-        """Run the profile's wake sequence (DESIGN.md §6A.3).
+        """Run the profile's wake sequence, then read status (DESIGN.md §6A.3).
 
         Each step is (command-name, arg|None, delay-ms). Unknown command names in
         a profile raise so a typo is caught at bring-up rather than silently
-        skipped.
+        skipped. Besides QIC-117 commands a step may be a *line* step (see
+        ``LINE_STEPS``), which drives a cable line instead of sending pulses.
 
         TODO(bench), DESIGN.md §9 item 3: the real wake timings/sequence per drive
         family are bench-characterized; the profiles ship nominal placeholders.
+        """
+        self.run_wake_steps()
+        # Read status last: it also reads+clears any latched error / new-cartridge
+        # state (power-on leaves error 26 latched), without which the drive
+        # rejects many later commands (QIC-117 Rev J §3).
+        log.debug("wake: reading status to clear latched error/new-cartridge")
+        self.status()
+
+    def run_wake_steps(self) -> None:
+        """Push the profile's timing and run its wake steps, without reading status.
+
+        ``wake()`` is this plus a status read; ``auto_wake`` calls it directly so
+        it can run ftape's own "did the drive answer?" test afterwards.
         """
         import time
         from dataclasses import replace
@@ -307,16 +347,76 @@ class Qic117Drive:
             )
         )
         for name, arg, delay_ms in self.profile.wake_sequence:
-            cmd = self._lookup(name)
-            log.debug("wake step: %r arg=%s, then %d ms delay", cmd.name, arg, delay_ms)
-            self.command(cmd, arg=arg)
+            if _step_key(name) in LINE_STEPS:
+                log.debug("wake line step: %r arg=%s, then %d ms delay", name, arg, delay_ms)
+                self._line_step(_step_key(name), arg)
+            else:
+                cmd = self._lookup(name)
+                log.debug("wake step: %r arg=%s, then %d ms delay", cmd.name, arg, delay_ms)
+                self.command(cmd, arg=arg)
             if delay_ms:
                 time.sleep(delay_ms / 1000.0)
-        # Read status last: it also reads+clears any latched error / new-cartridge
-        # state (power-on leaves error 26 latched), without which the drive
-        # rejects many later commands (QIC-117 Rev J §3).
-        log.debug("wake: reading status to clear latched error/new-cartridge")
-        self.status()
+
+    def _line_step(self, key: str, arg: int | None) -> None:
+        """Run one ``LINE_STEPS`` step (a cable line, not a QIC-117 command).
+
+        ``MOTOR_ON`` is ftape's Insight ("Motor-on") wake: such drives are
+        enabled by their motor-enable line rather than by a command. ftape sets
+        the unit's motor bit in the controller's Digital Output Register; on a
+        PC floppy controller that unit's drive-select output follows it, so the
+        drive sees DS and MOTEN asserted together. GW's IBM PC bus gives the
+        same pair: SELECT asserts the unit's DS line, MOTOR its MOTEN line
+        (unit 0 = cable pins 14 + 10, unit 1 = pins 12 + 16).
+
+        TODO(bench): no Insight-wake drive (Irwin 80SX, Insight 80, early Iomega
+        250) has been tried; the DS-follows-motor reading of ftape's comment
+        ("enable is done by motor-on") is ours, not ftape's.
+        """
+        if key == "DELAY":
+            log.debug("wake: delay step (only its delay_ms)")
+            return
+        # MOTOR_ON: everything below needs GW's select + motor commands.
+        unit = 0 if arg is None else arg
+        if not (
+            callable(getattr(self.link, "select", None))
+            and callable(getattr(self.link, "motor", None))
+        ):
+            log.debug("wake: link %r has no select()/motor(); refusing motor on", self.link)
+            raise WakeUnsupported("this link cannot drive the drive-select/motor-enable lines")
+        from tapewyrm.types import SelectHint
+
+        log.debug("wake: motor on: IBM PC bus, unit %d, select + motor-enable", unit)
+        # Remember the unit before asking: if GW turns the motor on and then
+        # something fails, release_lines() must still switch it off.
+        self.motor_unit = unit
+        try:
+            self.link.select(SelectHint(unit=unit, bus="ibmpc", motor=True))
+        except _LINK_FATAL:
+            raise
+        except LinkError as exc:
+            log.debug("wake: board refused motor on for unit %d (%s); unsupported", unit, exc)
+            raise WakeUnsupported(f"board refused select + motor on unit {unit}: {exc}") from exc
+
+    def release_lines(self) -> None:
+        """Undo the line steps: motor off and drive deselected (ftape's undo).
+
+        ftape turns the motor back off when a Motor-on wake gets no answer, and
+        again when it puts the drive to sleep (``ftape_put_drive_to_sleep``). A
+        no-op when no wake step turned a motor on.
+        """
+        if self.motor_unit is None:
+            log.debug("release_lines: no motor on; nothing to undo")
+            return
+        unit, self.motor_unit = self.motor_unit, None
+        log.debug("release_lines: motor off on unit %d, then deselect", unit)
+        try:
+            self.link.motor(unit, False)
+        except _LINK_FATAL:
+            raise
+        except LinkError as exc:
+            # NO_BUS / BAD_UNIT: the motor was never switched on.
+            log.debug("release_lines: motor off refused (%s); carrying on to deselect", exc)
+        self.link.deselect()
 
     def reset(self) -> None:
         """Soft Reset (cmd 1) — single pulse; clears state, drops to known mode."""
@@ -326,9 +426,177 @@ class Qic117Drive:
 
     @staticmethod
     def _lookup(name: str) -> Cmd:
-        key = name.upper().replace(" ", "_").replace("-", "_")
+        key = _step_key(name)
         cmd = commands.TABLE.get(key)
         if cmd is None:
             log.debug("profile command name %r (key %r) not in table; refusing", name, key)
             raise DriveError(f"unknown command name in profile: {name!r}")
         return cmd
+
+
+# ---------------------------------------------------------------------------
+# `--profile auto`: ftape's wake-up methods, in ftape's order
+# ---------------------------------------------------------------------------
+#
+# Precedent: ftape, the Linux floppy-tape driver, as shipped in Linux 2.6.19
+# (its last release before removal; the code dates from ftape 3.x/4.x,
+# Bas Laarhoven and Claus-Justus Heine, 1993-1997). Read from
+# https://raw.githubusercontent.com/torvalds/linux/v2.6.19/drivers/char/ftape/...
+#
+# * lowlevel/ftape-ctl.c, ftape_activate_drive(): with the drive type unknown
+#   it loops ``for (method=no_wake_up; method < NR_ITEMS(methods); ++method)``
+#   over WAKEUP_METHODS (include/linux/ftape-vendors.h): None, Colorado,
+#   Mountain, Motor-on (wake_up_insight). The first method whose
+#   ftape_wakeup_drive() succeeds wins; if none does, "no tape drive found".
+#   Nothing is sent between attempts: no deselect, no reset, no delay.
+# * lowlevel/ftape-io.c, ftape_wakeup_drive(method):
+#     - no_wake_up:       nothing.
+#     - wake_up_colorado: QIC_PHANTOM_SELECT (46), then ftape_parameter(0),
+#                         i.e. a 0+2 = 2-pulse train ("0 /* ft_drive_sel ?? */").
+#     - wake_up_mountain: QIC_SOFT_SELECT (23), 1 ms sleep ("NEEDED"), then
+#                         ftape_parameter(18), i.e. 20 pulses.
+#     - wake_up_insight:  100 ms sleep, then fdc_motor(1) (motor bit for the
+#                         unit in the FDC Digital Output Register; fdc-io.c
+#                         sleeps 10 ms after) -- "enable is done by motor-on".
+#   then, for every method, ftape_report_raw_drive_status(): success means the
+#   drive answered. If that fails after a Motor-on wake, the motor goes back
+#   off (fdc_motor(0)); that is the only undo ftape does between attempts.
+# * ftape-io.c, ftape_report_raw_drive_status(): Report Drive Status (6),
+#   tried up to 4 times (once + 3 retries) while the report fails; a status
+#   of 0xff is rejected as "impossible drive status".
+# * ftape-io.c, ftape_put_drive_to_sleep(): at release, Colorado sends Phantom
+#   Deselect (47), Mountain Soft Deselect (24), Motor-on turns the motor off.
+#   ftape never sends these to a drive whose method it did not find.
+#
+# tw mirrors that: profile.AUTO_ORDER lists one profile per ftape method in
+# ftape's order, auto_wake() runs each profile's wake steps, applies ftape's
+# answer test, and undoes only the motor. Differences, all deliberate:
+#   - tw's colorado profile adds Enter Primary Mode (30) after the select
+#     (bench-verified on the Jumbo 350 / 1400; ftape issues it later).
+#   - ftape waits up to 300 ms for a report's ACK; tw's firmware waits TACK
+#     (``TimingParams.tack_us``).
+#   - ftape's phantom/soft-select argument and motor unit follow its device
+#     node (/dev/qft0 = unit 0); tw uses unit 0 (``tw drive select --unit``
+#     re-addresses Phantom Select).
+
+# Link failures that mean the *board* is gone or wrong, not that the drive is
+# silent. auto_wake must not paper over these by moving on to the next profile.
+_LINK_FATAL = (LinkClosed, LinkTimeout, LinkVersionError)
+
+#: ftape_report_raw_drive_status: one try plus up to three retries.
+_STATUS_TRIES = 4
+
+
+def _describe_wake(profile: DriveProfile) -> str:
+    """One readable line for a wake sequence, e.g. "phantom select 0, enter primary mode"."""
+    steps = []
+    for name, arg, ms in profile.wake_sequence:
+        if _step_key(name) == "DELAY":
+            steps.append(f"wait {ms} ms")
+        else:
+            steps.append(name if arg is None else f"{name} {arg}")
+    return ", ".join(steps) or "no wake steps"
+
+
+def _unsupported_reason(link: DeviceLink, profile: DriveProfile) -> str | None:
+    """Why ``link`` cannot run ``profile``'s wake at all, or None if it can."""
+    needs_motor = any(_step_key(name) == "MOTOR_ON" for name, _a, _ms in profile.wake_sequence)
+    if needs_motor and not (
+        callable(getattr(link, "select", None)) and callable(getattr(link, "motor", None))
+    ):
+        log.debug("auto: %s needs motor lines; link %r has no select()/motor()", profile.name, link)
+        return "it needs the motor-enable line and this link cannot drive it"
+    return None
+
+
+def _ftape_answer(drive: Qic117Drive) -> str | None:
+    """ftape's "did the drive answer?" test; None if it did, else why not.
+
+    ftape_report_raw_drive_status(): Report Drive Status, retried while the
+    report fails (4 tries in all), and a status byte of 0xff is impossible
+    (a floating TRK0 line reads as all ones). Board failures propagate.
+    """
+    why = "no answer"
+    for attempt in range(1, _STATUS_TRIES + 1):
+        try:
+            raw = drive.report(commands.REPORT_DRIVE_STATUS, 8)
+        except _LINK_FATAL:
+            raise
+        except LinkError as exc:
+            log.debug("auto: status try %d/%d failed: %s", attempt, _STATUS_TRIES, exc)
+            why = str(exc)
+            continue
+        if raw & 0xFF == 0xFF:
+            log.debug("auto: status 0xff on try %d; ftape rejects it, so no retry", attempt)
+            return "impossible drive status 0xff"
+        log.debug("auto: status 0x%02x on try %d", raw, attempt)
+        return None
+    log.debug("auto: no status after %d tries", _STATUS_TRIES)
+    return why
+
+
+def auto_wake(link: DeviceLink, candidates: Sequence[DriveProfile]) -> Qic117Drive:
+    """Wake the drive with the first candidate profile it answers (``--profile auto``).
+
+    ftape's drive detection (see the comment block above): for each candidate,
+    in order, run its wake steps and ask for Report Drive Status, up to 4
+    times. The first candidate the drive answers wins and its ``Qic117Drive``
+    is returned (status read once more through ``status()``, which also clears
+    the power-on error latch, as ``wake()`` would), so later re-wakes in the
+    session use the same profile.
+
+    Between attempts tw undoes only what ftape undoes: a motor turned on by a
+    "motor on" step goes back off (and the select with it). A Phantom or Soft
+    Select is left alone, exactly as ftape leaves it.
+
+    A candidate this link cannot run (a "motor on" step on a link without
+    motor control, or a board that refuses the motor command) is skipped with
+    an INFO line saying why. Board failures (closed link, transport timeout,
+    wrong firmware) propagate at once. If no candidate answers, raises
+    ``DriveError`` naming what was tried.
+
+    TODO(bench): only the Colorado method has met hardware (Jumbo 350, 1400).
+    None/Mountain/Motor-on, and the order as a whole, have run only against
+    the fake boards in tests/test_drive.py and tests/test_cli_drive.py.
+    """
+    tried: list[str] = []
+    for profile in candidates:
+        reason = _unsupported_reason(link, profile)
+        if reason is not None:
+            log.info("auto: skipping %s: %s", profile.name, reason)
+            tried.append(f"{profile.name} (skipped)")
+            continue
+        log.info("auto: trying %s: %s", profile.name, _describe_wake(profile))
+        drive = Qic117Drive(link, profile)
+        try:
+            drive.run_wake_steps()
+            why = _ftape_answer(drive)
+        except _LINK_FATAL:
+            log.debug(
+                "auto: link failure while trying %s; not a silent drive, raising", profile.name
+            )
+            raise
+        except WakeUnsupported as exc:
+            log.info("auto: skipping %s: %s", profile.name, exc)
+            tried.append(f"{profile.name} (skipped)")
+            drive.release_lines()
+            continue
+        except LinkError as exc:
+            # A wake *command* failed (not the status test): treat it as no answer.
+            why = str(exc)
+        if why is None:
+            log.info("auto: drive answered %s; using profile %r", profile.name, profile.name)
+            drive.status()  # as wake() ends: clear the power-on / new-cartridge latch
+            return drive
+        log.info("auto: %s: no answer (%s)", profile.name, why)
+        tried.append(profile.name)
+        if drive.motor_unit is not None:
+            log.info("auto: %s: motor off and deselect (ftape's undo)", profile.name)
+            drive.release_lines()
+        else:
+            log.debug("auto: %s: ftape undoes nothing after this wake; moving on", profile.name)
+    log.debug("auto: no candidate answered (tried %s); raising", tried)
+    raise DriveError(
+        f"no drive answered auto-detection (tried: {', '.join(tried) or 'nothing'}). "
+        "Check power and cabling, or pass --profile NAME (see `tw drive --help`)"
+    )

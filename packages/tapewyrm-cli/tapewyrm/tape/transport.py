@@ -75,6 +75,7 @@ class TapeTransport:
         Geometry uses the reported segments-per-track when the drive supports it
         (Report Format Segments, cmd 37, CCS-2); otherwise it falls back to the
         QIC-117 fixed spt override inside ``Geometry.for_format`` (DESIGN.md §7.3).
+        Track count follows the reported format and wide bit (``track_count``).
         """
         log.debug("identify: waking drive")
         self.drive.wake()
@@ -96,6 +97,8 @@ class TapeTransport:
                 fmt.name,
                 cfg.qic80_mode,
             )
+            # Width is unknown without cmd 33; assume 0.250 in (narrow), which
+            # is all a pre-CCS-1 drive's era of tape came in.
             tape = TapeStatus(format=fmt, tape_type=0, wide=False, raw=0)
 
         spt: int | None = None

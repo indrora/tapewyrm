@@ -25,7 +25,7 @@ enum {
 /* In-flux-stream tape markers (opcode-escape channel) */
 enum {
     TW_MARK_SESSION_START = 0xF0,  /* rate, sample clock, TPT, direction, pass-id, UTC — anchors t=0 */
-    TW_MARK_SEGMENT = 0xF1,  /* tick count since previous + running index — each hardware INDEX edge */
+    TW_MARK_SEGMENT = 0xF1,  /* ticks from previous transition (GW sample cursor) to INDEX + running index */
     TW_MARK_EVENT = 0xF2,  /* code: motion-started / hole-EOT / overflow / gap */
     TW_MARK_END = 0xF3,  /* reason, flux-count, byte-count, checksum — seals the run */
     TW_MARK_HEARTBEAT = 0xF4,  /* coarse keepalive across long erased stretches (demoted, optional) */

@@ -22,6 +22,7 @@ from qiclib.testing.builders import (
     segment_raw_sectors,
 )
 from qiclib.types import RawSector
+from tapewyrm_archive import twrf
 from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.twti import SegmentState
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
@@ -157,7 +158,7 @@ def test_parse_in_tiny_slices_matches_one_slice_and_fills_the_bar(tape_flux, mon
     """Slicing the byte loop must not change a single interval."""
     blob, intervals, _ = tape_flux
     whole = gwstream.parse(blob)
-    monkeypatch.setattr(gwstream, "_PROGRESS_EVERY", 7)
+    monkeypatch.setattr(twrf, "_PROGRESS_EVERY", 7)  # gwstream.parse lives there
     progress = RecordingProgress()
     sliced = gwstream.parse(blob, progress=progress)
     assert sliced.intervals == whole.intervals == intervals

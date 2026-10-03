@@ -21,9 +21,11 @@ import logging
 from qiclib import merge, qic113
 from qiclib import segment as seg_mod
 from qiclib import volume as volume_mod
-from qiclib.geometry import Geometry, fallback_spt
+from qiclib.geometry import Geometry, fallback_spt, track_count
 from qiclib.types import FileSet, RawSector, SegmentStatus
+from tapewyrm_archive.qic117 import TapeStatus
 from tapewyrm_archive.twrf import RawFluxCapture
+from tapewyrm_archive.types import TapeFormat
 
 from tapewyrm.codec import flux, mfm
 from tapewyrm.types import RecoveryReport
@@ -32,18 +34,32 @@ log = logging.getLogger(__name__)
 
 
 def _geometry_for(caps: list[RawFluxCapture]) -> Geometry:
-    """Build a Geometry from the capture headers (DESIGN.md §7.1, §7.3)."""
+    """Build a Geometry from the capture headers (DESIGN.md §7.1, §7.3).
+
+    ``tracks`` and ``segments_per_track`` come from the first header that has
+    them. When none does, both fall back by recording format and tape width:
+    the width is Report Tape Status bit 7 from the first header that recorded
+    the report; with no report the width is unknown and assumed 0.250 in
+    (narrow), the common tape.
+    """
     spt = 0
     tracks = 0
     for cap in caps:
         spt = spt or cap.header.segments_per_track
         tracks = tracks or cap.header.tracks
+    fmt = caps[0].header.tape_format if caps else TapeFormat.QIC80
+    statuses = [cap.header.tape_status for cap in caps if cap.header.tape_status is not None]
+    if statuses:
+        wide = TapeStatus.decode(statuses[0]).wide
+    else:
+        log.debug("no capture header records Report Tape Status; assuming 0.250 in tape")
+        wide = False
     if not spt:
-        log.debug("no capture header gives segments_per_track; using fallback_spt(None)")
-    spt = spt or fallback_spt(None)
+        log.debug("no capture header gives segments_per_track; using fallback_spt")
+        spt = fallback_spt(None, fmt, wide)
     if not tracks:
-        log.debug("no capture header gives tracks; defaulting to 28")
-    tracks = tracks or 28
+        log.debug("no capture header gives tracks; using %s (wide=%s) count", fmt.name, wide)
+        tracks = track_count(fmt, wide)
     log.debug("decode geometry: %d tracks x %d segments/track", tracks, spt)
     return Geometry(tracks=tracks, segments_per_track=spt)
 

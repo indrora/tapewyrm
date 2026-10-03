@@ -13,210 +13,37 @@ Encoding:
 ``250..254, b``        ``250 + (b0-250)*255 + b - 1`` ticks (up to 1524)
 ``FF 02 N28, 249``     long interval: N28 + 249 ticks (in-loop SPACE)
 ``FF 02 N28``          dead time (no flux for a while): added to the next one
-``FF 01 N28``          INDEX, N28 ticks after the previous transition
+``FF 01 N28``          INDEX, N28 ticks after the sample cursor (see below)
 ``FF F0..F4 len ...``  Tapewyrm marker (SESSION_START/SEGMENT/EVENT/END/...)
 ``00``                 end of stream
 =====================  =====================================================
 
 N28 packs a 28-bit value into 4 bytes, 7 bits each, low bit always 1.
 
+The sample cursor is the end of the last decoded interval plus any dead-time
+SPACE since it (GW's ``prev``; floppy.c computes ``index.rdata_cnt - prev``),
+so ``ParsedStream.index_ticks`` adds pending dead time before the N28.
+
 Ambiguity note: an in-loop long interval is ``SPACE`` immediately followed by
 the byte 249; a dead-time ``SPACE`` followed by a genuine 249-tick flux looks
 identical. Both decode to the same total time, so intervals are unaffected --
 only the END byte-count/checksum cross-check could disagree in that corner.
+
+One parser: the tokenizer itself lives in ``tapewyrm_archive.twrf.parse_body``,
+because this stream IS the TWRF flux body (TWS-1 §5) and the archive package's
+own marker/verify helpers must read it the same way; tapewyrm-cli depends on
+tapewyrm-archive, never the reverse (STYLE.md §2). ``parse`` here is that same
+function, so ``tw convert``, ``tw dump`` and ``RawFluxCapture.verify`` cannot
+disagree about a stream. Moving the loop cost nothing measurable on ``tw
+convert`` (``decode_capture`` on captures/3m-unknown-1/track-00.twrf).
 """
 
 from __future__ import annotations
 
-import logging
-import struct
-from dataclasses import dataclass, field
+from tapewyrm_archive.twrf import BodyMarker, ParsedStream, StreamEnd
+from tapewyrm_archive.twrf import parse_body as parse
 
-from tapewyrm_archive.progress import NULL_PROGRESS, Progress
-
-from tapewyrm.link.protocol import Marker
-
-log = logging.getLogger(__name__)
-
-_FLUXOP_INDEX = 1
-_FLUXOP_SPACE = 2
-
-# Stream bytes between progress updates: often enough for a smooth bar, rare
-# enough that the update costs nothing next to the per-byte loop.
-_PROGRESS_EVERY = 1 << 20
-
-
-@dataclass(frozen=True)
-class StreamEnd:
-    """The firmware's END marker: why the run stopped + its accounting."""
-
-    reason: int  # protocol.EndReason
-    flux_count: int
-    byte_count: int
-    checksum: int
-
-
-@dataclass
-class ParsedStream:
-    intervals: list[int] = field(default_factory=list)  # ticks between transitions
-    index_ticks: list[int] = field(default_factory=list)  # absolute tick time of INDEX
-    markers: list[tuple[Marker, bytes, int]] = field(
-        default_factory=list
-    )  # (kind, payload, interval#)
-    data_bytes: int = 0  # bytes the firmware counts for END (in-loop flux bytes)
-    checksum: int = 0  # additive checksum of those bytes, & 0xFFFFFFFF
-    terminated: bool = False  # saw the trailing NUL
-    sample_clock_hz: int = 72_000_000  # from SESSION_START when present
-    # Ticks of trailing dead time: SPACE filler GW emits while no flux arrives,
-    # not yet attached to an interval when the stream ended. A capture with no
-    # transitions at all is ALL dead time, which is how a silent RDATA shows up.
-    trailing_ticks: int = 0
-    end: StreamEnd | None = None
-
-    @property
-    def verified(self) -> bool:
-        """True when our parse agrees with the firmware's END accounting."""
-        return (
-            self.end is not None
-            and self.end.flux_count == len(self.intervals)
-            and self.end.byte_count == self.data_bytes
-            and self.end.checksum == self.checksum
-        )
-
-    @property
-    def duration_s(self) -> float:
-        return sum(self.intervals) / self.sample_clock_hz
-
-    @property
-    def span_s(self) -> float:
-        """Stream time including trailing dead time (silence counts too)."""
-        return (sum(self.intervals) + self.trailing_ticks) / self.sample_clock_hz
-
-
-def _n28(b: bytes, i: int) -> int:
-    return (
-        (b[i] >> 1)
-        | ((b[i + 1] & 0xFE) << 6)
-        | ((b[i + 2] & 0xFE) << 13)
-        | ((b[i + 3] & 0xFE) << 20)
-    )
-
-
-def parse(blob: bytes, *, progress: Progress = NULL_PROGRESS) -> ParsedStream:
-    """Decode a capture stream. Raises ``ValueError`` on an unknown opcode.
-
-    ``progress`` gets one "parsing flux stream" task in bytes. This loop runs
-    once per stream byte (tens of millions per track), so the progress update
-    is hoisted out of it: the scan runs in slices of ``_PROGRESS_EVERY``
-    bytes (an inner ``while i < limit``) and the bar moves once per slice.
-    The inner loop's own stop conditions set ``stop`` and break; the outer
-    loop then breaks too, which is exactly the old single-loop ``break``.
-    """
-    out = ParsedStream()
-    iv = out.intervals
-    i, n, pending, t, csum, nbytes = 0, len(blob), 0, 0, 0, 0
-    markers = {m.value: m for m in Marker}
-    # Dead-time SPACEs are common on a real capture; tally, don't log each.
-    n_dead = 0
-    stop = False
-    log.debug("parsing %d-byte capture stream", n)
-    with progress.task("parsing flux stream", total=n, unit="bytes") as bar:
-        while i < n and not stop:
-            limit = min(n, i + _PROGRESS_EVERY)
-            while i < limit:
-                c = blob[i]
-                if c == 0:
-                    log.debug("end-of-stream NUL at byte %d of %d; stopping", i, n)
-                    out.terminated = True
-                    stop = True
-                    break
-                if c < 250:
-                    v = pending + c
-                    iv.append(v)
-                    t += v
-                    pending = 0
-                    csum += c
-                    nbytes += 1
-                    i += 1
-                elif c < 255:
-                    if i + 1 >= n:
-                        log.debug("2-byte interval %#04x cut at byte %d of %d; stopping", c, i, n)
-                        stop = True
-                        break
-                    v = pending + 250 + (c - 250) * 255 + blob[i + 1] - 1
-                    iv.append(v)
-                    t += v
-                    pending = 0
-                    csum += c + blob[i + 1]
-                    nbytes += 2
-                    i += 2
-                else:
-                    if i + 1 >= n:
-                        log.debug("0xFF opcode escape cut at byte %d of %d; stopping", i, n)
-                        stop = True
-                        break
-                    op = blob[i + 1]
-                    if op in (_FLUXOP_INDEX, _FLUXOP_SPACE) and i + 6 > n:
-                        log.debug("flux opcode %d cut at byte %d of %d; stopping", op, i, n)
-                        # Cut mid-opcode: an aborted capture ends wherever USB stopped.
-                        stop = True
-                        break
-                    if op == _FLUXOP_INDEX:
-                        out.index_ticks.append(t + _n28(blob, i + 2))
-                        i += 6
-                    elif op == _FLUXOP_SPACE:
-                        val = _n28(blob, i + 2)
-                        if i + 6 < n and blob[i + 6] == 249:  # in-loop long interval
-                            v = pending + val + 249
-                            iv.append(v)
-                            t += v
-                            pending = 0
-                            csum += sum(blob[i : i + 7])
-                            nbytes += 7
-                            i += 7
-                        else:  # dead time, carried into the next interval
-                            n_dead += 1
-                            pending += val
-                            i += 6
-                    elif op in markers:
-                        plen = blob[i + 2]
-                        payload = bytes(blob[i + 3 : i + 3 + plen])
-                        kind = markers[op]
-                        out.markers.append((kind, payload, len(iv)))
-                        log.debug(
-                            "marker %s (%d-byte payload) at byte %d, interval %d",
-                            kind.name,
-                            plen,
-                            i,
-                            len(iv),
-                        )
-                        if kind is Marker.SESSION_START and plen >= 6:
-                            out.sample_clock_hz = struct.unpack_from("<I", payload, 2)[0]
-                            log.debug("SESSION_START: sample clock %d Hz", out.sample_clock_hz)
-                        elif kind is Marker.END and plen >= 13:
-                            out.end = StreamEnd(*struct.unpack("<BIII", payload[:13]))
-                            log.debug("END marker: %r", out.end)
-                        i += 3 + plen
-                    else:
-                        log.debug("unknown stream opcode %#04x at byte %d; refusing", op, i)
-                        raise ValueError(f"unknown stream opcode {op:#04x} at byte {i}")
-            bar.update(i)
-        # A NUL or a cut opcode ends the parse early; whatever follows is not
-        # stream, so the bar is done either way.
-        bar.update(n)
-    out.data_bytes = nbytes
-    out.trailing_ticks = pending
-    out.checksum = csum & 0xFFFFFFFF
-    log.debug(
-        "parsed stream: %d intervals, %d index pulses, %d markers, %d data bytes, "
-        "checksum %#010x, %d dead-time SPACEs, %d trailing ticks, terminated=%s",
-        len(iv),
-        len(out.index_ticks),
-        len(out.markers),
-        nbytes,
-        out.checksum,
-        n_dead,
-        pending,
-        out.terminated,
-    )
-    return out
+# ``ParsedStream.markers`` holds ``BodyMarker(code, payload, interval, offset)``
+# tuples; ``code`` is the archive's ``WireMarker``, an IntEnum equal by value to
+# ``tapewyrm.link.protocol.Marker`` (tests/test_protocol.py asserts the tables match).
+__all__ = ["BodyMarker", "ParsedStream", "StreamEnd", "parse"]

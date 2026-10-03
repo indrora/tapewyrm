@@ -394,6 +394,17 @@ class DeviceLink:
         log.debug("deselect")
         self._request(_GW_DESELECT)
 
+    def motor(self, unit: int, on: bool) -> None:
+        """Drive one unit's motor-enable line (GW MOTOR), e.g. to switch it off.
+
+        Needs a bus type set first (``select()`` does that); GW answers
+        ACK_NO_BUS otherwise, and ACK_BAD_UNIT for a unit the bus lacks (the
+        IBM PC bus has units 0 and 1). Turning a motor on makes GW wait its
+        motor-spin-up delay before answering.
+        """
+        log.debug("motor: unit %d %s", unit, "on" if on else "off")
+        self._request(_GW_MOTOR, bytes([unit & 0xFF, 1 if on else 0]))
+
     def command_txn(self, n: int, report_bits: int = 0) -> bytes:
         """Emit *n* STEP pulses verbatim; optionally clock ``report_bits`` off TRK0.
 

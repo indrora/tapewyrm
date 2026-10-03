@@ -335,7 +335,7 @@ selects the opcode:
 
 | Bytes                   | Name          | Meaning |
 |-------------------------|---------------|---------|
-| `FF 01 N28`             | INDEX         | A hardware INDEX pulse, `N28` ticks after the previous flux transition. 6 bytes. |
+| `FF 01 N28`             | INDEX         | A hardware INDEX pulse, `N28` ticks after the sample cursor: the previous flux transition plus any dead-time SPACE since it. 6 bytes. |
 | `FF 02 N28 F9`          | SPACE + 249   | A long interval (Section 5.1). 7 bytes. |
 | `FF 02 N28` (next byte not `F9`) | SPACE (dead time) | `N28` ticks of no flux. Added to the next interval; not a transition. 6 bytes. |
 | `FF F0`..`FF F4` ...    | Marker        | A Tapewyrm marker (Section 6). |
@@ -381,7 +381,8 @@ stream.
 ### 5.5. Decoding Algorithm
 
 Informative pseudocode of a conforming body parser (it matches the
-reference parser, `tapewyrm.codec.gwstream.parse`):
+reference parser, `tapewyrm_archive.twrf.parse_body`, which `tw` also
+uses as `tapewyrm.codec.gwstream.parse`):
 
 ```text
 i = 0; pending = 0; t = 0
@@ -395,7 +396,7 @@ while i < len(body):
         need body[i+1], else stop (cut)
         op = body[i+1]
         if op in (01, 02):             need 6 bytes, else stop (cut)
-        if op == 01:                   index at t + N28(i+2); i += 6
+        if op == 01:                   index at t + pending + N28(i+2); i += 6
         elif op == 02:
             if body[i+6] == 0xF9:      emit(pending + N28(i+2) + 249); i += 7
             else:                      pending += N28(i+2); i += 6
@@ -405,7 +406,17 @@ while i < len(body):
 emit(v): append interval v; t += v; pending = 0
 ```
 
-`pending` left over at the end is trailing dead time.
+`pending` left over at the end is trailing dead time. `t + pending` is
+Greaseweazle's sample cursor, which an INDEX's `N28` counts from
+(`index.rdata_cnt - prev` in `rdata_encode_flux()`).
+
+The reference reader's marker and integrity helpers (`iter_markers`,
+`flux_data_only`, and `RawFluxCapture.markers`, `segments`, `end_marker`
+and `verify`) are all built on this one parser. Versions before
+2026-10-03 instead scanned for `0xFF` and assumed a `0xFF 0xFF` stuffing
+rule that no device ever used; on real captures they misread two-byte
+intervals ending in `0xFF` and counted INDEX/SPACE argument bytes as flux
+data, so `verify` failed. Files were not affected, only those helpers.
 
 ## 6. Markers
 
@@ -472,13 +483,14 @@ and SHOULD equal the header's `rate_kbps`, `track` (mod 2^16),
 
 | Offset | Size | Field   | Meaning |
 |-------:|-----:|---------|---------|
-| 0      | 4    | `ticks` | Ticks from the previous flux transition to this INDEX pulse |
+| 0      | 4    | `ticks` | Ticks from the sample cursor (the previous flux transition, plus any dead-time SPACE since it) to this INDEX pulse. Not the time since the previous SEGMENT |
 | 4      | 4    | `index` | Running INDEX count in this pass, starting at 1 |
 
 The firmware emits one SEGMENT immediately after each INDEX opcode
 (`FF 01 N28`), with `ticks` equal to that opcode's `N28` value. SEGMENT
 therefore duplicates INDEX and adds a running count; a reader can use
-either. Cue pulses (Section 5.2) also produce SEGMENT markers.
+either. The period between segments is the difference between
+consecutive INDEX times (Section 5.5), not a SEGMENT field. Cue pulses (Section 5.2) also produce SEGMENT markers.
 
 ### 6.4. EVENT (0xF2)
 

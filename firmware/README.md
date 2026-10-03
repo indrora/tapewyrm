@@ -72,7 +72,14 @@ pick it up as a prerequisite of `floppy.o`, so edits to it trigger a rebuild.
 The marker codes and payload layouts the firmware emits are the firmware↔host
 contract; they come from the generated `inc/protocol.h` and must stay
 byte-for-byte identical to what the host parses in
-`packages/tapewyrm-cli/tapewyrm/rawflux/container.py` (little-endian; ESC = `0xFF`).
+`packages/tapewyrm-archive/tapewyrm_archive/twrf.py` (`parse_body`; little-endian;
+format in `docs/spec/twrf.md`, TWS-1). Markers are framed `0xFF code len payload`
+on GW's opcode escape, with no byte stuffing: `0xFF` is an escape only in a
+token's lead position, and real flux data does contain `0xFF` (the second byte
+of a two-byte interval, N28 argument bytes), so the stream must be walked token
+by token, never scanned for `0xFF`. A SEGMENT's `ticks` equals the preceding
+`FLUXOP_INDEX` N28: ticks from GW's sample cursor (last transition plus any
+dead-time SPACE) to the INDEX edge, not the time since the previous segment.
 
 ## Layout
 

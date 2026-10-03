@@ -286,9 +286,22 @@ MUST parse that segment, because the header does not carry the map.
 ### 4.4. The drive Object
 
 The raw QIC-117 [QIC-117] report bytes of the drive that read the tape,
-copied from the first source capture's TWRF header (Section 4.5) that carries
-them. When present, all eight members are present; a value is `null` when the
-drive did not report it or no capture recorded it.
+all eight members copied from the TWRF header (Section 4.5) of the first
+source capture whose drive reported: one in which at least one of
+`drive_status`, `drive_config`, `drive_rom`, `drive_vendor_id` and
+`tape_status` is non-null. The presence of a member in a TWRF header is not a
+report, since a TWRF v2 header carries every member and stores `null` for a
+report the drive did not answer; a headerless legacy source never reports.
+When present, all eight members are present; a value is `null` when the
+drive did not report it or no capture recorded it, and all are `null` when no
+source reported.
+
+When two reporting sources disagree on `device_serial`, `drive_vendor_id` or
+`tape_status` (both values non-null and non-empty), the captures came from
+different capture devices, drives or cartridges. A writer keeps the first
+reporting source and SHOULD warn its user. It records nothing further here:
+every capture's reports remain in `sources`, from which a reader can detect
+the disagreement itself.
 
 | Member            | JSON type       | Description |
 |-------------------|-----------------|-------------|
@@ -307,7 +320,7 @@ Each element describes one capture file the image was built from.
 
 | Member     | JSON type | Req.     | Description |
 |------------|-----------|----------|-------------|
-| `file`     | string    | REQUIRED | Path of the capture as given to the converter. |
+| `file`     | string    | REQUIRED | The capture file, as the name of the directory that held it, `/`, and its file name (e.g. `jc-1998/track-00.twrf` for `/Users/x/captures/jc-1998/track-00.twrf`), or the bare file name when it was given without a directory. Never an absolute path, and nothing above that one directory (Section 11.1). |
 | `verified` | boolean   | REQUIRED | True when the capture's flux stream parsed in agreement with its END marker [TWS-1]. |
 | `sectors`  | integer   | REQUIRED | Sectors the converter recovered from this capture. |
 | `twrf`     | object    | REQUIRED | The capture's TWRF header [TWS-1], every member as stored there. For a headerless legacy stream it is `{"rate_kbps": 500}`. |
@@ -528,6 +541,11 @@ zero-padded slot) compressed as Zstandard [RFC8878] data, exactly as
 - A reader identifies TWTZ by the zstd magic and MUST then find the TWTI
   preamble (Section 3) at the start of the decompressed stream; if it does
   not, the file is not a tape image and MUST be rejected.
+- A TWTZ whose stream ends before a frame is complete is truncated and
+  MUST be rejected, whatever it has decompressed so far. A complete stream
+  that decompresses to fewer than `L` bytes holds a truncated TWTI and MUST
+  be rejected likewise (Section 9.2, item 9); lengths in that check count
+  decompressed bytes.
 
 Zstandard streams do not support random access. A reader that needs random
 access SHOULD decompress the stream once, sequentially, to temporary storage
@@ -578,6 +596,10 @@ TWTI byte stream is a TWTI file, and the reverse.
     a seekable file (Section 6.3).
 11. A TWTZ writer MUST compress the entire TWTI byte stream, padding included
     (a compressor cannot seek over holes).
+12. Writers MUST record each `sources[].file` as Section 4.5 describes: the
+    name of the capture's directory and its file name only, derived from the
+    path as given without resolving it, so that neither an absolute path nor
+    the current directory's name is ever written.
 
 ### 9.2. Reader Requirements
 
@@ -585,23 +607,32 @@ TWTI byte stream is a TWTI file, and the reverse.
 2. Readers MUST reject a preamble whose version they do not implement
    (Section 10).
 3. Readers MUST parse the header as JSON [RFC8259] and MUST reject a header
-   that is not a JSON object or lacks `segment_count`.
+   that is not a JSON object, lacks `segment_count`, has a `segment_count`
+   that is not a non-negative integer, or has a `format` member other than
+   `"TWTI"`.
 4. Readers MUST ignore header members they do not recognise, at every level
    of nesting.
 5. Readers SHOULD NOT require OPTIONAL members, and a reader that needs only
    segment data (random access) needs only `segment_count`.
-6. Readers SHOULD reject an image whose `segment_stride` member is present
+6. Readers MUST reject an image whose `segment_stride` member is present
    and not 29696. They MUST NOT use any stride other than 29696 for
    version 1.
 7. Readers MUST reject an entry with a reserved state value, or MUST treat
    that segment as MISSING; they MUST NOT treat its data as recovered.
 8. Readers MUST reject an entry whose `data_len` exceeds 29696, since its data
    would overlap the next slot.
-9. Readers MUST NOT read past the end of the file. When the file is shorter
-   than `L` (truncation), readers MUST NOT present bytes beyond the end as
-   segment data. They SHOULD report the damage, and MAY open the image with
-   every segment whose data extends past the end treated as MISSING. A file
-   whose segment table is incomplete MUST be rejected.
+9. Readers MUST reject a truncated file: one shorter than the 10-byte
+   preamble, than `T` (the header), than `D` (the segment table) or than
+   `L` (the data area), Section 2. They MUST check these lengths, in that
+   order, before trusting `header_len` or `segment_count`, and before
+   building any per-segment structure. The error MUST name the file and
+   SHOULD say which part is cut short, the length that part needs and the
+   length found. Readers MUST NOT open a truncated image partially or
+   present any of it as segment data: a file cut short is a failed copy,
+   and the remedy is to copy or convert it again. Truncation is a matter of
+   the file's length only. A sparse file's holes count toward its length,
+   so a sparse file whose length is `L` is complete however little of it
+   is allocated on disk (Section 6.3).
 10. Readers MUST treat holes in a sparse file as zeros (Section 6.3).
 11. Readers SHOULD use the expected length (Section 5.3), not `data_len`, to
     size the gap that a MISSING or UNCORRECTABLE segment leaves in a stream of
@@ -636,8 +667,11 @@ nothing but this document.
   to bug reports or committed to version control. Test material SHOULD be
   synthetic (Appendix A).
 - The header also identifies the recovery: the capture device serial number,
-  host file paths in `sources[].file` (which can contain user names), the
-  tape name and timestamps. Writers MAY omit or redact OPTIONAL members, and
+  the capture file names in `sources[].file`, the tape name and timestamps.
+  Writers record only each capture's directory name and file name, never an
+  absolute path (Section 4.5), so the converting user's home directory and
+  user name are not written; the directory name itself can still name the
+  tape or its owner. Writers MAY omit or redact OPTIONAL members, and
   users SHOULD review the header before sharing even a header excerpt.
 - Deleting an image does not erase it from backups or snapshots. Users
   SHOULD store images on encrypted storage and dispose of them as they would
@@ -666,16 +700,17 @@ Images are untrusted input.
 
 A TWTZ file expands enormously by design: the zero-filled slots compress to
 almost nothing, and the synthetic example in Appendix A is 1075 bytes
-compressed and 120583 bytes decompressed. A crafted TWTZ can expand without
+compressed and 120583 bytes decompressed. A crafted TWTZ could expand without
 bound.
 
-- Readers SHOULD decompress the first part of the stream, validate the
-  preamble and header, compute `L` (Section 2), and stop with an error if the
-  stream produces more than `L` bytes.
-- Readers SHOULD refuse, or ask before decompressing, an image whose `L`
-  exceeds the free space of the temporary storage or a configured limit.
-- Readers SHOULD validate the TWTI preamble before decompressing the whole
-  stream.
+Tapewyrm's threat model does not include malicious inputs. The images it
+reads are your own: made by `tw convert` from captures you took of tapes in
+your hands. Decompression is therefore unbounded by design. The reference
+reader caps neither the decompressed size nor the temporary storage it uses,
+and a TWTZ that decompresses to more than its free space fails with the
+operating system's out-of-space error. Readers MAY impose a limit of their
+own. Should the threat model change to include images from untrusted
+sources, this section will be revisited and a cap considered then.
 
 ### 11.4. Temporary Files
 
@@ -833,7 +868,7 @@ for byte.
 
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
-| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). |
+| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). Same date, before release: readers MUST reject truncated and malformed files (Section 9.2); `sources[].file` records only the directory name and file name; decompression is unbounded by design (Section 11.3). |
 
 ## Author's Address
 

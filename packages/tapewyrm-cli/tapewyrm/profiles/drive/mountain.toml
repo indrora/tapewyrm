@@ -1,0 +1,36 @@
+# ftape's "Mountain" wake (wake_up_mountain), as a drive profile.
+#
+# Source: Linux 2.6.19 drivers/char/ftape/lowlevel/ftape-io.c,
+# ftape_wakeup_drive(): QIC_SOFT_SELECT (23), a 1 ms sleep, then
+# ftape_parameter(18) -- a train of 18+2 = 20 pulses -- then Report Drive
+# Status. ftape's vendor table (include/linux/ftape-vendors.h) lists this
+# wake for Conner (C250MQ, TSM420R/TST800R, TSM850R, 1700R, TST3200R),
+# Archive (5580i, XL9250i, 31250Q, Hornet), Summit/Mountain, COREtape,
+# ComByte and PERTEC drives. It is the third method `--profile auto` tries.
+#
+# tw sends Soft Select's argument as the literal 20-pulse train whatever `arg`
+# says (qic117/commands.py encode_arg). The firmware already leaves a > 2.9 ms
+# gap between the two trains, longer than ftape's 1 ms.
+#
+# ftape's undo, when it releases the drive, is Soft Deselect (24); it sends
+# nothing after a Mountain wake that got no answer, and neither does tw.
+#
+# TODO(bench): never run on hardware. Timings are the QIC-117 Rev J nominals
+# shared with colorado.toml.
+
+name = "mountain"
+bit_order = "lsb"
+report_strategy = "fixed_settle"
+quirks = []
+
+[timing]
+pulse_us = 200
+inter_pulse_us = 2000
+terminate_gap_us = 3000
+report_settle_us = 900
+motion_timeout_s = 20
+
+[[wake]]
+cmd = "soft select"
+arg = 18            # ftape_parameter(18); sent as the literal 20 pulses
+delay_ms = 0

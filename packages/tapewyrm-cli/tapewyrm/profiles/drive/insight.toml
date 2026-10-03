@@ -1,0 +1,42 @@
+# ftape's "Motor-on" wake (wake_up_insight), as a drive profile.
+#
+# Source: Linux 2.6.19 drivers/char/ftape/lowlevel/ftape-io.c,
+# ftape_wakeup_drive(): sleep 100 ms, then fdc_motor(1) ("enable is done by
+# motor-on"; fdc-io.c sets the unit's motor bit in the floppy controller's
+# Digital Output Register and sleeps 10 ms), then Report Drive Status. If the
+# drive does not answer, ftape turns the motor back off. ftape's vendor table
+# (include/linux/ftape-vendors.h) lists it for the Insight 80Mb / Irwin 80SX
+# and as one of three wakes for the Iomega 250 / Ditto 800. It is the fourth
+# and last method `--profile auto` tries.
+#
+# On a PC floppy controller the unit's drive-select output follows its motor
+# bit, so the drive sees DS and MOTEN together. tw's "motor on" line step
+# reproduces that with Greaseweazle's IBM PC bus: SELECT + MOTOR for `arg`
+# (unit 0 = cable pins 14 + 10, unit 1 = pins 12 + 16). GW then waits its own
+# motor spin-up delay, longer than ftape's 10 ms. tw turns the motor off and
+# deselects after a failed attempt and at the end of every session.
+#
+# TODO(bench): never run on hardware, and no Insight-wake drive has been on
+# the bench. Unit 0 matches ftape's /dev/qft0; a drive strapped as unit 1
+# needs a copy of this file with arg = 1.
+
+name = "insight"
+bit_order = "lsb"
+report_strategy = "fixed_settle"
+quirks = []
+
+[timing]
+pulse_us = 200
+inter_pulse_us = 2000
+terminate_gap_us = 3000
+report_settle_us = 900
+motion_timeout_s = 20
+
+[[wake]]
+cmd = "delay"       # line step: no command, just ftape's 100 ms sleep
+delay_ms = 100
+
+[[wake]]
+cmd = "motor on"    # line step: IBM PC bus select + motor-enable for unit `arg`
+arg = 0
+delay_ms = 10

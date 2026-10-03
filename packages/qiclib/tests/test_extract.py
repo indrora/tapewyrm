@@ -200,3 +200,12 @@ def test_uncompressed_directory_last_keeps_the_gap_and_records_the_directory(tmp
     assert vol.header["directory_offset"] == SEGMENT_BYTES
     assert vol.data[:100] == b"d" * 100
     assert vol.data[SEGMENT_BYTES : SEGMENT_BYTES + 50] == b"D" * 50
+
+
+def test_volume_header_records_size_and_only_dir_and_name_of_the_image(tmp_path):
+    """source_image is ``dir/name``, never the absolute path (TWS-3 3.1, 8.2)."""
+    image = _mtn_image(tmp_path)
+    [path] = extract(image.resolve(), tmp_path / "out")
+    vol = Volume.load(path)
+    assert vol.header["source_image"] == f"{tmp_path.name}/mtn.twti"
+    assert vol.header["volume_size"] == len(vol.data)

@@ -17,6 +17,7 @@ from qiclib.build import build_image
 from qiclib.types import RawSector
 from tapewyrm_archive import qic117
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+from tapewyrm_archive.provenance import provenance_path
 from tapewyrm_archive.twrf import header_to_dict, read_header
 from tapewyrm_archive.twti import TapeImage
 from tapewyrm_archive.types import CaptureHeader, TapeFormat
@@ -117,7 +118,9 @@ def decode_capture(
         time.perf_counter() - started,
     )
     return sectors, {
-        "file": str(path),
+        # The capture's directory name and file name only, never the full
+        # path: that would record the user's home directory (TWS-2 4.5).
+        "file": provenance_path(path),
         "verified": ps.verified,
         "sectors": len(sectors),
         "twrf": meta,

@@ -1,13 +1,14 @@
 name: contract
 
 # Mechanically enforce the protocol no-drift invariant (DESIGN.md §12.4):
-# regenerate both ends and fail if anything changed.
+# fail if either generated end (firmware/inc/protocol.h, link/protocol.py) is
+# stale versus protocol/protocol.toml. Same check as `just gen-check`.
 
 on:
   push:
-    paths: ["protocol/**", "firmware/protocol.h", "packages/tapewyrm-cli/tapewyrm/link/protocol.py"]
+    paths: ["protocol/**", "firmware/inc/protocol.h", "packages/tapewyrm-cli/tapewyrm/link/protocol.py", ".github/workflows/contract.yml"]
   pull_request:
-    paths: ["protocol/**", "firmware/protocol.h", "packages/tapewyrm-cli/tapewyrm/link/protocol.py"]
+    paths: ["protocol/**", "firmware/inc/protocol.h", "packages/tapewyrm-cli/tapewyrm/link/protocol.py", ".github/workflows/contract.yml"]
 
 jobs:
   contract:
@@ -17,7 +18,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Regenerate protocol
-        run: python protocol/generate.py
-      - name: Fail on drift
-        run: git diff --exit-code
+      - name: Fail on protocol drift
+        # --check compares content (line-ending agnostic) and exits 1 if stale.
+        run: python protocol/generate.py --check

@@ -38,7 +38,7 @@ This captures *why* as much as *what*. Where a decision had a real alternative, 
 
 **Non-goals (for now):**
 - Writing or formatting tapes (needs reference-burst/servo handling — out of scope; read-only is far simpler and is all recovery requires). *(But see Sometime goals — the Linux linear-device aim eventually pulls write into scope.)*
-- Drive modes faster than the standards' rates (e.g. 2 Mbit/s) — feasible on this hardware, not targeted. *(Corrected: an earlier draft listed "QIC-3020 @ 2 Mbit/s"; the QIC-3020 standard rate is 1 Mbit/s, §2.2, and QIC-3010/3020 headers are now read — §7.3, §7.8.)*
+- Drive modes faster than the standards' rates (e.g. 2 Mbit/s) — not targeted; whether the USB link could even carry one is open (§3.1). *(Corrected: an earlier draft listed "QIC-3020 @ 2 Mbit/s"; the QIC-3020 standard rate is 1 Mbit/s, §2.2, and QIC-3010/3020 headers are now read — §7.3, §7.8.)*
 - Recovering **non-QIC-113 proprietary** archive containers (e.g. CP Backup's CPB, some Norton/Central Point layouts that predate or ignore QIC-113). Standards-compliant **QIC-113 file sets are in scope** (§7.5) — decoding QIC-80 + QIC-113 yields the directory tree and files directly; only genuinely non-standard app containers need a separate, app-specific parser on top.
 - **DCLZ / ALDC decompression** (QIC-130 / QIC-154). *Done since:* the **QIC-122 (Stac LZS)** codec that QIC-80 backups actually use is implemented (`qiclib.qic122`) and decompresses real volumes (§7.5); the other two codecs remain a drop-in nobody has needed yet.
 
@@ -90,7 +90,7 @@ Every sector carries its own CRC, so the decoder knows **which** sectors are bad
 ## 3. Hardware substrate: Greaseweazle v4.1 (fixed, no respin)
 
 - MCU: **AT32F403 (Cortex-M4)**, ~144 MHz (some boards report AT32F403A @ higher clock). SRAM extended to **224 kB** on current firmware.
-- USB: **High-Speed (480 Mbps)**, large USB buffer (64 kB+). Enormous headroom over QIC-80's ~500 kbit/s flux. *(Unverified and probably wrong: the bench notes in `tape/fluxprobe.py` describe the board's link as **full-speed**, and warn that flux under high-speed Physical motion can outrun it. Full-speed still carries Logical Forward at QIC-80 and QIC-3020 rates, which every real dump so far confirms; confirm the figure from the v4.1 design files before relying on headroom.)*
+- USB: **link speed is under discussion — see §3.1.** As built, the firmware enumerates **Full-Speed (12 Mbit/s)**, which carries every standard-rate capture so far; the large buffer (64 kB+) is the SRAM flux ring, not a USB feature.
 - **Buffered 40 mA outputs** (drives strong drive-side pull-ups cleanly). `gw pin set` / `gw pin get` already exist (use for bring-up/bit-bang before committing firmware). 3 user-definable outputs (pins 2/4/6); pin 34 readable input; external-LED header.
 - Power: **5V-only** on-board header; 12V drives use a **separate PSU**; **USB 5V isolation jumper** lets the board run off external power safely.
 - Connectivity/protection: USB-C, ESD protection on USB data, over-current protection on USB power.
@@ -99,6 +99,29 @@ Every sector carries its own CRC, so the decoder knows **which** sectors are bad
 **Why it suffices for QIC (no board change):** QIC-117 needs a *subset* of the Shugart lines in the *same directions* GW already drives (STEP/DIR/WGATE/MOTOR/DSEL out) and senses (INDEX/TRK0/RDATA in). STEP is the command line; TRK0 is the return; INDEX is the cue line (ready/idle, report bit presented, waiting for argument -- Rev J §1.3) and the segment mark during Logical Forward; RDATA is flux. The data channel is literally what GW does. Net work is firmware verbs + host software + a power/termination cabling setup. 12V via separate PSU + isolation jumper.
 
 > **Verify (cheap):** from the v4.1 design files, confirm TRK0/INDEX land on pollable GPIO/EXTI (not a peripheral-locked pin) and that the STEP output buffer swings the bus at the chosen cadence. Near-certain for a floppy interface; take it from the schematic, not from assumption.
+
+### 3.1 Discussion: USB link speed (open)
+
+> **Status: discussion, not a decision.** Earlier drafts stated the v4.1 link was **High-Speed (480 Mbit/s)** with "enormous headroom". Nothing checked supports that; everything checked says **Full-Speed (12 Mbit/s)**. This subsection replaces the flat claim.
+
+**What the hardware can do.** The board definition (`firmware/boards/greaseweazle_v4_at32f403a.json`) names the MCU as `at32f403acgu7`. The AT32F403A's USB peripheral is a **full-speed device controller (USBFS) with an embedded PHY** and a small dedicated packet-buffer SRAM; it has no high-speed controller and no ULPI interface for an external HS PHY. (From Artery's AT32F403A datasheet as recalled, not re-read for this note; confirm against the datasheet and the v4.1 schematic.) Greaseweazle's own descriptors also report the board's speed at runtime, so a connected board settles it (below).
+
+**What the firmware configures.** `firmware/src/usb/hw_at32f4.c` binds AT32F403/AT32F403A to the `usbd` driver (the DWC-OTG driver is used only for AT32F415). In `firmware/src/usb/hw_usbd_at32f4.c`, `usbd_has_highspeed()` and `usbd_is_highspeed()` both return `FALSE`, and endpoint buffers are fixed at 64 bytes (`USB_FS_MPS`). `firmware/src/usb/core.c` initialises `usb_bulk_mps = USB_FS_MPS` (64), and only the DWC-OTG path ever raises it to `USB_HS_MPS` (512). `firmware/src/usb/cdc_acm.c` reports `gw_info.usb_speed = usb_is_highspeed()`, which the host reads as `DeviceInfo.usb_high_speed` (`link/device.py`) — on this board it is always false. Consistent with this: a command response is one 64-byte packet, and the bench saw a 253-byte response truncated at 64, so every verb response must fit in 64 bytes (including its 2-byte header) or be streamed like READ_FLUX.
+
+**What throughput is needed.** Flux bytes per wall-clock second, from the `bytes` and `seconds` fields of the captures' `dump.jsonl` (Logical Forward, standard rates):
+
+| Rate | Capture sets | Average per set | Highest single track |
+|---|---|---|---|
+| 500 kbit/s | 4 sets (30 tracks) | 392–396 kB/s | 412 kB/s |
+| 1 Mbit/s | 2 sets (35 tracks) | 610–637 kB/s | 676 kB/s |
+
+**Is Full-Speed enough?** For the standard rates, yes, so far. Full-speed bulk tops out at 19 × 64-byte packets per 1 ms frame, about **1.2 MB/s** in theory and less in practice (it depends on the host controller and on other devices sharing the bus). The worst 1 Mbit/s track used about 56% of the theoretical ceiling; no standard-rate capture has ended on overflow. The margin is real but not "enormous". Two things do not fit: a 2 Mbit/s mode would need roughly 1.3 MB/s by scaling, which is over the ceiling, and Physical (high-speed) motion produces flux fast enough to overflow the link (the bench notes in `tape/fluxprobe.py`; the firmware ends that capture on overflow by design, §5.4).
+
+**Open questions.**
+1. Confirm Full-Speed on a live board: `tw info` / `DeviceInfo.usb_high_speed`, or the host's USB device tree.
+2. Measure the real sustained Full-Speed ceiling on the host controllers we use, rather than relying on the 1.2 MB/s theoretical figure.
+3. How much of the margin at 1 Mbit/s goes when the bus is shared (hubs, other devices), and does overflow → clean abort (§5.4) stay the right answer there?
+4. Whether anything beyond the standard rates (2 Mbit/s, Physical-motion capture) is worth pursuing given the ceiling — for example by compressing the flux stream on the device. Today the answer is "not targeted" (§1).
 
 ---
 
@@ -201,7 +224,7 @@ Pipeline: **RDATA → capture front-end → encoder → ring buffer → USB stre
 - **Capture front-end:** timer input-capture measuring inter-transition intervals in sample-clock ticks (reused from GW). **Free-running** — armed/stopped on command, *not* gated to one index-to-index span. Tape *does* assert INDEX, but **once per segment, not per revolution**, so the engine **records** each INDEX edge as a marker rather than gating on it — segment boundaries arrive for free, and the in-stream `C2/FC` index address mark gives a second, independent boundary signal for the decoder to cross-check.
 - **Encoder:** GW flux byte encoding — short intervals as direct bytes, a **long-flux continuation escape** (important on tape: dropouts and inter-record gaps produce long intervals that must not be lost or saturated), and **opcode escapes** for out-of-band events (reused).
 - **Marker injector (new):** rides the opcode escape channel (same mechanism GW uses for index), so markers never get misread as flux. **Decision:** reuse the existing Index opcode (bring-up; parseable by stock GW tooling) *or* define typed tape opcodes in a header shared by firmware + custom host decoder (real design). Recommend typed, under the same "one shared table, both ends" discipline as the command set. Marker set in §7.2.
-- **Ring buffer (SRAM) + HS USB streamer:** 224 kB SRAM + 480 Mbps give ample headroom; the buffer absorbs host stalls, it doesn't keep pace with the drive.
+- **Ring buffer (SRAM) + USB streamer:** the SRAM ring absorbs host stalls, it doesn't keep pace with the drive; the link itself is Full-Speed with modest, not ample, headroom at standard rates (§3.1).
 - **Backpressure policy — never silently drop flux:** transient lag absorbed by the buffer; sustained near-overflow → emit `EVENT{overflow}` and trigger a **clean abort** through the arbiter funnel (for tape a gap is unrecoverable in place; a clean re-do beats a corrupt splice). If you must continue instead, emit an explicit **gap marker** recording how much flux was lost so the codec treats it as a discontinuity. Overflow is one of the arbiter's fault triggers.
 - **Termination / accounting:** on disarm, halt front-end, flush buffer, emit a single `END` opcode carrying reason, total flux-transition count, total byte count, and a checksum. Makes `RawFluxCapture` **self-terminating and self-verifying**. A capture with no valid `END` is flagged truncated (USB loss can't flush) — but it still decodes, because sectors self-locate; you lose the tail, not the file.
 - **When a pass ends (bench findings).** A pass ends when the *tape* stops, never on a timer: Logical Forward runs to logical EOT and halts by itself, and the bench drive ignored Stop Tape during Logical Forward. Once the first segment's INDEX has been seen, **1 s with no flux transition** ends the run (the longest gap inside real data on the bench was 72 ms). The idle rule is not armed by flux alone — a pass starting at the physical end crosses ~1 s of blank leader, and stray head-settling transitions there ended early passes before any data — so until the first segment only a **15 s no-start** limit applies (Logical Forward refused, e.g. QIC-117 error 19 on an unreferenced tape). An INDEX within **50 ms** of arming is a ready-cue pulse, not a segment, and does not count. During Logical Forward the drive pulses INDEX once per segment and nothing else, so INDEX counts segments: `tw dump` uses that as a free health check (§6.3).
@@ -420,7 +443,7 @@ class Qic117Drive:
     def reset(self) -> None: ...
 ```
 
-- **`DriveProfile` — the injection seam (data, not code).** Per-drive wake/select quirk + timing envelope, loaded from `profiles/drive/*.toml`. This is the analogue of ftape `vendors.h`; a new drive is a new TOML file, never a code change.
+- **`DriveProfile` — the injection seam (data, not code).** Per-drive wake/select quirk + timing envelope, loaded from `profiles/drive/*.toml`. This is the analogue of ftape `vendors.h`; a new drive is a new TOML file, never a code change. A wake step is a QIC-117 command name or a *line step*: `delay` (only its delay) or `motor on` (GW IBM PC bus SELECT + MOTOR for unit `arg`, ftape's Motor-on wake).
 
 ```python
 @dataclass(frozen=True)
@@ -529,7 +552,7 @@ Stage notes:
 - `merge.union` runs **before** RS: across multiple passes, take any sector whose `data_crc_ok` in *any* pass; only then hand erasure positions to RS. This is the multi-pass recovery win.
 - `correct` uses CRC-derived erasure positions, so it gets full redundancy-3 erasure correction (up to 3 sectors/segment), far stronger than blind error decoding.
 
-*As built*, the sketch above is `codec/pipeline.py` and still runs — against synthetic, byte-stuffed fixtures in the tests. Real captures take a different road, because the real device stream is GW's encoding, not the fixture framing (§7.1):
+*As built*, the sketch above is `codec/pipeline.py` and still runs — against synthetic fixtures in the tests whose "flux" is the decoded MFM byte stream itself (`codec/flux.py`). Real captures take a different road, because the real device stream is GW's encoding (§7.1):
 
 ```python
 # tapewyrm-cli: tapewyrm/image/convert.py  (tw convert)
@@ -569,7 +592,7 @@ class RawFluxCapture:
 
 A truncated capture (no `END`) is *not* an error — it still decodes, because sectors self-locate; `is_truncated` just flags reduced confidence in the tail.
 
-*As built:* the container is `tapewyrm_archive.twrf` (there is no `rawflux` package), the format is called **TWRF**, and its byte layout is owned by [`docs/spec/twrf.md`](spec/twrf.md); §7.1 keeps the rationale. Two departures from the sketch: `tw dump` streams the device's bytes straight to disk behind a preamble (`write_preamble`) rather than buffering a `RawFluxCapture` in memory, and the stored flux is the **verbatim device stream** — GW's encoding with Tapewyrm markers — which `codec/gwstream.py` parses and checks against the `END` marker's counts and checksum. `RawFluxCapture`'s own escape-and-stuff marker framing (`frame_marker`, `iter_markers`) predates the real firmware and is now only used to build synthetic fixtures.
+*As built:* the container is `tapewyrm_archive.twrf` (there is no `rawflux` package), the format is called **TWRF**, and its byte layout is owned by [`docs/spec/twrf.md`](spec/twrf.md); §7.1 keeps the rationale. Two departures from the sketch: `tw dump` streams the device's bytes straight to disk behind a preamble (`write_preamble`) rather than buffering a `RawFluxCapture` in memory, and the stored flux is the **verbatim device stream** — GW's encoding with Tapewyrm markers — which `tapewyrm_archive.twrf.parse_body` parses and checks against the `END` marker's counts and checksum. That one tokenizer serves both `tw` (as `codec/gwstream.parse`) and `RawFluxCapture`'s helpers (`iter_markers`, `flux_data_only`, `verify`); until 2026-10-03 those helpers scanned for `0xFF` with an invented `0xFF 0xFF` stuffing rule and failed on real captures (TWS-1 §5.5).
 
 ### 6A.7 CLI, configuration, logging
 
@@ -614,7 +637,7 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 
 **Shared front end (`STYLE.md` §2.5).** Both CLIs take the same global flags — `--progress` (rich progress bars), `-v` (debug) and `-q` / `-qq` (warnings / errors only) — the log level moves around INFO — and subcommands may not reuse `-v`/`-q`. Command *results* (status lines, summaries, `--json`) go to **stdout** via `click.echo`, so they pipe; the library's narrative goes through `logging`, and both it and the progress bars go to **stderr** through **one shared rich console**, because rich's live display tears if anything else writes to the terminal while bars are up. Each CLI has its own `console.py` (the two are kept identical by hand) rather than a shared presentation package, so neither CLI depends on the other. The libraries never import rich or click: they log through `logging` (log before acting; every guard logs at debug, with lazy `%` arguments; hot paths log one summary, not per item) and report progress through the `tapewyrm_archive.progress.Progress` protocol, whose default `NULL_PROGRESS` costs nothing. `ValueError` from a library becomes a `click.ClickException` at the CLI edge. Heavy imports happen inside the command functions so `--help` stays fast.
 
-Config precedence (`tw`): CLI flags → config file (`--config`, TOML) → profile defaults, resolved once in `AppContext.load` and carried on `ctx.obj`; logging is set up *before* that load so `-v` shows which config and drive profile were picked up.
+Config precedence (`tw`): CLI flags → config file (`--config`, TOML; without it the per-user `~/.config/tapewyrm/config.toml`, or `$XDG_CONFIG_HOME` / `%APPDATA%`, if present) → profile defaults, resolved once in `AppContext.load` and carried on `ctx.obj`; logging is set up *before* that load so `-v` shows which config and drive profile were picked up. *Superseded:* with no profile named the default was `default` (no wake sequence), which a phantom drive never answers. *Superseded:* `auto` tried only `colorado` and sent Phantom Deselect (47) after a try that got no answer. *As built:* the default is `auto`, which follows ftape's drive detection (Linux 2.6.19 `drivers/char/ftape/lowlevel/ftape-ctl.c` `ftape_activate_drive()`, `ftape-io.c` `ftape_wakeup_drive()` / `ftape_report_raw_drive_status()`, `include/linux/ftape-vendors.h` `WAKEUP_METHODS`); ftape's behaviour is the safety precedent. Each drive session tries the profiles in `qic117.profile.AUTO_ORDER` — `default` (ftape "None": no wake), `colorado` ("Colorado": Phantom Select 46 + unit 0; tw adds Enter Primary Mode), `mountain` ("Mountain": Soft Select 23 + 20 pulses), `insight` ("Motor-on": 100 ms, then IBM PC bus unit 0 select + motor-enable via GW SELECT/MOTOR) — in that order (`qic117.drive.auto_wake`), and keeps the first the drive answers by ftape's test (Report Drive Status within 4 tries, not 0xff). As in ftape, nothing is undone between tries except a Motor-on motor (motor off + deselect), which also goes off at session end; a try the link cannot do is skipped with an INFO line. The Soft-Reset placeholder wakes (`conner`, `iomega`) stay opt-in: ftape never wakes with a Soft Reset. Only the Colorado method is bench-verified; None, Mountain, Motor-on, the order and the motor undo have run only against fake boards.
 
 ### 6A.8 Concurrency & data-flow model
 
@@ -1251,7 +1274,7 @@ The multi-pass union still sits before RS; the header is now located *before* pl
 - The **protocol codegen** and `justfile`/CI (§12).
 
 **Needed a bench / a real drive before it ran (the genuine seams, §9)** — numbering is stable, code cites these items:
-1. ~~**Host-side GW flux opcode reconciliation**~~ — **resolved.** The firmware reuses GW's real flux encoder + `0xFF` opcode escape (tape markers ride codes `0xF0–0xF4`); the host side is `codec/gwstream.py`, a full decoder of that stream including GW's own `FLUXOP_*` opcodes, validated against the first real capture's `END` counts and checksum (§9 item 1). The older `codec.flux` / `twrf` escape-and-stuff framing was not patched; it stays as the synthetic-fixture path, and the `TODO(bench)` notes that still cite this item there are stale.
+1. ~~**Host-side GW flux opcode reconciliation**~~ — **resolved.** The firmware reuses GW's real flux encoder + `0xFF` opcode escape (tape markers ride codes `0xF0–0xF4`); the host side is `tapewyrm_archive.twrf.parse_body` (re-exported as `codec/gwstream.parse`), a full decoder of that stream including GW's own `FLUXOP_*` opcodes, validated against the first real capture's `END` counts and checksum (§9 item 1). The older escape-and-stuff framing in `twrf` is gone (2026-10-03); `codec.flux` is now only the decoded-bytes fixture path.
 2. ~~GW firmware integration points~~ — **resolved by vendoring** (firmware now builds in-tree): QIC verbs are grafted into GW's `process_command`, capture reuses `floppy_read`/`rdata_encode_flux` free-running, and host-stop maps onto GW's `BAUD_CLEAR_COMMS` out-of-band path. Hardware validation happened on the bench: the Colorado drives command, report and stream (§9 items 3–5).
 3. **The target `DriveProfile`** — wake timing, CCS level, quirks; characterize via `gw pin` + scope. *Done for the Colorado Jumbo 350 and 1400* (§9 item 3); other drives open.
 4. **v4.1 schematic confirm** + **34-pin open-collector** assumption. *Functionally confirmed*; the scope-level check is still open (§9 items 4–5).

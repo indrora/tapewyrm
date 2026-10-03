@@ -12,8 +12,9 @@ command: `tw` and the long form `tapewyrm`.
 ## Commands
 
 Global flags: `--port` (Greaseweazle serial port; found automatically if
-unset), `--profile` (drive profile name or path), `--config` (a TOML file that
-can set `port`, `profile`, ...), `--progress` (progress bars on stderr),
+unset), `--profile` (drive profile name or path; default `auto`), `--config` (a
+TOML file that can set `port`, `profile`, ...; default
+`~/.config/tapewyrm/config.toml` if it exists), `--progress` (progress bars on stderr),
 `-v` (debug log), `-q` / `-qq` (warnings / errors only). Results go to stdout,
 logs and bars to stderr.
 
@@ -38,16 +39,45 @@ through, and [firmware/README.md](../../firmware/README.md) for flashing.
 
 A drive profile (`tapewyrm/profiles/drive/<name>.toml`) holds a drive family's
 QIC-117 timings and the wake sequence `tw` sends before every session. Pick one
-with `--profile NAME` or `--profile path/to/file.toml`. Without `--profile` (or
-a `profile` key in `--config`), `tw` uses `default`: Rev J timings and **no**
-wake sequence, which a phantom-select drive will not answer.
+with `--profile NAME` or `--profile path/to/file.toml`, or set it once as
+`profile = "NAME"` in the config file. The config file is `--config FILE` if
+given, else the per-user `~/.config/tapewyrm/config.toml`
+(`$XDG_CONFIG_HOME/tapewyrm/config.toml`; `%APPDATA%\tapewyrm\config.toml` on
+Windows) if it exists. Precedence: `--profile`, then the config file, then
+`auto`.
+
+**`auto`** (the default) does what the Linux floppy-tape driver ftape does
+for an unknown drive (`ftape_activate_drive()` in
+`drivers/char/ftape/lowlevel/ftape-ctl.c`, Linux 2.6.19): it tries ftape's
+wake-up methods in ftape's order -- `default` (ftape "None"), `colorado`
+("Colorado": Phantom Select 46 + unit 0, plus Enter Primary Mode),
+`mountain` ("Mountain": Soft Select 23 + 20 pulses), `insight` ("Motor-on":
+unit 0's select and motor-enable lines) -- and keeps the first the drive
+answers. The list is `AUTO_ORDER` in `tapewyrm/qic117/profile.py`; the full
+citation is above `auto_wake` in `tapewyrm/qic117/drive.py`. "Answers" is
+ftape's test: Report Drive Status succeeds within 4 tries and is not 0xff.
+As in ftape, nothing is undone between tries except the Motor-on motor, which
+goes off (with the select) after a failed try and at the end of every
+session. Each try and its result is logged at INFO; a try the board cannot
+do (Motor-on without the motor lines) is skipped with an INFO line saying
+why. **Not verified on hardware:** only the Colorado wake has met real
+drives; None, Mountain, Motor-on, the order and the undo have only run
+against simulated drives. `conner` and `iomega` are never tried
+automatically (their Soft Reset wake is not ftape's).
 
 | Profile | Drive | State |
 |---|---|---|
+| `auto` | Whatever answers ftape's wake-ups | Default. Probe described above; not verified on hardware. |
+| `default` | Any drive already listening | Rev J timings, no wake sequence (ftape "None"). |
 | `colorado` | Colorado Jumbo 350 (and family) | Tested. Phantom drive: Phantom Select (46) with unit 0, then Enter Primary Mode. |
 | `colorado.1400` | Colorado 1400 (QIC-3010) | Tested. Same addressing as the 350. |
-| `conner` | Conner / Conner-Archive | Placeholder (Soft Reset, then Enter Primary Mode). |
-| `iomega` | Iomega Ditto | Placeholder (Soft Reset, then Enter Primary Mode). |
+| `mountain` | Conner, Archive, Summit, ... (ftape's vendor table) | Untested. ftape's Mountain wake: Soft Select (23) + 20 pulses. |
+| `insight` | Irwin/Insight 80, early Iomega 250 | Untested. ftape's Motor-on wake: wait 100 ms, IBM PC bus unit 0 select + motor. |
+| `conner` | Conner / Conner-Archive | Placeholder (Soft Reset, then Enter Primary Mode). ftape uses `mountain` for these. |
+| `iomega` | Iomega Ditto | Placeholder (Soft Reset, then Enter Primary Mode). ftape tries None, Colorado or Motor-on for these. |
+
+A wake step is a QIC-117 command name, or a line step: `delay` (just its
+`delay_ms`) or `motor on` (IBM PC bus select + motor-enable for unit `arg`).
 
 A new drive is a new TOML file, not a code change.
 

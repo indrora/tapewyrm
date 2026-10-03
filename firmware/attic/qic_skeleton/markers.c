@@ -7,9 +7,11 @@
  *
  *     <escape> <marker_code> <len:u8> <payload...>
  *
- * where <escape> is gw_flux_opcode_escape() (host models it as 0xFF). A literal
- * flux byte equal to the escape is stuffed by the *flux encoder* path, not here
- * — markers.c only ever emits the escape as a deliberate opcode introducer.
+ * where <escape> is gw_flux_opcode_escape() (0xFF in the real GW encoder).
+ * (Retired skeleton. As built, nothing is stuffed: 0xFF is an escape only in a
+ * token's lead position, and GW flux data DOES contain 0xFF -- the second byte
+ * of a two-byte interval and N28 argument bytes. See firmware/src/qic/qic.c
+ * and docs/spec/twrf.md section 5.)
  *
  * TODO(bench) §13.6 item 1: GW's real opcode-escape scheme may use a different
  * introducer byte and/or a multi-byte opcode form. When the GW firmware is read,

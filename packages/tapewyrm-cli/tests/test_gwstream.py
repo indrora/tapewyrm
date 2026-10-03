@@ -54,6 +54,18 @@ def test_dead_time_space_is_added_to_the_next_interval():
     assert ps.data_bytes == 1  # dead-time SPACE isn't counted by the firmware
 
 
+def test_gwstream_is_the_archive_parser_and_marker_codes_match_protocol():
+    """One tokenizer: tw convert/dump and RawFluxCapture.verify read streams alike."""
+    from tapewyrm_archive import twrf
+
+    assert gwstream.parse is twrf.parse_body
+    blob = _encode(759) + _marker(Marker.SEGMENT, struct.pack("<II", 1, 1)) + b"\x00"
+    ps = gwstream.parse(blob)
+    (seg,) = ps.markers
+    assert seg.code == Marker.SEGMENT and seg.interval == 1 and seg.offset == 2
+    assert twrf.flux_data_only(blob) == _encode(759) == b"\xfb\xff"
+
+
 def _mfm_cells(data: bytes, prev: int = 0) -> str:
     out = []
     for byte in data:

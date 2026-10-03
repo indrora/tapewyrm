@@ -1,8 +1,18 @@
 """Coordinate-algebra tests (DESIGN.md §7.3 worked values)."""
 
+import pytest
 from tapewyrm_archive.types import Direction, TapeFormat
 
-from qiclib.geometry import Geometry, coord_to_lsn, coord_to_seg, sector_in_segment, seg_to_coord
+from qiclib import cartridge
+from qiclib.geometry import (
+    Geometry,
+    coord_to_lsn,
+    coord_to_seg,
+    fallback_spt,
+    sector_in_segment,
+    seg_to_coord,
+    track_count,
+)
 
 
 def test_anchor_origin():
@@ -58,3 +68,70 @@ def test_geometry_for_format_fallback_spt():
     assert g.segments_per_track == 207
     g2 = Geometry.for_format(TapeFormat.QIC80, calibrated_length=100)
     assert g2.segments_per_track == 100
+
+
+# ---------------------------------------------------------------------------
+# Track counts per (format, width) and the spt fallbacks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fmt", "wide", "tracks"),
+    [
+        (TapeFormat.QIC40, False, 20),  # QIC-40-MC Rev M cover
+        (TapeFormat.QIC80, False, 28),  # QIC-80-MC Rev N cover
+        (TapeFormat.QIC80, True, 36),
+        (TapeFormat.QIC3010, False, 40),  # QIC-3010-MC Rev H cover
+        (TapeFormat.QIC3010, True, 50),
+        (TapeFormat.QIC3020, False, 40),  # QIC-3020-MC Rev H cover
+        (TapeFormat.QIC3020, True, 50),
+        (TapeFormat.UNKNOWN, False, 28),  # assumed QIC-80 (QIC-117 Rev J Note 4)
+        (TapeFormat.UNKNOWN, True, 36),
+        (TapeFormat.QIC40, True, 20),  # QIC-40 has no wide tape: narrow count
+    ],
+)
+def test_track_count_per_format_and_width(fmt, wide, tracks):
+    assert track_count(fmt, wide) == tracks
+    assert Geometry.for_format(fmt, segments_per_track=100, wide=wide).tracks == tracks
+
+
+def test_track_count_agrees_with_every_cartridge_profile():
+    """The geometry table and the cartridge catalogue are the same numbers."""
+    by_standard = {
+        "QIC-40": TapeFormat.QIC40,
+        "QIC-80": TapeFormat.QIC80,
+        "QIC-3010": TapeFormat.QIC3010,
+        "QIC-3020": TapeFormat.QIC3020,
+    }
+    for cart in cartridge.catalogue():
+        wide = cart.width_in > 0.25
+        assert track_count(by_standard[cart.standard], wide) == cart.tracks, cart.profile
+
+
+@pytest.mark.parametrize(
+    ("calibrated", "spt"),
+    [(1, 100), (153, 100), (154, 207), (228, 207), (229, 229), (300, 300)],
+)
+def test_fallback_spt_qic117_override_table(calibrated, spt):
+    """QIC-117 Rev J cmd 36: 1-153 -> 100, 154-228 -> 207, 229+ not overridden."""
+    assert fallback_spt(calibrated, TapeFormat.QIC80) == spt
+
+
+def test_fallback_spt_override_is_qic80_only():
+    """The 100/207 override is for QIC-80 fixed 550 Oe tapes; 3010/3020 keep theirs."""
+    assert fallback_spt(160, TapeFormat.QIC3020) == 160
+    assert fallback_spt(160, TapeFormat.QIC3010, wide=True) == 160
+
+
+def test_fallback_spt_without_calibration_follows_the_standard():
+    """No report at all: QIC-80 keeps 207; others use their longest catalogued tape."""
+    assert fallback_spt(None, TapeFormat.QIC80) == 207
+    assert fallback_spt(None, TapeFormat.QIC40) == 365  # 1,100 ft, fixed by QIC-40
+    assert fallback_spt(None, TapeFormat.QIC3020) == cartridge.min_segments_per_track(
+        1000, "QIC-3020"
+    )
+    assert fallback_spt(None, TapeFormat.QIC3010, wide=True) == (
+        cartridge.min_segments_per_track(1000, "QIC-3010")
+    )
+    g = Geometry.for_format(TapeFormat.QIC3020, wide=True)
+    assert g.segments_per_track == cartridge.min_segments_per_track(750, "QIC-3020")

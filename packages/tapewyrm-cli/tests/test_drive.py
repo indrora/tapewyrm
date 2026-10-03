@@ -6,6 +6,7 @@ exact sequence of bus operations the drive emits — including the
 no-status-after-LOGICAL_FORWARD rule (DESIGN.md §2.1/§6A.3).
 """
 
+import logging
 import struct
 from collections import deque
 
@@ -360,3 +361,288 @@ def test_non_interruptible_flags_match_table_2a():
     # (n) in Rev J Table 2a: 3, 4, 14, 16, 18, 25, 26, 34, 35, 36. Nothing else.
     flagged = {c.code for c in commands.BY_CODE.values() if c.non_intr}
     assert flagged == {3, 4, 14, 16, 18, 25, 26, 34, 35, 36}
+
+
+# ---------------------------------------------------------------------------
+# --profile auto: auto_wake runs ftape's wake-up methods in ftape's order
+# ---------------------------------------------------------------------------
+
+
+class BusLink(MockLink):
+    """A floppy-tape cable with at most one drive on it, and no motor control.
+
+    ``kind`` says how the drive wakes, one per ftape method:
+
+    * ``"listening"`` -- always answers (ftape "None").
+    * ``"phantom"``   -- after Phantom Select 46 + the ``unit``+2 train; 47 or
+      Soft Reset (1) releases it (ftape "Colorado").
+    * ``"soft"``      -- after Soft Select 23 + its 20-pulse train; 24 or 1
+      releases it (ftape "Mountain").
+    * ``"motor"``     -- while its unit's select + motor lines are on (ftape
+      "Motor-on"; needs ``MotorBusLink``).
+    * ``None``        -- no drive at all.
+
+    Unselected, a report gets no ACK (LinkError), as on the real bus.
+    ``events()`` lists command pulse counts and line operations in order.
+    """
+
+    def __init__(self, kind: str | None = None, unit: int = 0, status: int = 0x25):
+        super().__init__()
+        self.kind, self.unit, self.status_byte = kind, unit, status
+        self.selected = kind == "listening"
+        self.motor_unit: int | None = None
+        self._after: int | None = None  # 46 or 23 waiting for its argument train
+
+    def command_txn(self, n: int, report_bits: int = 0) -> bytes:
+        from tapewyrm.link.device import LinkError
+
+        self.calls.append(("command_txn", n, report_bits))
+        if self._after is not None:
+            after, self._after = self._after, None
+            if after == 46 and self.kind == "phantom" and n == self.unit + 2:
+                self.selected = True
+            if after == 23 and self.kind == "soft" and n == 20:
+                self.selected = True
+            return b""
+        if n in (46, 23):
+            self._after = n
+        elif n in (1, 47, 24) and self.kind in ("phantom", "soft"):
+            self.selected = False
+        if not report_bits:
+            return b""
+        listening = self.selected or (self.kind == "motor" and self.motor_unit == self.unit)
+        if not listening:
+            raise LinkError(f"command {n}: no ACK bit -- drive not selected/listening")
+        return bytes([self.status_byte])
+
+    def events(self) -> list:
+        out: list = []
+        for call in self.calls:
+            if call[0] == "command_txn":
+                out.append(call[1])
+            elif call[0] != "set_timing":
+                out.append(call)
+        return out
+
+
+class MotorBusLink(BusLink):
+    """``BusLink`` plus GW's select / motor / deselect, as ``DeviceLink`` has."""
+
+    def select(self, hint) -> None:
+        self.calls.append(("select", hint.bus, hint.unit, hint.motor))
+        if hint.motor:
+            self.motor_unit = hint.unit
+
+    def motor(self, unit: int, on: bool) -> None:
+        self.calls.append(("motor", unit, on))
+        self.motor_unit = unit if on else None
+
+    def deselect(self) -> None:
+        self.calls.append(("deselect",))
+
+
+NO_ANSWER = [6, 6, 6, 6]  # ftape_report_raw_drive_status: 4 tries, then give up
+INSIGHT_ON = ("select", "ibmpc", 0, True)
+INSIGHT_OFF = [("motor", 0, False), ("deselect",)]
+
+
+@pytest.fixture
+def ftape_candidates(monkeypatch):
+    """The real AUTO_ORDER profiles, with wake delays made instant."""
+    import time
+
+    from tapewyrm.qic117.profile import auto_candidates
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    return auto_candidates()
+
+
+@pytest.fixture
+def tw_info_logs(monkeypatch, caplog):
+    # The CLI's setup_logging turns propagation off for "tapewyrm"; re-enable
+    # it so caplog (on the root logger) sees the auto-detect INFO lines.
+    monkeypatch.setattr(logging.getLogger("tapewyrm"), "propagate", True)
+    caplog.set_level(logging.INFO, logger="tapewyrm")
+    return caplog
+
+
+def _info(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+
+
+def test_auto_order_is_ftapes_wakeup_methods_in_ftapes_order(ftape_candidates):
+    # ftape-ctl.c ftape_activate_drive() walks WAKEUP_METHODS: None, Colorado,
+    # Mountain, Motor-on. Changing this list means departing from ftape.
+    from tapewyrm.qic117.profile import AUTO_ORDER
+
+    assert AUTO_ORDER == ("default", "colorado", "mountain", "insight")
+    wakes = {p.name: [(n, a) for n, a, _ms in p.wake_sequence] for p in ftape_candidates}
+    assert wakes == {
+        "default": [],
+        "colorado": [("phantom select", 0), ("enter primary mode", None)],
+        "mountain": [("soft select", 18)],
+        "insight": [("delay", None), ("motor on", 0)],
+    }
+
+
+def test_auto_with_no_drive_tries_every_method_in_order_and_undoes_only_the_motor(
+    ftape_candidates, tw_info_logs
+):
+    link = MotorBusLink(kind=None)
+    with pytest.raises(DriveError, match="tried: default, colorado, mountain, insight"):
+        from tapewyrm.qic117.drive import auto_wake
+
+        auto_wake(link, ftape_candidates)
+    # As ftape: no Phantom Deselect (47) or Soft Deselect (24) between
+    # attempts; only the Motor-on wake's motor goes back off.
+    assert link.events() == [
+        *NO_ANSWER,  # None
+        46, 2, 30, *NO_ANSWER,  # Colorado (+ tw's Enter Primary Mode)
+        23, 20, *NO_ANSWER,  # Mountain
+        INSIGHT_ON, *NO_ANSWER, *INSIGHT_OFF,  # Motor-on
+    ]  # fmt: skip
+    messages = _info(tw_info_logs)
+    assert "auto: trying default: no wake steps" in messages
+    assert "auto: trying colorado: phantom select 0, enter primary mode" in messages
+    assert "auto: trying mountain: soft select 18" in messages
+    assert "auto: trying insight: wait 100 ms, motor on 0" in messages
+    assert "auto: insight: motor off and deselect (ftape's undo)" in messages
+    assert sum(m.startswith(("auto: default: no answer", "auto: colorado: no answer",
+                             "auto: mountain: no answer", "auto: insight: no answer"))
+               for m in messages) == 4  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("kind", "winner", "events"),
+    [
+        ("listening", "default", [6, 6]),
+        ("phantom", "colorado", [*NO_ANSWER, 46, 2, 30, 6, 6]),
+        ("soft", "mountain", [*NO_ANSWER, 46, 2, 30, *NO_ANSWER, 23, 20, 6, 6]),
+        (
+            "motor",
+            "insight",
+            [*NO_ANSWER, 46, 2, 30, *NO_ANSWER, 23, 20, *NO_ANSWER, INSIGHT_ON, 6, 6],
+        ),
+    ],
+)
+def test_auto_stops_at_the_first_method_the_drive_answers(
+    ftape_candidates, tw_info_logs, kind, winner, events
+):
+    from tapewyrm.qic117.drive import auto_wake
+
+    link = MotorBusLink(kind=kind)
+    drive = auto_wake(link, ftape_candidates)
+    assert drive.profile.name == winner and drive.link is link
+    # Answer test (6), then status() once more to clear the latch; nothing
+    # after the winner, and the winner's select/motor is left in place.
+    assert link.events() == events
+    assert f"auto: drive answered {winner}; using profile {winner!r}" in _info(tw_info_logs)
+
+
+def test_auto_turns_the_motor_off_before_the_next_method(monkeypatch):
+    import time
+
+    from tapewyrm.qic117.drive import auto_wake
+    from tapewyrm.qic117.profile import load_profile
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    link = MotorBusLink(kind="phantom")
+    drive = auto_wake(link, [load_profile("insight"), load_profile("colorado")])
+    assert drive.profile.name == "colorado"
+    assert link.events() == [INSIGHT_ON, *NO_ANSWER, *INSIGHT_OFF, 46, 2, 30, 6, 6]
+    assert link.motor_unit is None
+
+
+def test_auto_retries_status_like_ftape():
+    # ftape_report_raw_drive_status retries a failed report 3 times.
+    from tapewyrm.link.device import LinkError
+    from tapewyrm.qic117.drive import auto_wake
+
+    class SlowToAnswer(BusLink):
+        misses = 2
+
+        def command_txn(self, n, report_bits=0):
+            if report_bits and self.misses:
+                self.misses -= 1
+                self.calls.append(("command_txn", n, report_bits))
+                raise LinkError("no ACK bit")
+            return super().command_txn(n, report_bits)
+
+    link = SlowToAnswer(kind="listening")
+    drive = auto_wake(link, [DriveProfile.default()])
+    assert drive.profile.name == "default"
+    assert link.events() == [6, 6, 6, 6]  # 2 misses, the answer, then status()
+
+
+def test_auto_rejects_status_ff_without_retrying():
+    # A floating TRK0 reads as all ones; ftape calls 0xff "impossible".
+    from tapewyrm.qic117.drive import auto_wake
+
+    link = BusLink(kind="listening", status=0xFF)
+    with pytest.raises(DriveError, match="tried: default"):
+        auto_wake(link, [DriveProfile.default()])
+    assert link.events() == [6]
+
+
+def test_auto_skips_motor_on_when_the_link_has_no_motor_control(ftape_candidates, tw_info_logs):
+    from tapewyrm.qic117.drive import auto_wake
+
+    link = BusLink(kind=None)  # no select()/motor()
+    with pytest.raises(
+        DriveError, match=r"tried: default, colorado, mountain, insight \(skipped\)"
+    ):
+        auto_wake(link, ftape_candidates)
+    assert link.events() == [*NO_ANSWER, 46, 2, 30, *NO_ANSWER, 23, 20, *NO_ANSWER]
+    assert (
+        "auto: skipping insight: it needs the motor-enable line and this link cannot drive it"
+        in _info(tw_info_logs)
+    )
+
+
+def test_auto_skips_motor_on_when_the_board_refuses_it(ftape_candidates, tw_info_logs):
+    from tapewyrm.link.device import LinkError
+    from tapewyrm.qic117.drive import auto_wake
+
+    class NoIbmPcBus(MotorBusLink):
+        def select(self, hint):
+            self.calls.append(("select", hint.bus, hint.unit, hint.motor))
+            raise LinkError("command 0x0c rejected: ACK_BAD_UNIT")
+
+        def motor(self, unit, on):
+            self.calls.append(("motor", unit, on))
+            raise LinkError("command 0x06 rejected: ACK_NO_BUS")
+
+    link = NoIbmPcBus(kind=None)
+    with pytest.raises(DriveError, match=r"insight \(skipped\)"):
+        auto_wake(link, ftape_candidates)
+    assert link.events()[-3:] == [INSIGHT_ON, *INSIGHT_OFF]  # undo still attempted
+    assert any(m.startswith("auto: skipping insight: board refused") for m in _info(tw_info_logs))
+
+
+def test_auto_wake_does_not_skip_past_a_dead_link(ftape_candidates):
+    from tapewyrm.link.device import LinkClosed
+    from tapewyrm.qic117.drive import auto_wake
+
+    class DeadLink(MockLink):
+        def command_txn(self, n, report_bits=0):
+            self.calls.append(("command_txn", n, report_bits))
+            raise LinkClosed("device link is not open")
+
+    link = DeadLink()
+    with pytest.raises(LinkClosed):
+        auto_wake(link, ftape_candidates)
+    assert link.command_codes() == [6]  # gave up at once, tried nothing else
+
+
+def test_motor_on_wake_step_selects_and_releases(monkeypatch):
+    import time
+
+    from tapewyrm.qic117.profile import load_profile
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    link = MotorBusLink(kind="motor")
+    drive = Qic117Drive(link, load_profile("insight"))
+    drive.wake()
+    assert link.events() == [INSIGHT_ON, 6] and drive.motor_unit == 0
+    drive.release_lines()
+    assert link.events()[-2:] == INSIGHT_OFF and drive.motor_unit is None

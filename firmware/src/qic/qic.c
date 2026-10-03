@@ -293,15 +293,20 @@ static bool_t qic_wait_ready(uint32_t timeout_ms)
  *  Markers ride GW's opcode-escape channel: a 0xFF byte introduces an opcode in
  *  the flux stream (see rdata_encode_flux(): 0xFF FLUXOP_INDEX ..). GW's flux
  *  opcodes are 1..3; our marker codes are 0xF0..0xF4 (inc/protocol.h), so the
- *  two never collide. The host parser (packages/tapewyrm-cli/tapewyrm/rawflux/container.py) reads
+ *  two never collide. A marker is framed as
  *
- *      0xFF  <marker_code>  <len:u8>  <payload...>      (ESC == 0xFF)
+ *      0xFF  <marker_code>  <len:u8>  <payload...>
  *
- *  and a literal 0xFF flux byte is stuffed as 0xFF 0xFF. GW never emits a raw
- *  0xFF flux byte (its single-byte flux values are 1..249, two-byte lead-ins are
- *  250..254, and 255 is the opcode escape), so no extra stuffing is needed for
- *  GW-produced flux. The serialization helpers below are byte-for-byte the same
- *  layout the host parses (little-endian) -- this is the firmware<->host contract.
+ *  There is NO byte stuffing anywhere in the stream, and 0xFF does appear as
+ *  flux data: 0xFF is only an escape in the LEAD position of a token. The second
+ *  byte of a two-byte interval (lead 250..254) is 1 + (ticks-250) % 255, i.e.
+ *  1..255, so it is 0xFF whenever that remainder is 254; the four N28 argument
+ *  bytes of FLUXOP_INDEX / FLUXOP_SPACE can be 0xFF too, and so can marker
+ *  payload bytes. The host must therefore walk the stream token by token (lead
+ *  byte decides the token's length) and never scan for 0xFF. The host parser is
+ *  tapewyrm_archive.twrf.parse_body (packages/tapewyrm-archive), the format is
+ *  docs/spec/twrf.md (TWS-1). The serialization helpers below are byte-for-byte
+ *  the layout the host parses (little-endian) -- the firmware<->host contract.
  *
  *  Markers are written straight into GW's u_buf[] ring via the same u_prod
  *  cursor rdata_encode_flux() uses, so they interleave atomically with flux and
@@ -312,8 +317,11 @@ static bool_t qic_wait_ready(uint32_t timeout_ms)
  * ======================================================================== */
 
 /* Running accounting for the END marker (counts + checksum), matching the host
- * container.py verify(): byte_count over flux DATA bytes, checksum = additive
- * sum of those bytes & 0xFFFFFFFF, flux_count = number of intervals encoded. */
+ * RawFluxCapture.verify() (tapewyrm_archive/twrf.py, TWS-1 section 7.2):
+ * byte_count over flux DATA bytes (every byte of each 1-, 2- or 7-byte interval
+ * emitted inside rdata_encode_flux()'s per-transition loop; not INDEX, not the
+ * dead-time SPACE, not markers), checksum = additive sum of those bytes &
+ * 0xFFFFFFFF, flux_count = number of intervals encoded. */
 static struct {
     uint32_t flux_count;
     uint32_t byte_count;
@@ -403,7 +411,12 @@ static void qic_mark_session_start(void)
 }
 
 /* SEGMENT: ticks:u32, index:u32 (8). One per hardware INDEX edge (= per tape
- * segment, §2.2). `ticks` is the sample-clock delta since the previous segment. */
+ * segment, §2.2). `ticks` is NOT the time since the previous segment: it is the
+ * same value as the FLUXOP_INDEX opcode just before it, index.rdata_cnt - prev
+ * in rdata_encode_flux(), i.e. sample-clock ticks from GW's sample cursor (the
+ * previous flux transition, advanced by any dead-time FLUXOP_SPACE emitted
+ * since) to the INDEX edge. The segment-to-segment period is the difference
+ * of consecutive INDEX times on the host. `index` is the running count from 1. */
 static void qic_mark_segment(uint32_t ticks, uint32_t index)
 {
     qic_marker_begin(TW_MARK_SEGMENT, 8);

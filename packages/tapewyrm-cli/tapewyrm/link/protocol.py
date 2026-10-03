@@ -19,7 +19,7 @@ class Txn(IntEnum):
 
 class Marker(IntEnum):
     SESSION_START = 0xF0  # rate, sample clock, TPT, direction, pass-id, UTC — anchors t=0
-    SEGMENT = 0xF1  # tick count since previous + running index — each hardware INDEX edge
+    SEGMENT = 0xF1  # ticks from previous transition (GW sample cursor) to INDEX + running index
     EVENT = 0xF2  # code: motion-started / hole-EOT / overflow / gap
     END = 0xF3  # reason, flux-count, byte-count, checksum — seals the run
     HEARTBEAT = 0xF4  # coarse keepalive across long erased stretches (demoted, optional)

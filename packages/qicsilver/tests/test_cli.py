@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -101,3 +102,58 @@ def test_cli_volume_profile_and_json(tmp_path):
 
     bad = CliRunner().invoke(cli, ["identify", "--volume-profile", "nope", str(path)])
     assert bad.exit_code != 0 and "no volume profile 'nope'" in bad.output
+
+
+# ---------------------------------------------------------------------------
+# Truncated inputs: a one-line error and exit 1, never a traceback
+# ---------------------------------------------------------------------------
+
+
+def _truncated_image(tmp_path: Path, name: str = "t.twti") -> Path:
+    path = _write_image(tmp_path / name, {0: _header(0), 1: _header(1), 2: _vtbl()})
+    with path.open("r+b") as f:
+        f.truncate(path.stat().st_size - SEGMENT_STRIDE)  # the last slot is gone
+    return path
+
+
+def _assert_clean_error(result, *needles: str) -> None:
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)  # ClickException, not a crash
+    assert "Traceback" not in result.output
+    # rich-click wraps the message in a box at the terminal width, which can
+    # break a long tmp path anywhere: compare with the box and spaces gone.
+    flat = re.sub(r"[\s\u2500-\u257f]+", "", result.output)
+    for needle in needles:
+        assert re.sub(r"\s+", "", needle) in flat
+
+
+def test_identify_truncated_image_is_a_clean_error(tmp_path):
+    path = _truncated_image(tmp_path)
+    result = CliRunner().invoke(cli, ["identify", str(path)])
+    _assert_clean_error(result, "t.twti", "truncated")
+
+
+def test_extract_truncated_twtz_is_a_clean_error(tmp_path):
+    from tapewyrm_archive._zstd import zstd
+
+    twti = _write_image(tmp_path / "t.twti", {0: _header(0), 1: _header(1), 2: _vtbl()})
+    twtz = tmp_path / "t.twtz"
+    packed = zstd.compress(twti.read_bytes())
+    twtz.write_bytes(packed[: len(packed) // 2])
+    result = CliRunner().invoke(cli, ["extract", str(twtz), "-o", str(tmp_path / "out")])
+    _assert_clean_error(result, "t.twtz", "truncated")
+
+
+def test_tar_truncated_volume_is_a_clean_error(tmp_path):
+    from tapewyrm_archive.twvl import Volume
+
+    path = tmp_path / "vol-00.twvl"
+    Volume(header={"format": "TWVL", "holes": [], "volume_size": 100}, data=bytes(100)).save(path)
+    with path.open("r+b") as f:
+        f.truncate(path.stat().st_size - 10)
+    result = CliRunner().invoke(cli, ["tar", str(path), "-o", str(tmp_path / "x.tar")])
+    _assert_clean_error(result, "vol-00.twvl", "truncated")
+    short = tmp_path / "short.twvl"
+    short.write_bytes(b"TWVL\x01")  # cut inside the preamble
+    result = CliRunner().invoke(cli, ["tar", str(short), "-o", str(tmp_path / "y.tar")])
+    _assert_clean_error(result, "short.twvl", "truncated")

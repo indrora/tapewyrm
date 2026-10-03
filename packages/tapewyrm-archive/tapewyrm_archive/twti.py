@@ -72,6 +72,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import IO, Any
 
+from tapewyrm_archive.errors import MalformedFileError, TruncatedFileError
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
 log = logging.getLogger(__name__)
@@ -100,6 +101,10 @@ class SegmentState(IntEnum):
     CORRECTED = 2  # Reed-Solomon rebuilt 1-3 sectors
     UNCORRECTABLE = 3  # > 3 sectors bad or missing: partial data kept
     BAD = 4  # the bad-sector map marks the whole segment unusable
+
+
+# The state values a version-1 table may hold; 5-255 are reserved (TWS-2 5.2).
+_STATES = frozenset(int(state) for state in SegmentState)
 
 
 @dataclass(frozen=True)
@@ -278,26 +283,65 @@ class TapeImage:
         else:
             source = path
         f = None
+        mm: mmap.mmap | None = None
         try:
             f = source.open("rb")
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            # mmap refuses a zero-length file; an empty "image" goes through
+            # _parse like any other short one so it gets the same diagnosis.
+            if os.fstat(f.fileno()).st_size:
+                mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            img = cls._parse(path, mm if mm is not None else b"", compressed=temp is not None)
+            if img is None:
+                raise ValueError(f"{path}: not a TWTI v{VERSION} tape image")
         except BaseException:
-            _release(None, f, temp)
-            raise
-        img = cls._parse(path, mm)
-        if img is None:
             _release(mm, f, temp)
-            raise ValueError(f"{path}: not a TWTI v{VERSION} tape image")
+            raise
         img._finalizer = weakref.finalize(img, _release, mm, f, temp)
         return img
 
     @classmethod
-    def _parse(cls, path: Path, mm: mmap.mmap) -> TapeImage | None:
-        """Preamble, header and segment table out of a mapped TWTI; None if not one."""
-        if len(mm) < _PREAMBLE.size:
-            log.debug("%s: %d bytes is shorter than the TWTI preamble; refusing", path, len(mm))
+    def _parse(
+        cls, path: Path, buf: bytes | mmap.mmap, *, compressed: bool = False
+    ) -> TapeImage | None:
+        """Preamble, header and segment table out of a mapped TWTI; None if not one.
+
+        None means "this is not a TWTI at all" (wrong magic or version).
+        A file that *is* one but breaks TWS-2 section 9.2 raises instead:
+        :class:`TruncatedFileError` when it is shorter than its own preamble,
+        header and table say (``L``, TWS-2 section 2), and
+        :class:`MalformedFileError` for a bad header or table entry.
+
+        Truncation is judged by the file's *length*, never by what is
+        allocated: a sparse image's holes count toward its length (that is
+        what ``truncate`` at the end of :meth:`save` is for), so a sparse
+        file of the right length is complete however little disk it uses.
+        Every length check happens before any per-segment structure is built,
+        so a corrupt ``segment_count`` cannot make us allocate for segments
+        the file does not hold. For a TWTZ (``compressed``), ``buf`` is the
+        decompressed stream and the sizes in messages count decompressed
+        bytes; a TWTZ whose stream is complete but holds a short TWTI is just
+        as truncated as a short TWTI.
+        """
+        kind = "TWTZ" if compressed else "TWTI"
+        note = " (decompressed)" if compressed else ""
+        found = len(buf)
+
+        def truncated(part: str, expected: int) -> TruncatedFileError:
+            log.debug("%s: %s needs %d bytes, file has %d; refusing", path, part, expected, found)
+            return TruncatedFileError(path, kind, part, expected, found, note=note)
+
+        def malformed(problem: str) -> MalformedFileError:
+            log.debug("%s: %s; refusing", path, problem)
+            return MalformedFileError(path, kind, problem)
+
+        if found < _PREAMBLE.size:
+            # Our magic followed by too few bytes is a cut-off image; anything
+            # else this short is simply not one.
+            if bytes(buf[: len(MAGIC)]) == MAGIC:
+                raise truncated("preamble", _PREAMBLE.size)
+            log.debug("%s: %d bytes is shorter than the TWTI preamble; refusing", path, found)
             return None
-        magic, version, hlen = _PREAMBLE.unpack_from(mm, 0)
+        magic, version, hlen = _PREAMBLE.unpack_from(buf, 0)
         if magic != MAGIC or version != VERSION:
             log.debug(
                 "%s: magic %r version %d != %r version %d; refusing",
@@ -308,15 +352,57 @@ class TapeImage:
                 VERSION,
             )
             return None
-        header = json.loads(mm[_PREAMBLE.size : _PREAMBLE.size + hlen])
-        at = _PREAMBLE.size + hlen
-        count = header["segment_count"]
-        log.debug("%s: %d-byte header, %d segment entries", path, hlen, count)
-        entries = [
-            SegmentEntry(SegmentState(s), e, n, m)
-            for s, e, n, m in _ENTRY.iter_unpack(mm[at : at + count * _ENTRY.size])
-        ]
-        return cls(header=header, entries=entries, _data=mm, _data_at=at + count * _ENTRY.size)
+
+        # --- JSON header (TWS-2 section 4, reader rules 3, 5 and 6) ---
+        header_end = _PREAMBLE.size + hlen
+        if found < header_end:
+            raise truncated("JSON header", header_end)
+        try:
+            # JSONDecodeError and UnicodeDecodeError are both ValueErrors.
+            header = json.loads(buf[_PREAMBLE.size : header_end])
+        except ValueError as exc:
+            raise malformed(f"the header is not valid UTF-8 JSON ({exc})") from exc
+        if not isinstance(header, dict):
+            raise malformed(f"the header is a JSON {type(header).__name__}, not an object")
+        count = header.get("segment_count")
+        # type() rather than isinstance: JSON true/false are bools, and bool
+        # is an int subclass we do not want to accept as a count.
+        if type(count) is not int or count < 0:
+            raise malformed(f"segment_count is {count!r}; it must be a non-negative integer")
+        # Both members are REQUIRED of writers but readers need only
+        # segment_count (rule 5), so an absent one is fine; a wrong one is not.
+        stride = header.get("segment_stride", SEGMENT_STRIDE)
+        if stride != SEGMENT_STRIDE:
+            raise malformed(
+                f"segment_stride is {stride!r}; version {VERSION} images use {SEGMENT_STRIDE}"
+            )
+        fmt = header.get("format", "TWTI")
+        if fmt != "TWTI":
+            raise malformed(f"the header's format member is {fmt!r}, not 'TWTI'")
+
+        # --- lengths first: segment table, then the whole data area ---
+        table_end = header_end + count * _ENTRY.size
+        if found < table_end:
+            raise truncated("segment table", table_end)
+        length = table_end + count * SEGMENT_STRIDE
+        if found < length:
+            raise truncated("segment data area", length)
+        log.debug("%s: %d-byte header, %d segment entries, %d bytes", path, hlen, count, length)
+
+        # --- segment table entries (reader rules 7 and 8) ---
+        entries: list[SegmentEntry] = []
+        for n, (state, erasures, data_len, mask) in enumerate(
+            _ENTRY.iter_unpack(buf[header_end:table_end])
+        ):
+            if state not in _STATES:
+                raise malformed(f"segment {n} has reserved state value {state}")
+            if data_len > SEGMENT_STRIDE:
+                raise malformed(
+                    f"segment {n} has data_len {data_len:,}, more than its "
+                    f"{SEGMENT_STRIDE:,}-byte slot"
+                )
+            entries.append(SegmentEntry(SegmentState(state), erasures, data_len, mask))
+        return cls(header=header, entries=entries, _data=buf, _data_at=table_end)
 
 
 def _temp_image(path: Path) -> tuple[Any, str]:
@@ -361,6 +447,21 @@ def _decompress_to_temp(path: Path, progress: Progress) -> str:
                 length += len(chunk)
                 bar.update(raw.tell())
             out.truncate(length)
+    except EOFError as exc:
+        # ZstdFile raises EOFError when the input ends mid-frame: the .twtz
+        # was cut short. Whatever did decompress is not trusted.
+        _release(None, None, name)
+        log.debug("%s: zstd stream ended mid-frame after %d bytes: %r", path, length, exc)
+        raise TruncatedFileError(
+            path,
+            "TWTZ",
+            "zstd stream",
+            note=f": it ends without its end-of-frame marker after {length:,} decompressed bytes",
+        ) from exc
+    except zstd.ZstdError as exc:
+        _release(None, None, name)
+        log.debug("%s: zstd stream is corrupt: %r", path, exc)
+        raise MalformedFileError(path, "TWTZ", f"the zstd stream is corrupt ({exc})") from exc
     except BaseException:
         _release(None, None, name)
         raise

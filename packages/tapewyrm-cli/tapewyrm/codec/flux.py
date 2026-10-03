@@ -1,25 +1,25 @@
-"""GW flux bytes -> FluxStream intervals + split markers (DESIGN.md §6A.5, §13.6).
+"""Synthetic-fixture flux loader for ``codec.pipeline`` (DESIGN.md §6A.5).
 
-``load`` splits the two channels carried in a ``RawFluxCapture``'s flux blob:
+``load`` turns a ``RawFluxCapture`` built by the pipeline tests into a
+:class:`FluxStream`. It is NOT a reader of real captures: those are GW flux
+streams (TWS-1 §5) and go through ``tapewyrm_archive.twrf.parse_body`` (via
+``codec.gwstream``), the PLL and ``codec.mfm`` in ``tw convert``.
 
-  * the **marker** opcode-escape channel (fully real — reuses
-    :func:`tapewyrm.rawflux.container.iter_markers`), and
-  * the **flux data** bytes (fully real split via
-    :func:`tapewyrm.rawflux.container.flux_data_only`), which are then decoded
-    into inter-transition intervals.
+Fixture convention: the capture's ``flux`` IS the decoded MFM byte stream,
+with no markers and no GW encoding. Each byte becomes one "interval" verbatim,
+and ``codec.mfm.intervals_to_bytes`` recognizes byte-valued intervals and
+passes them straight through, so the whole pipeline is testable without a PLL.
 
-The interval-decode body is the genuine bench unknown (DESIGN.md §13.6 item 1):
-the exact GW flux opcode byte values and the long-flux continuation scheme are
-read from greaseweazle-firmware on the bench. It is marked ``TODO(bench)`` and
-implemented here as a clean, documented best-effort decoder; the marker-splitting
-half above is real and fully tested.
+Earlier this module split markers out with the TWRF helpers' old 0xFF-stuffing
+model. Those helpers now tokenize the real GW stream, which a raw MFM byte
+stream (full of 0x00 and 0xFF bytes) is not, so the fixture path no longer
+pretends to carry markers; the pipeline never used them.
 """
 
 from __future__ import annotations
 
 import logging
 
-from tapewyrm_archive import twrf as rawflux
 from tapewyrm_archive.types import Marker
 
 from tapewyrm.types import FluxStream
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 def load(cap: object) -> tuple[FluxStream, list[Marker]]:
-    """Split a RawFluxCapture into a :class:`FluxStream` and its markers.
+    """Wrap a fixture capture's bytes as a :class:`FluxStream`; no markers.
 
     ``cap`` is a ``RawFluxCapture`` (typed as ``object`` to avoid importing the
     container dataclass into the type signature; we only touch ``.flux`` and
@@ -36,37 +36,5 @@ def load(cap: object) -> tuple[FluxStream, list[Marker]]:
     """
     flux_blob: bytes = cap.flux  # type: ignore[attr-defined]
     sample_clock_hz: int = cap.header.sample_clock_hz  # type: ignore[attr-defined]
-
-    log.debug("splitting markers out of %d-byte flux blob", len(flux_blob))
-    markers = list(rawflux.iter_markers(flux_blob))
-    data = rawflux.flux_data_only(flux_blob)
-    log.debug("decoding %d flux data bytes into intervals (%d markers)", len(data), len(markers))
-    intervals = decode_flux_intervals(data)
-    return FluxStream(intervals=intervals, sample_clock_hz=sample_clock_hz), markers
-
-
-def decode_flux_intervals(data: bytes) -> list[int]:
-    """Decode GW flux **data** bytes into inter-transition intervals.
-
-    TODO(bench), DESIGN.md §13.6 item 1: the exact GW flux opcode byte values and
-    the long-flux continuation/escape scheme are a genuine bench unknown — read
-    them from greaseweazle-firmware before this runs against a real capture. GW's
-    on-wire encoding is roughly: small intervals as a single direct byte, and a
-    multi-byte continuation escape for long intervals (tape dropouts and
-    inter-segment gaps produce long intervals that must not saturate or be lost).
-
-    Offline/fixture convention (real, lossless): we treat every flux data byte
-    as one interval value, **verbatim and order-preserving**, so a fixture whose
-    flux data *is* a decoded MFM byte stream round-trips end-to-end without a PLL
-    (``codec.mfm.intervals_to_bytes`` recognizes byte-valued intervals and passes
-    them straight through). This keeps the whole stack testable hardware-free.
-
-    Real-flux decoder shape (the bench TODO above): GW's on-wire encoding packs
-    small intervals as single direct bytes and long intervals (tape dropouts /
-    inter-segment gaps) behind a multi-byte continuation escape. Once the actual
-    opcode/escape values are read from greaseweazle-firmware, this function emits
-    true tick-count intervals and ``codec.mfm`` routes them through the PLL.
-    """
-    # Verbatim, lossless pass-through (offline fixture path). Replace the body
-    # with the real GW opcode/continuation decode once it is read on the bench.
-    return list(data)
+    log.debug("fixture flux: %d decoded MFM bytes taken verbatim as intervals", len(flux_blob))
+    return FluxStream(intervals=list(flux_blob), sample_clock_hz=sample_clock_hz), []

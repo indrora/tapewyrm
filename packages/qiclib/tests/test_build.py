@@ -86,3 +86,74 @@ def test_build_reports_merge_correct_and_write_stages(tmp_path, caplog):
     assert "bad-sector map: 0 whole segments + 0 sectors" in text
     assert "segments: 2 clean, 0 corrected, 0 uncorrectable, 6 missing, 0 bad (map)" in text
     assert "wrote t.twti: 0.2 MB in " in text
+
+
+# ---------------------------------------------------------------------------
+# The image's drive identity: which source capture speaks for the drive
+# ---------------------------------------------------------------------------
+
+# A TWRF v2 header whose drive answered none of the QIC-117 reports: every
+# report key is present, every value is null (see docs/spec/twrf.md).
+NULL_REPORTS = {
+    "device_serial": "",
+    "drive_status": None,
+    "drive_config": None,
+    "drive_rom": None,
+    "drive_vendor_id": None,
+    "tape_status": None,
+    "rate_kbps": 500,
+    "firmware_commit": "abc123",
+}
+REAL_REPORTS = {
+    "device_serial": "GW-0001",
+    "drive_status": 0x25,
+    "drive_config": 0xD8,
+    "drive_rom": 0x40,
+    "drive_vendor_id": 4550,
+    "tape_status": 0x63,
+    "rate_kbps": 500,
+    "firmware_commit": "abc123",
+}
+OTHER_DRIVE = {**REAL_REPORTS, "device_serial": "GW-0002", "drive_vendor_id": 71}
+LEGACY = {"rate_kbps": 500}  # a headerless legacy .raw stream
+
+
+def _drive_of(tmp_path, *twrfs: dict) -> dict:
+    """Build a two-segment image from sources carrying ``twrfs``; return its drive."""
+    header = {"segments_per_track": 4, "tracks": 2}
+    sectors = [
+        *segment_raw_sectors(build_header_segment(0, **header), ftk_per_side=4),
+        *segment_raw_sectors(build_header_segment(1, **header), ftk_per_side=4),
+    ]
+    sources = [{"twrf": dict(twrf)} for twrf in twrfs]
+    build_image([sectors] * len(sources), tmp_path / "t.twti", sources=sources)
+    return TapeImage.open(tmp_path / "t.twti").header["drive"]
+
+
+def test_drive_skips_a_capture_whose_reports_are_all_null(tmp_path):
+    """drive_config present but null is not a report; the later real one wins."""
+    assert _drive_of(tmp_path, NULL_REPORTS, REAL_REPORTS) == REAL_REPORTS
+
+
+def test_drive_is_never_a_legacy_raw_source(tmp_path):
+    """A legacy .raw source carries no reports, so it never speaks for the drive."""
+    assert _drive_of(tmp_path, LEGACY, REAL_REPORTS) == REAL_REPORTS
+
+
+def test_drive_disagreement_keeps_the_first_and_warns(tmp_path, caplog):
+    """Captures from two drives: the first reporting one wins, with a warning."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="qiclib.build"):
+        drive = _drive_of(tmp_path, NULL_REPORTS, REAL_REPORTS, OTHER_DRIVE)
+    assert drive == REAL_REPORTS
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "device_serial" in warnings[0] and "drive_vendor_id" in warnings[0]
+    assert "tape_status" not in warnings[0]
+
+
+def test_drive_members_are_null_when_no_capture_reported(tmp_path):
+    """No reporting source: all eight members are present and null."""
+    drive = _drive_of(tmp_path, NULL_REPORTS, LEGACY)
+    assert drive == dict.fromkeys(REAL_REPORTS)
