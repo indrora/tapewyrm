@@ -1,22 +1,35 @@
 # tapewyrm-archive
 
-The on-disk formats of the Tapewyrm recovery workflow, and nothing else:
+The on-disk formats of the Tapewyrm recovery pipeline, and the small pieces
+every other package shares. It sits at the base of the package graph, so it is
+**stdlib-only**: no rich or click, and no hardware code. The one exception is
+`backports.zstd` on Python below 3.14, the official backport of the stdlib
+`compression.zstd` (PEP 784) used for TWTZ. See [STYLE.md](../../STYLE.md) §2.
 
-| Module | Format | Written by | Read by |
+```
+tapewyrm-cli ──► tapewyrm-archive ◄── qiclib ◄── qicsilver
+```
+
+## Modules
+
+| Module | What | Written by | Read by |
 |---|---|---|---|
-| `tapewyrm_archive.twrf` | **TWRF** raw flux capture (header + GW flux stream + markers) | `tw dump`, `tw drive flux` | `tw convert` |
-| `tapewyrm_archive.twti` | **TWTI** logical tape image (segments, states, provenance), written sparse; **TWTZ** = the same stream zstd-compressed (`.twtz`, like `.tar.zst`) | `tw convert` | qiclib, qicsilver |
-| `tapewyrm_archive.twvl` | **TWVL** extracted backup volume (bytes + hole map) | extract | qicsilver |
-| `tapewyrm_archive.types` | the types those files are made of (`CaptureHeader`, `Marker`, ...) | | |
-| `tapewyrm_archive.progress` | the no-op progress hook protocol shared by every library | | |
+| `tapewyrm_archive.twrf` | **TWRF** raw flux capture: header (rate, drive identity, commits) + Greaseweazle flux stream + Tapewyrm markers. Spec: [TWS-1](../../docs/spec/twrf.md). | `tw dump`, `tw drive flux` | `tw convert` |
+| `tapewyrm_archive.twti` | **TWTI** logical tape image: segments, per-sector state, provenance, written sparse. **TWTZ** (`.twtz`) is the same stream zstd-compressed. Spec: [TWS-2](../../docs/spec/twti.md). | `tw convert` | qiclib, `qicsilver` |
+| `tapewyrm_archive.twvl` | **TWVL** one extracted backup volume: bytes + hole map. Spec: [TWS-3](../../docs/spec/twvl.md). | `qicsilver extract` | `qicsilver tar` |
+| `tapewyrm_archive.types` | The types those files are made of (`CaptureHeader`, `Marker`, ...). | | |
+| `tapewyrm_archive.qic117` | Decoders for the QIC-117 report bytes stored in TWRF/TWTI headers (drive status, configuration, tape status, vendor ID). | | `tw`, qiclib |
+| `tapewyrm_archive.progress` | The progress-hook protocol (`Progress`, `NULL_PROGRESS`) every library loop reports through. | | |
+| `tapewyrm_archive._zstd` | Zstandard: stdlib `compression.zstd`, or its backport. Import zstd only through here. | | |
 
-It is the base of the package graph (`tapewyrm-cli` → archive ← `qiclib` ←
-`qicsilver`), so it is **stdlib-only** (plus `backports.zstd` below Python 3.14:
-the official backport of the stdlib `compression.zstd`, for TWTZ): no rich/click,
-no hardware code. See `STYLE.md` at the repository root.
+## Develop
 
-```bash
+```sh
 cd packages/tapewyrm-archive
 uv sync --extra dev
 uv run pytest
 ```
+
+Or, from the repository root, `just check tapewyrm-archive tapewyrm_archive`
+(lint, format check, mypy and tests). See the [root README](../../README.md)
+for the whole project.
