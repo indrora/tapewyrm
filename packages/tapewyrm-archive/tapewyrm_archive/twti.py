@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+
 log = logging.getLogger(__name__)
 
 MAGIC = b"TWTI"
@@ -82,8 +84,18 @@ class TapeImage:
 
     # --- persistence ---
 
-    def save(self, path: Path, segment_data: Callable[[int], bytes]) -> None:
-        """Write the image; ``segment_data(n)`` supplies each segment's bytes."""
+    def save(
+        self,
+        path: Path,
+        segment_data: Callable[[int], bytes],
+        *,
+        progress: Progress = NULL_PROGRESS,
+    ) -> None:
+        """Write the image; ``segment_data(n)`` supplies each segment's bytes.
+
+        ``progress`` gets one "writing image" task in segments: each is a
+        29 KB write, so a per-segment update is far off any hot path.
+        """
         hdr = json.dumps(self.header, indent=1).encode("utf-8")
         log.debug(
             "writing TWTI image %s: %d-byte header, %d segments",
@@ -96,8 +108,10 @@ class TapeImage:
             f.write(hdr)
             for e in self.entries:
                 f.write(_ENTRY.pack(e.state, e.erasures, e.data_len, e.excluded_mask))
-            for n in range(len(self.entries)):
-                f.write(segment_data(n).ljust(SEGMENT_STRIDE, b"\x00"))
+            with progress.task("writing image", total=len(self.entries), unit="segments") as bar:
+                for n in range(len(self.entries)):
+                    f.write(segment_data(n).ljust(SEGMENT_STRIDE, b"\x00"))
+                    bar.advance()
 
     @classmethod
     def open(cls, path: Path) -> TapeImage:

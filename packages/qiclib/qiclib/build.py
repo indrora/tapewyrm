@@ -11,6 +11,7 @@ Reed-Solomon correct each segment and write the image with
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from pathlib import Path
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twti import SEGMENT_STRIDE, VERSION, SegmentEntry, SegmentState, TapeImage
 
+from qiclib import cartridge as cartridge_mod
 from qiclib import merge
 from qiclib import segment as seg_mod
 from qiclib import volume as volume_mod
@@ -50,7 +52,18 @@ def build_image(
     """
     source_meta = sources
     log.debug("merging %d passes", len(passes))
-    merged = list(merge.union(passes))
+    union_stats = merge.UnionStats()
+    merged = list(merge.union(passes, progress=progress, stats=union_stats))
+    # "Added" = coordinates no earlier pass had (another track, or a re-read
+    # that got further); "fixed" = a CRC-good copy replacing a CRC-bad one.
+    log.info(
+        "merge: %s, %s sectors -> %s unique; later passes added %s, fixed %s CRC-bad",
+        _plural(union_stats.passes, "pass", "passes"),
+        f"{union_stats.seen:,}",
+        f"{union_stats.unique:,}",
+        f"{union_stats.filled_new:,}",
+        f"{union_stats.filled_upgraded:,}",
+    )
     log.debug("merged to %d sectors; locating the header segment", len(merged))
 
     # The header places right under any geometry; then the header's own
@@ -66,6 +79,7 @@ def build_image(
     by_seg = {s.seg: s for s in segs.values()}
 
     total = geom.total_segments()
+    _log_header(located, total)
     log.debug(
         "header geometry %s: %d segments, %d bad per the bad-sector map, %d placed",
         geom,
@@ -82,6 +96,7 @@ def build_image(
     # data. Record its mask so readers (qiclib.extract) size its hole right
     # instead of assuming a full 29 sectors.
     excluded = bsm.excluded_slots()
+    log.info("correcting %s segments (Reed-Solomon)...", f"{total:,}")
     with progress.task("correcting segments", total=total, unit="segments") as bar:
         for n in range(total):
             bar.advance()
@@ -106,6 +121,22 @@ def build_image(
         n_bad,
         n_missing,
         len(data),
+    )
+    tally = {state: 0 for state in SegmentState}
+    for entry in entries:
+        tally[entry.state] += 1
+    log.info(
+        "segments: %s clean, %s corrected, %s uncorrectable, %s missing, %s bad (map)",
+        *(
+            f"{tally[state]:,}"
+            for state in (
+                SegmentState.CLEAN,
+                SegmentState.CORRECTED,
+                SegmentState.UNCORRECTABLE,
+                SegmentState.MISSING,
+                SegmentState.BAD,
+            )
+        ),
     )
 
     first: dict = next((m["twrf"] for m in source_meta if "drive_config" in m["twrf"]), {})
@@ -136,7 +167,51 @@ def build_image(
     if not first:
         log.debug("no source capture carries drive_config; drive identity left empty")
     img = TapeImage(header=header, entries=entries)
-    log.info("writing %s...", out)
-    img.save(out, lambda n: data.get(n, b""))
-    log.info(f"wrote {out}: {total} segments {img.counts()}")
+    log.info("writing %s segments (%s) to %s...", f"{total:,}", _mb(total * SEGMENT_STRIDE), out)
+    started = time.perf_counter()
+    img.save(out, lambda n: data.get(n, b""), progress=progress)
+    log.info(
+        "wrote %s: %s in %.1f s",
+        out.name,
+        _mb(out.stat().st_size),
+        time.perf_counter() - started,
+    )
     return TapeImage.open(out)
+
+
+def _plural(count: int, one: str, many: str) -> str:
+    return f"{count:,} {one if count == 1 else many}"
+
+
+def _mb(size: int) -> str:
+    """A byte count as decimal megabytes, the unit rich's file-size bars use."""
+    return f"{size / 1e6:,.1f} MB"
+
+
+def _log_header(located: volume_mod.LocatedHeader, total: int) -> None:
+    """Say what the header segment told us: who the tape is and its layout.
+
+    Split over several lines so each stays readable when rich wraps the log
+    (tape names and the cartridge description can each be long).
+    """
+    vol, bsm, geom = located.vol, located.bsm, located.geometry
+    log.info(
+        "header: segment %d (%s), tape name %s, format code %d",
+        located.header.seg,
+        located.header_status.name.lower(),
+        repr(vol.tape_name.strip()) if vol.tape_name.strip() else "(none)",
+        vol.format_code,
+    )
+    log.info(
+        "geometry: %d tracks x %d segs/track = %s segments",
+        geom.tracks,
+        geom.segments_per_track,
+        f"{total:,}",
+    )
+    log.info(
+        "bad-sector map: %s whole segments + %s sectors",
+        f"{len(bsm.bad_segments):,}",
+        f"{len(bsm.bad_lsns):,}",
+    )
+    guess = cartridge_mod.guess(geom.tracks, geom.segments_per_track)
+    log.info("cartridge: %s", guess.describe())

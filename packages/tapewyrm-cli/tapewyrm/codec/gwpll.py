@@ -22,8 +22,10 @@ flux intervals cluster at 2, 3 and 4 cells -- exactly floppy HD timing.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
 log = logging.getLogger(__name__)
 
@@ -46,16 +48,22 @@ CONSERVATIVE = PLL(period_adj_pct=1, phase_adj_pct=10)
 # GW PLLTrack: the clock may drift at most +/-10% from nominal.
 CLOCK_MAX_ADJ = 0.10
 
+# [tapewyrm] Flux transitions between progress updates (see flux_to_bitcells).
+_PROGRESS_EVERY = 1 << 20
+
 
 def flux_to_bitcells(
     intervals: Iterable[int],
     sample_freq: float,
     clock: float,
     pll: PLL = AGGRESSIVE,
+    *,
+    progress: Progress = NULL_PROGRESS,
 ) -> bytearray:
     """Recover MFM bitcells (one 0/1 byte per cell) from flux tick intervals.
 
     ``clock`` is the nominal bitcell time in seconds (1e-6 for 500 kbit/s MFM).
+    ``progress`` gets one task counting flux transitions (``[tapewyrm]``).
     """
     bits = bytearray()  # [tapewyrm] was bitarray(endian='big')
     freq = sample_freq
@@ -81,40 +89,50 @@ def flux_to_bitcells(
     ticks = 0.0
     clock = clock_centre
 
-    for x in intervals:
-        # Gather enough ticks to generate at least one bitcell.
-        ticks += x / freq
-        if ticks < clock / 2:
-            n_short += 1  # [tapewyrm]
-            continue
+    # [tapewyrm] GW's loop below runs once per flux transition (hundreds of
+    # millions on a long track), so progress is reported from an outer loop
+    # over slices of _PROGRESS_EVERY transitions rather than from inside it.
+    # GW's loop body is unchanged apart from the extra indent; its locals
+    # (ticks, clock) carry across slices exactly as across iterations.
+    seq = intervals if isinstance(intervals, Sequence) else list(intervals)
+    with progress.task("PLL: flux -> bitcells", total=len(seq), unit="transitions") as bar:
+        for chunk_at in range(0, len(seq), _PROGRESS_EVERY):
+            chunk = seq[chunk_at : chunk_at + _PROGRESS_EVERY]
+            for x in chunk:
+                # Gather enough ticks to generate at least one bitcell.
+                ticks += x / freq
+                if ticks < clock / 2:
+                    n_short += 1  # [tapewyrm]
+                    continue
 
-        # Clock out zero or more 0s, followed by a 1.
-        zeros = 0
-        while True:
-            ticks -= clock
-            if ticks < clock / 2:
-                break
-            zeros += 1
-            bits.append(0)
-        bits.append(1)
+                # Clock out zero or more 0s, followed by a 1.
+                zeros = 0
+                while True:
+                    ticks -= clock
+                    if ticks < clock / 2:
+                        break
+                    zeros += 1
+                    bits.append(0)
+                bits.append(1)
 
-        # PLL: Adjust clock window position according to phase mismatch.
-        new_ticks = ticks * (1 - pll_phase_adj)
-        # [tapewyrm] GW distributes the adjusted clock over the emitted bits here
-        # to build its time array and walk index marks; we keep neither.
+                # PLL: Adjust clock window position according to phase mismatch.
+                new_ticks = ticks * (1 - pll_phase_adj)
+                # [tapewyrm] GW distributes the adjusted clock over the emitted bits here
+                # to build its time array and walk index marks; we keep neither.
 
-        # PLL: Adjust clock frequency according to phase mismatch.
-        if zeros <= 3:
-            # In sync: adjust clock by a fraction of the phase mismatch.
-            clock += ticks * pll_period_adj
-        else:
-            # Out of sync: adjust clock towards centre.
-            n_unsync += 1  # [tapewyrm]
-            clock += (clock_centre - clock) * pll_period_adj
-        # Clamp the clock's adjustment range.
-        clock = min(max(clock, clock_min), clock_max)
+                # PLL: Adjust clock frequency according to phase mismatch.
+                if zeros <= 3:
+                    # In sync: adjust clock by a fraction of the phase mismatch.
+                    clock += ticks * pll_period_adj
+                else:
+                    # Out of sync: adjust clock towards centre.
+                    n_unsync += 1  # [tapewyrm]
+                    clock += (clock_centre - clock) * pll_period_adj
+                # Clamp the clock's adjustment range.
+                clock = min(max(clock, clock_min), clock_max)
 
-        ticks = new_ticks
+                ticks = new_ticks
+            bar.advance(len(chunk))  # [tapewyrm]
 
     log.debug(
         "PLL done: %d bitcells; %d sub-half-cell intervals merged into the next, "

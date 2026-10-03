@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 from qiclib.types import RawSector
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
 from tapewyrm.types import FluxStream
 
@@ -54,6 +56,9 @@ SYNC_COUNT = 12
 A1_COUNT = 3
 C2_COUNT = 3
 CRC_LEN = 2
+
+# Items (bytes scanned) between progress updates in the byte-level loops.
+_PROGRESS_EVERY = 1 << 20
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +194,31 @@ def _find_mark(decoded: bytes, start: int) -> tuple[int, int] | None:
     return None
 
 
-def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
+@dataclass
+class ScanStats:
+    """What one :func:`recover_sectors_from_bytes` scan found, for the report.
+
+    ``sectors`` counts yielded sectors (``data_crc_ok`` + ``data_bad``);
+    ``id_only`` counts ID fields that no data field followed (dropped at an
+    index mark, replaced by the next ID, or cut off by the end of the stream).
+    Filled in when the scan finishes, so read it after consuming the iterator.
+    """
+
+    sectors: int = 0
+    data_crc_ok: int = 0
+    data_bad: int = 0
+    orphan_data: int = 0
+    id_only: int = 0
+    index_marks: int = 0
+    unknown_marks: int = 0
+
+
+def recover_sectors_from_bytes(
+    decoded: bytes,
+    *,
+    progress: Progress = NULL_PROGRESS,
+    stats: ScanStats | None = None,
+) -> Iterator[RawSector]:
     """Scan a decoded MFM **byte** stream and yield :class:`RawSector` objects.
 
     Recognizes:
@@ -200,6 +229,10 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
 
     An ID mark is paired with the next following data mark. ``id_crc_ok`` /
     ``data_crc_ok`` / ``deleted`` are set from the parsed marks and CRCs.
+
+    ``progress`` gets one task in bytes, moved at most every
+    ``_PROGRESS_EVERY`` bytes (checked once per mark, never per byte).
+    ``stats``, when given, is filled in with the scan's tallies at the end.
     """
     n = len(decoded)
     pos = 0
@@ -208,87 +241,104 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
     # mark (thousands per track), so they are counted rather than logged.
     n_index = n_orphan = n_unknown = n_dropped_id = n_yielded = n_data_bad = 0
     log.debug("scanning %d decoded MFM bytes for sector marks", n)
-
-    while pos < n:
-        found = _find_mark(decoded, pos)
-        if found is None:
-            log.debug("no further sync mark after byte %d of %d; ending scan", pos, n)
-            break
-        mark_at, mark = found
-        sync0 = decoded[mark_at]
-        field_start = mark_at + 4  # past 3 sync + mark byte
-
-        if sync0 == C2 and mark == IXAM:
-            # Segment boundary: any unpaired ID is dropped (no data field followed).
-            n_index += 1
-            if pending is not None:
-                n_dropped_id += 1
-            pending = None
-            pos = field_start
-            continue
-
-        if sync0 == A1 and mark == IDAM:
-            if field_start + ID_FIELD_LEN + CRC_LEN > n:
-                log.debug(
-                    "ID mark at byte %d truncated (stream ends at %d); ending scan", mark_at, n
-                )
+    with progress.task("scanning for sectors", total=n, unit="bytes") as bar:
+        next_update = _PROGRESS_EVERY
+        while pos < n:
+            found = _find_mark(decoded, pos)
+            if found is None:
+                log.debug("no further sync mark after byte %d of %d; ending scan", pos, n)
                 break
-            field = decoded[field_start : field_start + ID_FIELD_LEN]
-            stored = (decoded[field_start + ID_FIELD_LEN] << 8) | decoded[
-                field_start + ID_FIELD_LEN + 1
-            ]
-            mark_bytes = decoded[mark_at + 3 - A1_COUNT : mark_at + 4]  # 3xA1 + FE
-            computed = crc_ccitt(mark_bytes + field)
-            ftk, fsd, fsc, _size = field[0], field[1], field[2], field[3]
-            pending = (fsd, ftk, fsc, stored == computed)
-            pos = field_start + ID_FIELD_LEN + CRC_LEN
-            continue
+            mark_at, mark = found
+            if mark_at >= next_update:
+                bar.update(mark_at)
+                next_update = mark_at + _PROGRESS_EVERY
+            sync0 = decoded[mark_at]
+            field_start = mark_at + 4  # past 3 sync + mark byte
 
-        if sync0 == A1 and mark in (DAM_NORMAL, DAM_DELETED):
-            if field_start + SECTOR_SIZE + CRC_LEN > n:
-                log.debug(
-                    "data mark %#04x at byte %d truncated (stream ends at %d); ending scan",
-                    mark,
-                    mark_at,
-                    n,
+            if sync0 == C2 and mark == IXAM:
+                # Segment boundary: any unpaired ID is dropped (no data field followed).
+                n_index += 1
+                if pending is not None:
+                    n_dropped_id += 1
+                pending = None
+                pos = field_start
+                continue
+
+            if sync0 == A1 and mark == IDAM:
+                if field_start + ID_FIELD_LEN + CRC_LEN > n:
+                    log.debug(
+                        "ID mark at byte %d truncated (stream ends at %d); ending scan", mark_at, n
+                    )
+                    break
+                field = decoded[field_start : field_start + ID_FIELD_LEN]
+                stored = (decoded[field_start + ID_FIELD_LEN] << 8) | decoded[
+                    field_start + ID_FIELD_LEN + 1
+                ]
+                mark_bytes = decoded[mark_at + 3 - A1_COUNT : mark_at + 4]  # 3xA1 + FE
+                computed = crc_ccitt(mark_bytes + field)
+                ftk, fsd, fsc, _size = field[0], field[1], field[2], field[3]
+                if pending is not None:
+                    n_dropped_id += 1  # the previous ID never got its data field
+                pending = (fsd, ftk, fsc, stored == computed)
+                pos = field_start + ID_FIELD_LEN + CRC_LEN
+                continue
+
+            if sync0 == A1 and mark in (DAM_NORMAL, DAM_DELETED):
+                if field_start + SECTOR_SIZE + CRC_LEN > n:
+                    log.debug(
+                        "data mark %#04x at byte %d truncated (stream ends at %d); ending scan",
+                        mark,
+                        mark_at,
+                        n,
+                    )
+                    break
+                data = decoded[field_start : field_start + SECTOR_SIZE]
+                stored = (decoded[field_start + SECTOR_SIZE] << 8) | decoded[
+                    field_start + SECTOR_SIZE + 1
+                ]
+                mark_bytes = decoded[mark_at : mark_at + 4]  # 3xA1 + DAM
+                computed = crc_ccitt(mark_bytes + data)
+                data_crc_ok = stored == computed
+                if not data_crc_ok:
+                    n_data_bad += 1
+                deleted = mark == DAM_DELETED
+
+                if pending is not None:
+                    fsd, ftk, fsc, id_crc_ok = pending
+                else:
+                    # Orphan data field with no preceding ID; keep it but flag the ID
+                    # as unknown/bad so placement can decide what to do.
+                    n_orphan += 1
+                    fsd = ftk = fsc = 0
+                    id_crc_ok = False
+                n_yielded += 1
+                yield RawSector(
+                    fsd=fsd,
+                    ftk=ftk,
+                    fsc=fsc,
+                    data=bytes(data),
+                    id_crc_ok=id_crc_ok,
+                    data_crc_ok=data_crc_ok,
+                    deleted=deleted,
                 )
-                break
-            data = decoded[field_start : field_start + SECTOR_SIZE]
-            stored = (decoded[field_start + SECTOR_SIZE] << 8) | decoded[
-                field_start + SECTOR_SIZE + 1
-            ]
-            mark_bytes = decoded[mark_at : mark_at + 4]  # 3xA1 + DAM
-            computed = crc_ccitt(mark_bytes + data)
-            data_crc_ok = stored == computed
-            if not data_crc_ok:
-                n_data_bad += 1
-            deleted = mark == DAM_DELETED
+                pending = None
+                pos = field_start + SECTOR_SIZE + CRC_LEN
+                continue
 
-            if pending is not None:
-                fsd, ftk, fsc, id_crc_ok = pending
-            else:
-                # Orphan data field with no preceding ID; keep it but flag the ID
-                # as unknown/bad so placement can decide what to do.
-                n_orphan += 1
-                fsd = ftk = fsc = 0
-                id_crc_ok = False
-            n_yielded += 1
-            yield RawSector(
-                fsd=fsd,
-                ftk=ftk,
-                fsc=fsc,
-                data=bytes(data),
-                id_crc_ok=id_crc_ok,
-                data_crc_ok=data_crc_ok,
-                deleted=deleted,
-            )
-            pending = None
-            pos = field_start + SECTOR_SIZE + CRC_LEN
-            continue
-
-        # Unknown mark: step past the sync run and keep scanning.
-        n_unknown += 1
-        pos = mark_at + 1
+            # Unknown mark: step past the sync run and keep scanning.
+            n_unknown += 1
+            pos = mark_at + 1
+        if pending is not None:
+            n_dropped_id += 1  # the stream ended between an ID and its data
+        bar.update(n)
+    if stats is not None:
+        stats.sectors = n_yielded
+        stats.data_crc_ok = n_yielded - n_data_bad
+        stats.data_bad = n_data_bad
+        stats.orphan_data = n_orphan
+        stats.id_only = n_dropped_id
+        stats.index_marks = n_index
+        stats.unknown_marks = n_unknown
 
     log.debug(
         "sector scan done: %d sectors (%d data-CRC bad, %d orphan data fields), "
@@ -364,7 +414,14 @@ _MAX_FIELD_BYTES = 1100
 
 
 def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
-    """Decode MFM bitcells (one 0/1 byte per cell) into a byte stream.
+    """Decode MFM bitcells into a sync-aligned byte stream (see :func:`frame_bitcells`)."""
+    return frame_bitcells(cells)[0]
+
+
+def frame_bitcells(
+    cells: bytes | bytearray, *, progress: Progress = NULL_PROGRESS
+) -> tuple[bytes, int]:
+    """Decode MFM bitcells (one 0/1 byte per cell) into ``(bytes, sync runs)``.
 
     MFM has no byte alignment of its own: it comes from the A1 sync marks. We
     find every run of three A1 syncs, decode the bytes that follow *aligned to
@@ -372,6 +429,10 @@ def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
     next sync run, and concatenate the pieces. Each piece starts with
     ``A1 A1 A1 <mark>``, which is exactly what :func:`recover_sectors_from_bytes`
     scans for. Bytes between fields (gaps) are not needed and are skipped.
+
+    The sync-run count is returned for the report. ``progress`` gets one task
+    counting sync runs; each run decodes up to ``_MAX_FIELD_BYTES`` bytes, so a
+    per-run update is thousands of cells apart and costs nothing measurable.
     """
     text = bytes(cells).translate(bytes.maketrans(b"\x00\x01", b"01"))
     starts: list[int] = []
@@ -382,16 +443,22 @@ def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
 
     log.debug("found %d A1 sync runs in %d bitcells; decoding fields", len(starts), len(text))
     out = bytearray()
-    for k, s in enumerate(starts):
-        nxt = starts[k + 1] if k + 1 < len(starts) else len(text)
-        for j in range(min(_MAX_FIELD_BYTES, (nxt - s) // 16)):
-            word = text[s + 16 * j : s + 16 * j + 16]
-            out.append(int(word[1::2], 2))
-    return bytes(out)
+    with progress.task("framing MFM bytes", total=len(starts), unit="sync runs") as bar:
+        for k, s in enumerate(starts):
+            nxt = starts[k + 1] if k + 1 < len(starts) else len(text)
+            for j in range(min(_MAX_FIELD_BYTES, (nxt - s) // 16)):
+                word = text[s + 16 * j : s + 16 * j + 16]
+                out.append(int(word[1::2], 2))
+            bar.advance()
+    return bytes(out), len(starts)
 
 
 def recover_sectors_from_flux(
-    intervals: list[int], sample_clock_hz: int, rate_kbps: int
+    intervals: list[int],
+    sample_clock_hz: int,
+    rate_kbps: int,
+    *,
+    progress: Progress = NULL_PROGRESS,
 ) -> list[RawSector]:
     """Flux tick intervals -> GW PLL -> MFM bytes -> QIC sectors.
 
@@ -405,6 +472,14 @@ def recover_sectors_from_flux(
         sample_clock_hz,
         rate_kbps,
     )
-    cells = gwpll.flux_to_bitcells(intervals, sample_clock_hz, 1 / (rate_kbps * 2000))
+    cells = gwpll.flux_to_bitcells(
+        intervals, sample_clock_hz, bitcell_seconds(rate_kbps), progress=progress
+    )
     log.debug("PLL produced %d bitcells; framing MFM bytes", len(cells))
-    return list(recover_sectors_from_bytes(bitcells_to_bytes(cells)))
+    decoded, _runs = frame_bitcells(cells, progress=progress)
+    return list(recover_sectors_from_bytes(decoded, progress=progress))
+
+
+def bitcell_seconds(rate_kbps: int) -> float:
+    """The MFM bitcell time: half a data bit (1 us at 500 kbit/s)."""
+    return 1 / (rate_kbps * 2000)

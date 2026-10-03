@@ -94,9 +94,11 @@ class _AmountColumn(ProgressColumn):
         if unit == "bytes":
             text = decimal(int(done)) + (f"/{decimal(int(total))}" if total else "")
         elif unit == "s":
-            text = f"{done:.0f}" + (f"/{total:.0f}" if total else "") + " s"
+            text = f"{done:,.0f}" + (f"/{total:,.0f}" if total else "") + " s"
         else:
-            text = f"{done:.0f}" + (f"/{total:.0f}" if total else "") + (f" {unit}" if unit else "")
+            text = (
+                f"{done:,.0f}" + (f"/{total:,.0f}" if total else "") + (f" {unit}" if unit else "")
+            )
         return Text(text, style="progress.download")
 
 

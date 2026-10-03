@@ -32,12 +32,18 @@ import logging
 import struct
 from dataclasses import dataclass, field
 
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+
 from tapewyrm.link.protocol import Marker
 
 log = logging.getLogger(__name__)
 
 _FLUXOP_INDEX = 1
 _FLUXOP_SPACE = 2
+
+# Stream bytes between progress updates: often enough for a smooth bar, rare
+# enough that the update costs nothing next to the per-byte loop.
+_PROGRESS_EVERY = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -96,87 +102,108 @@ def _n28(b: bytes, i: int) -> int:
     )
 
 
-def parse(blob: bytes) -> ParsedStream:
-    """Decode a capture stream. Raises ``ValueError`` on an unknown opcode."""
+def parse(blob: bytes, *, progress: Progress = NULL_PROGRESS) -> ParsedStream:
+    """Decode a capture stream. Raises ``ValueError`` on an unknown opcode.
+
+    ``progress`` gets one "parsing flux stream" task in bytes. This loop runs
+    once per stream byte (tens of millions per track), so the progress update
+    is hoisted out of it: the scan runs in slices of ``_PROGRESS_EVERY``
+    bytes (an inner ``while i < limit``) and the bar moves once per slice.
+    The inner loop's own stop conditions set ``stop`` and break; the outer
+    loop then breaks too, which is exactly the old single-loop ``break``.
+    """
     out = ParsedStream()
     iv = out.intervals
     i, n, pending, t, csum, nbytes = 0, len(blob), 0, 0, 0, 0
     markers = {m.value: m for m in Marker}
     # Dead-time SPACEs are common on a real capture; tally, don't log each.
     n_dead = 0
+    stop = False
     log.debug("parsing %d-byte capture stream", n)
-    while i < n:
-        c = blob[i]
-        if c == 0:
-            log.debug("end-of-stream NUL at byte %d of %d; stopping", i, n)
-            out.terminated = True
-            break
-        if c < 250:
-            v = pending + c
-            iv.append(v)
-            t += v
-            pending = 0
-            csum += c
-            nbytes += 1
-            i += 1
-        elif c < 255:
-            if i + 1 >= n:
-                log.debug("2-byte interval %#04x cut at byte %d of %d; stopping", c, i, n)
-                break
-            v = pending + 250 + (c - 250) * 255 + blob[i + 1] - 1
-            iv.append(v)
-            t += v
-            pending = 0
-            csum += c + blob[i + 1]
-            nbytes += 2
-            i += 2
-        else:
-            if i + 1 >= n:
-                log.debug("0xFF opcode escape cut at byte %d of %d; stopping", i, n)
-                break
-            op = blob[i + 1]
-            if op in (_FLUXOP_INDEX, _FLUXOP_SPACE) and i + 6 > n:
-                log.debug("flux opcode %d cut at byte %d of %d; stopping", op, i, n)
-                break  # cut mid-opcode: an aborted capture ends wherever USB stopped
-            if op == _FLUXOP_INDEX:
-                out.index_ticks.append(t + _n28(blob, i + 2))
-                i += 6
-            elif op == _FLUXOP_SPACE:
-                val = _n28(blob, i + 2)
-                if i + 6 < n and blob[i + 6] == 249:  # in-loop long interval
-                    v = pending + val + 249
+    with progress.task("parsing flux stream", total=n, unit="bytes") as bar:
+        while i < n and not stop:
+            limit = min(n, i + _PROGRESS_EVERY)
+            while i < limit:
+                c = blob[i]
+                if c == 0:
+                    log.debug("end-of-stream NUL at byte %d of %d; stopping", i, n)
+                    out.terminated = True
+                    stop = True
+                    break
+                if c < 250:
+                    v = pending + c
                     iv.append(v)
                     t += v
                     pending = 0
-                    csum += sum(blob[i : i + 7])
-                    nbytes += 7
-                    i += 7
-                else:  # dead time, carried into the next interval
-                    n_dead += 1
-                    pending += val
-                    i += 6
-            elif op in markers:
-                plen = blob[i + 2]
-                payload = bytes(blob[i + 3 : i + 3 + plen])
-                kind = markers[op]
-                out.markers.append((kind, payload, len(iv)))
-                log.debug(
-                    "marker %s (%d-byte payload) at byte %d, interval %d",
-                    kind.name,
-                    plen,
-                    i,
-                    len(iv),
-                )
-                if kind is Marker.SESSION_START and plen >= 6:
-                    out.sample_clock_hz = struct.unpack_from("<I", payload, 2)[0]
-                    log.debug("SESSION_START: sample clock %d Hz", out.sample_clock_hz)
-                elif kind is Marker.END and plen >= 13:
-                    out.end = StreamEnd(*struct.unpack("<BIII", payload[:13]))
-                    log.debug("END marker: %r", out.end)
-                i += 3 + plen
-            else:
-                log.debug("unknown stream opcode %#04x at byte %d; refusing", op, i)
-                raise ValueError(f"unknown stream opcode {op:#04x} at byte {i}")
+                    csum += c
+                    nbytes += 1
+                    i += 1
+                elif c < 255:
+                    if i + 1 >= n:
+                        log.debug("2-byte interval %#04x cut at byte %d of %d; stopping", c, i, n)
+                        stop = True
+                        break
+                    v = pending + 250 + (c - 250) * 255 + blob[i + 1] - 1
+                    iv.append(v)
+                    t += v
+                    pending = 0
+                    csum += c + blob[i + 1]
+                    nbytes += 2
+                    i += 2
+                else:
+                    if i + 1 >= n:
+                        log.debug("0xFF opcode escape cut at byte %d of %d; stopping", i, n)
+                        stop = True
+                        break
+                    op = blob[i + 1]
+                    if op in (_FLUXOP_INDEX, _FLUXOP_SPACE) and i + 6 > n:
+                        log.debug("flux opcode %d cut at byte %d of %d; stopping", op, i, n)
+                        # Cut mid-opcode: an aborted capture ends wherever USB stopped.
+                        stop = True
+                        break
+                    if op == _FLUXOP_INDEX:
+                        out.index_ticks.append(t + _n28(blob, i + 2))
+                        i += 6
+                    elif op == _FLUXOP_SPACE:
+                        val = _n28(blob, i + 2)
+                        if i + 6 < n and blob[i + 6] == 249:  # in-loop long interval
+                            v = pending + val + 249
+                            iv.append(v)
+                            t += v
+                            pending = 0
+                            csum += sum(blob[i : i + 7])
+                            nbytes += 7
+                            i += 7
+                        else:  # dead time, carried into the next interval
+                            n_dead += 1
+                            pending += val
+                            i += 6
+                    elif op in markers:
+                        plen = blob[i + 2]
+                        payload = bytes(blob[i + 3 : i + 3 + plen])
+                        kind = markers[op]
+                        out.markers.append((kind, payload, len(iv)))
+                        log.debug(
+                            "marker %s (%d-byte payload) at byte %d, interval %d",
+                            kind.name,
+                            plen,
+                            i,
+                            len(iv),
+                        )
+                        if kind is Marker.SESSION_START and plen >= 6:
+                            out.sample_clock_hz = struct.unpack_from("<I", payload, 2)[0]
+                            log.debug("SESSION_START: sample clock %d Hz", out.sample_clock_hz)
+                        elif kind is Marker.END and plen >= 13:
+                            out.end = StreamEnd(*struct.unpack("<BIII", payload[:13]))
+                            log.debug("END marker: %r", out.end)
+                        i += 3 + plen
+                    else:
+                        log.debug("unknown stream opcode %#04x at byte %d; refusing", op, i)
+                        raise ValueError(f"unknown stream opcode {op:#04x} at byte {i}")
+            bar.update(i)
+        # A NUL or a cut opcode ends the parse early; whatever follows is not
+        # stream, so the bar is done either way.
+        bar.update(n)
     out.data_bytes = nbytes
     out.trailing_ticks = pending
     out.checksum = csum & 0xFFFFFFFF

@@ -40,3 +40,29 @@ def testholes_from_sparse_extents():
     s.add(10, b"x" * 20)
     s.add(50, b"y" * 10)
     assert find_holes(s, 100) == [[0, 10], [30, 50], [60, 100]]
+
+
+def test_tape_image_save_reports_one_step_per_segment(tmp_path):
+    """save() opens one "writing image" task in segments and finishes it."""
+    from contextlib import contextmanager
+
+    seen: list[tuple[str, float | None, str]] = []
+    position = []
+
+    class _Task:
+        def advance(self, amount: float = 1) -> None:
+            position.append(amount)
+
+        def update(self, completed: float) -> None:
+            raise AssertionError("save advances; it never jumps")
+
+    class _Progress:
+        @contextmanager
+        def task(self, description, total=None, unit=""):
+            seen.append((description, total, unit))
+            yield _Task()
+
+    img = TapeImage(header={"segment_count": 3}, entries=[SegmentEntry(SegmentState.MISSING)] * 3)
+    img.save(tmp_path / "t.twti", lambda n: b"", progress=_Progress())
+    assert seen == [("writing image", 3, "segments")]
+    assert sum(position) == 3
