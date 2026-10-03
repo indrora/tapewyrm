@@ -95,15 +95,14 @@ def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, r
 
 
 @cli.command()
-@click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option(
-    "-o", "--out", "out", required=True, type=click.Path(file_okay=False, path_type=Path),
-    help="directory for the volume files (vol-NN.twvl)",
-)  # fmt: skip
+@click.argument(
+    "image", metavar="IMAGE", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.argument("outdir", metavar="OUTDIR", type=click.Path(file_okay=False, path_type=Path))
 @click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
 @click.pass_obj
-def extract(app: AppContext, image: Path, out: Path, volume_profile: str) -> None:
-    """TWTI tape image -> one TWVL file per backup volume.
+def extract(app: AppContext, image: Path, outdir: Path, volume_profile: str) -> None:
+    """TWTI tape image -> one TWVL file per backup volume (OUTDIR/vol-NN.twvl).
 
     Reads the volume table through the volume profile `qicsilver identify` would
     pick, decompresses QIC-122 data and lays each volume out by its QIC-113
@@ -112,10 +111,10 @@ def extract(app: AppContext, image: Path, out: Path, volume_profile: str) -> Non
     from qiclib.extract import extract as do_extract
     from qiclib.volume_profile import VolumeProfileError
 
-    log.debug("extracting %s to %s (volume profile %r)", image, out, volume_profile)
+    log.debug("extracting %s to %s (volume profile %r)", image, outdir, volume_profile)
     try:
         with app.progress() as prog:
-            written = do_extract(image, out, volume_profile=volume_profile, progress=prog)
+            written = do_extract(image, outdir, volume_profile=volume_profile, progress=prog)
     except (ValueError, VolumeProfileError) as exc:
         log.debug("extract failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
@@ -124,19 +123,20 @@ def extract(app: AppContext, image: Path, out: Path, volume_profile: str) -> Non
 
 
 @cli.command()
-@click.argument("volume", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option(
-    "-o", "--out", "out", required=True, type=click.Path(dir_okay=False, path_type=Path),
-    help="tar file to write",
-)  # fmt: skip
+@click.argument(
+    "volume", metavar="VOLUME", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.argument("output", metavar="OUTPUT", type=click.Path(dir_okay=False, path_type=Path))
 @click.option(
     "--report", type=click.Path(dir_okay=False, path_type=Path), default=None,
-    help="damage report (default: OUT.damaged.txt)",
+    help="damage report (default: OUTPUT.damaged.txt)",
 )  # fmt: skip
 @click.option("--skip-damaged", is_flag=True, help="leave damaged files out of the tar")
 @click.pass_obj
-def tar(app: AppContext, volume: Path, out: Path, report: Path | None, skip_damaged: bool) -> None:
-    """TWVL volume -> pax tar of the backup's files, plus a damage report.
+def tar(
+    app: AppContext, volume: Path, output: Path, report: Path | None, skip_damaged: bool
+) -> None:
+    """TWVL volume -> pax tar OUTPUT of the backup's files, plus a damage report.
 
     Keeps the backup's own paths (long Windows 95 names), modification times
     and DOS attributes (pax header TAPEWYRM.dos_attributes). Files with bytes
@@ -144,11 +144,11 @@ def tar(app: AppContext, volume: Path, out: Path, report: Path | None, skip_dama
     """
     from qicsilver.tar import write_tar
 
-    log.debug("tar %s -> %s", volume, out)
+    log.debug("tar %s -> %s", volume, output)
     try:
         with app.progress() as prog:
             res = write_tar(
-                volume, out, report_path=report, skip_damaged=skip_damaged, progress=prog
+                volume, output, report_path=report, skip_damaged=skip_damaged, progress=prog
             )
     except ValueError as exc:
         log.debug("tar failed: %r", exc)

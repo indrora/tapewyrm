@@ -1,8 +1,8 @@
 """Errors the archive readers raise for files they cannot trust.
 
-Every reader in this package (TWTI/TWTZ in ``twti``, TWVL in ``twvl``)
-refuses a file that is cut short or does not follow its spec (TWS-2 section
-9.2, TWS-3 section 6.2) rather than hand back short or misplaced data as if
+Every reader in this package (TWRF in ``twrf``, TWTI/TWTZ in ``twti``, TWVL
+in ``twvl``) refuses a file that is cut short or does not follow its spec
+(TWS-1 section 8.2, TWS-2 section 9.2, TWS-3 section 6.2) rather than hand back short or misplaced data as if
 it were the tape. Both errors are ``ValueError`` subclasses, so the CLIs'
 existing ``except ValueError`` turns them into a one-line error and exit 1
 (STYLE.md section 2.5); callers that care which it was can catch these.
@@ -18,7 +18,7 @@ from os import PathLike
 
 
 class MalformedFileError(ValueError):
-    """A TWTI, TWTZ or TWVL file that breaks its format's rules."""
+    """A TWRF, TWTI, TWTZ or TWVL file that breaks its format's rules."""
 
     def __init__(
         self, path: str | PathLike[str], kind: str, problem: str, *, verdict: str = "malformed"

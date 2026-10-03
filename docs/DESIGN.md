@@ -622,8 +622,8 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 | `tw drive micro up\|down` | micro-step the head |
 | `tw drive flux` | run the tape for `--seconds` under a chosen motion and record a TWRF (diagnostic, §6A.4) |
 | `tw drive scope` | edge-log TRK0 / INDEX / WRPROT / pin 34 after optional STEP pulses (`SCOPE` verb) |
-| `tw dump --tracks 0-27 --out DIR [--check]` | one Logical Forward pass per track → `DIR/track-NN.twrf` (+ `dump.jsonl`); health-checked (§6.3) |
-| `tw convert SOURCES… -o IMAGE` | TWRF dumps → TWTI image (`.twtz` suffix: zstd); several dumps of one tape merge (§6A.5) |
+| `tw dump DIR [TRACKS] [--check]` | one Logical Forward pass per track (TRACKS such as `0-27`; default: every track of the format the drive reports) → `DIR/track-NN.twrf` (+ `dump.jsonl`); health-checked (§6.3) |
+| `tw convert SOURCE… IMAGE` | TWRF dumps → TWTI image (`.twtz` suffix: zstd); several dumps of one tape merge (§6A.5) |
 | `tw flash IMAGE [--dfu]` | firmware via the GW-compatible application bootloader (or DFU) |
 | `tw dfu IMAGE` | recovery / first flash via the AT32 ROM bootloader (wraps `dfu-util`) |
 
@@ -632,8 +632,8 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 | Command | Does |
 |---|---|
 | `qicsilver identify IMAGE [--json] [--volume-profile P] [--raw]` | cartridge guess, header fields, dates, bad sectors, volume table — from the header and VTBL segments only |
-| `qicsilver extract IMAGE -o DIR [--volume-profile P]` | `DIR/vol-NN.twvl`, one per volume: QIC-122 decoded, holes recorded (§7.7) |
-| `qicsilver tar VOLUME -o OUT.tar [--report R] [--skip-damaged]` | TWVL → pax tar + damage report (default `OUT.tar.damaged.txt`; was `contrib/qic2tar.py`) |
+| `qicsilver extract IMAGE DIR [--volume-profile P]` | `DIR/vol-NN.twvl`, one per volume: QIC-122 decoded, holes recorded (§7.7) |
+| `qicsilver tar VOLUME OUT.tar [--report R] [--skip-damaged]` | TWVL → pax tar + damage report (default `OUT.tar.damaged.txt`; was `contrib/qic2tar.py`) |
 
 **Shared front end (`STYLE.md` §2.5).** Both CLIs take the same global flags — `--progress` (rich progress bars), `-v` (debug) and `-q` / `-qq` (warnings / errors only) — the log level moves around INFO — and subcommands may not reuse `-v`/`-q`. Command *results* (status lines, summaries, `--json`) go to **stdout** via `click.echo`, so they pipe; the library's narrative goes through `logging`, and both it and the progress bars go to **stderr** through **one shared rich console**, because rich's live display tears if anything else writes to the terminal while bars are up. Each CLI has its own `console.py` (the two are kept identical by hand) rather than a shared presentation package, so neither CLI depends on the other. The libraries never import rich or click: they log through `logging` (log before acting; every guard logs at debug, with lazy `%` arguments; hot paths log one summary, not per item) and report progress through the `tapewyrm_archive.progress.Progress` protocol, whose default `NULL_PROGRESS` costs nothing. `ValueError` from a library becomes a `click.ClickException` at the CLI edge. Heavy imports happen inside the command functions so `--help` stays fast.
 
@@ -719,7 +719,7 @@ Multiple passes of the same `TPT` are independent runs in (or across) captures; 
 
 - **One file per pass.** *Superseded:* the multi-run container. Each file holds exactly one run (`track-NN.twrf`, one Logical Forward pass); a dump directory is the "stack", and `dump.jsonl` logs every pass. Simpler to stream, to re-take one track, and to hand `convert` any mix of dumps.
 - **Geometry is not in the capture.** The drive cannot be trusted to know it (a basic drive lacks Report Format Segments) and the tape already says it: `convert` reads geometry from the **header segment** (§7.3). The `segments_per_track`/`tracks` header fields stay for synthetic captures and are 0 in real ones.
-- **TWRF v2 — self-describing captures.** The header gained the drive's **raw QIC-117 report bytes** at capture time (Report Drive Status, Drive Configuration, ROM Version, Vendor ID, Tape Status) and the `tw` and firmware **git commits**. The bit rate stored in the header comes from Drive Configuration, so decode never assumes a rate (§2.2), and the drive's tape-type opinion travels with the flux for `identify` to compare against the header's (§7.8). All v2 fields are optional; v1 files still load, with them unset.
+- **TWRF v2 — self-describing captures.** The header gained the drive's **raw QIC-117 report bytes** at capture time (Report Drive Status, Drive Configuration, ROM Version, Vendor ID, Tape Status) and the `tw` and firmware **git commits**. The bit rate stored in the header comes from Drive Configuration, so decode never assumes a rate (§2.2), and the drive's tape-type opinion travels with the flux for `identify` to compare against the header's (§7.8). Every member is required (the drive reports may be null); v1 captures and headerless pre-TWRF `.raw` streams are not read.
 
 ### 7.2 Tape marker opcodes (shared firmware/host header)
 Markers ride the GW opcode-escape channel, so they can never be misread as flux.
@@ -874,7 +874,7 @@ The formulas stay in code, keyed by standard — they are spec arithmetic every 
 *Invariant:* one lease, device-held, granted to one engine at a time → control and flux can never collide, because the host has no verb to express it.
 
 **Trace C — a whole recovery, as built (each arrow is a file):**
-`tw drive select` / `tw drive status` (is it there, is the tape referenced?) → `tw dump --tracks 0-27 --out dump1/` (per track: wind to the track's start, Trace B, health check; §6.3) → `track-00.twrf … track-27.twrf` → *(optional: `tw dump` the weak tracks again into `dump2/`)* → `tw convert dump1/ dump2/ -o tape.twti` (gwstream → PLL → MFM per capture; merge passes; locate the header; place; BSM; RS; §6A.5) → `tape.twti` (or `.twtz`) → `qicsilver identify tape.twti` (cartridge, header, volume table; §7.8) → `qicsilver extract tape.twti -o vols/` (volume profile, QIC-122, holes; §7.7) → `vols/vol-00.twvl …` → `qicsilver tar vols/vol-00.twvl -o backup.tar` (QIC-113 tree → pax tar + damage report; §7.5).
+`tw drive select` / `tw drive status` (is it there, is the tape referenced?) → `tw dump dump1/ 0-27` (per track: wind to the track's start, Trace B, health check; §6.3) → `track-00.twrf … track-27.twrf` → *(optional: `tw dump` the weak tracks again into `dump2/`)* → `tw convert dump1/ dump2/ tape.twti` (gwstream → PLL → MFM per capture; merge passes; locate the header; place; BSM; RS; §6A.5) → `tape.twti` (or `.twtz`) → `qicsilver identify tape.twti` (cartridge, header, volume table; §7.8) → `qicsilver extract tape.twti vols/` (volume profile, QIC-122, holes; §7.7) → `vols/vol-00.twvl …` → `qicsilver tar vols/vol-00.twvl backup.tar` (QIC-113 tree → pax tar + damage report; §7.5).
 *Representation:* flux exists only in TWRF; sectors and RS only between TWRF and TWTI; backup formats only after TWTI. Each stage can be re-run alone, and only the first needs the drive.
 
 ---

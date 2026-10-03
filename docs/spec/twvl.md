@@ -195,7 +195,7 @@ All members below are REQUIRED of a writer. A member whose value is
 | `data_section_size` | integer or null            | File Set Data Section size from the VTBL entry (copy of `vtbl.data_section_size`). `null` when the volume profile does not define the field. |
 | `dir_section_size`  | integer or null            | File Set Directory Section size from the VTBL entry (copy of `vtbl.dir_section_size`). `null` when the volume profile does not define the field. |
 | `directory_offset`  | integer or null            | Offset in the volume bytes at which the File Set Directory Section starts, when the writer knows it exactly; otherwise `null` (Section 4.4). |
-| `volume_size`       | integer                    | Length in bytes of the volume bytes (Section 4.1). Files written before this member was added lack it; readers MUST accept its absence (Section 6.2, rule 6). |
+| `volume_size`       | integer                    | Length in bytes of the volume bytes (Section 4.1), a non-negative integer. Readers MUST reject a header that lacks it (Section 6.2, rule 3). |
 | `holes`             | array of [integer, integer]| Byte ranges `[start, end)` of the volume bytes that were not recovered (Section 5). Empty array when none. |
 | `lost_segments`     | array of integer           | Segment numbers, within the source image, of the volume's segments that were not recovered (Section 5). Empty array when none. |
 | `source_image`      | string                     | The TWTI or TWTZ image the volume was extracted from, as the name of the directory that held it, `/`, and its file name (e.g. `tapes/jc.twtz` for `/Users/x/tapes/jc.twtz`), or the bare file name when it was given without a directory (`jc.twtz`). Never an absolute path, and nothing above that one directory (Section 8.2). Informative only. |
@@ -423,7 +423,9 @@ can have holes and no lost segments.
 3. A reader MUST reject a file shorter than the 10-byte preamble,
    a file whose Header Length exceeds the bytes remaining after the
    preamble, and a file whose header is not a valid UTF-8 JSON object or
-   whose `format` member, when present, is not `"TWVL"`.
+   whose `format` member, when present, is not `"TWVL"`, and a file
+   whose header lacks `volume_size` or holds anything but a non-negative
+   integer there. The error MUST name the file and the member.
 4. A reader MUST ignore header members it does not recognize, at the
    top level and inside `vtbl` and `drive`.
 5. A reader MUST treat bytes inside a hole as missing. When it returns
@@ -434,9 +436,7 @@ can have holes and no lost segments.
    reported as damaged (for example, in a damage report), even if the
    reader still writes it out zero-filled.
 6. A reader MUST reject a truncated file: one whose volume bytes are
-   shorter than `volume_size`, or, when `volume_size` is absent, shorter
-   than the largest `end` in `holes` or than `directory_offset` (no
-   writer puts either past the end, Section 5). The error MUST name the
+   shorter than `volume_size`. The error MUST name the
    file and SHOULD state the length expected and the length found. When
    a reader is asked for a range that extends past the end of the volume
    bytes, it MUST count the bytes past the end as missing, exactly as if
@@ -695,7 +695,7 @@ bytes missing.
 
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
-| 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. Same date, before release: added `volume_size`; readers MUST reject truncated files (Section 6.2); `source_image` records only the directory name and file name. |
+| 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. Same date, before release: added `volume_size`, which is required, and readers MUST reject a header without it; readers MUST reject truncated files (Section 6.2); `source_image` records only the directory name and file name. |
 
 ## Author's Address
 

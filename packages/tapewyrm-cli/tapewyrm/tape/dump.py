@@ -289,18 +289,53 @@ def summarize(path: Path) -> tuple[CaptureHeader, gwstream.ParsedStream, list]:
     return hdr, ps, mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, hdr.rate_kbps)
 
 
+def tracks_for_tape(identity: CaptureHeader) -> list[int]:
+    """Every track of the loaded cartridge, 0..N-1, from the drive's reports.
+
+    This is what ``tw dump OUTDIR`` with no TRACKS captures. N comes from
+    :func:`qiclib.geometry.track_count` for the format and width in Report Tape
+    Status (cmd 33), so a QIC-80 tape on 0.250 in tape gives 0..27. Defaulting
+    to the whole tape is safe because dumping only reads, and every pass is
+    health-checked anyway. But a guessed count is not: if the drive can't say
+    what format the tape is, we refuse and ask for explicit tracks rather than
+    assume one (QIC-40 has 20 tracks, QIC-80 28, QIC-3010/3020 40).
+    """
+    from qiclib.geometry import track_count
+
+    fmt = identity.tape_format
+    if fmt is TapeFormat.UNKNOWN:
+        log.debug("tape format unknown (tape status %r); refusing to guess", identity.tape_status)
+        raise DumpStopped(
+            "the drive did not report the tape's format, so the track count is unknown; "
+            "name the tracks to dump, e.g. `tw dump OUTDIR 0-27`"
+        )
+    wide = identity.tape_status is not None and TapeStatus.decode(identity.tape_status).wide
+    try:
+        count = track_count(fmt, wide)
+    except (KeyError, ValueError) as exc:
+        log.debug("no track count for %s wide=%s: %r; refusing", fmt.name, wide, exc)
+        raise DumpStopped(
+            f"no track count known for {fmt.name} tape (wide={wide}); "
+            "name the tracks to dump, e.g. `tw dump OUTDIR 0-27`"
+        ) from exc
+    log.info(f"no tracks named: dumping all {count} tracks of this {fmt.name} tape")
+    return list(range(count))
+
+
 def dump_tracks(
     drive: Qic117Drive,
-    tracks: Iterable[int],
     out_dir: Path,
+    tracks: Iterable[int] | None = None,
     *,
     progress: Progress = NULL_PROGRESS,
     check: bool = False,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble.
 
-    ``check`` also decodes every pass (~17 s each) and stops on a low
-    CRC-clean fraction; see the module docstring.
+    ``tracks`` None means every track of the cartridge: :func:`tracks_for_tape`
+    counts them from the tape format and width the drive reports. ``check``
+    also decodes every pass (~17 s each) and stops on a low CRC-clean
+    fraction; see the module docstring.
     """
     from qiclib.geometry import coord_to_seg
 
@@ -314,7 +349,7 @@ def dump_tracks(
         f"drive: config 0x{template.drive_config or 0:02x} -> {template.rate_kbps} kbps, "
         f"tape {template.tape_format.name}; writing TWRF to {out_dir}"
     )
-    tracks = list(tracks)
+    tracks = list(tracks) if tracks is not None else tracks_for_tape(template)
     results: list[TrackResult] = []
     with progress.task("dumping tracks", total=len(tracks), unit="tracks") as overall:
         for track in tracks:

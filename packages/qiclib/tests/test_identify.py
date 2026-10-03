@@ -315,7 +315,6 @@ _REAL_TWRF = {
     "drive_vendor_id": 4550,
     "tape_status": 0x63,
 }
-_LEGACY_TWRF = {"rate_kbps": 500}
 
 
 def _image_drive(tmp_path, *twrfs: dict) -> dict | None:
@@ -328,10 +327,6 @@ def _image_drive(tmp_path, *twrfs: dict) -> dict | None:
 def test_image_drive_skips_null_reports(tmp_path):
     """tape_status present but null is not a report; the later real capture wins."""
     assert _image_drive(tmp_path, _NULL_TWRF, _REAL_TWRF) == _REAL_TWRF
-
-
-def test_image_drive_is_never_a_legacy_source(tmp_path):
-    assert _image_drive(tmp_path, _LEGACY_TWRF, _REAL_TWRF) == _REAL_TWRF
 
 
 def test_image_drive_disagreement_keeps_first_and_warns(tmp_path, caplog):
@@ -347,4 +342,4 @@ def test_image_drive_disagreement_keeps_first_and_warns(tmp_path, caplog):
 
 
 def test_image_drive_none_when_nothing_reported(tmp_path):
-    assert _image_drive(tmp_path, _NULL_TWRF, _LEGACY_TWRF) is None
+    assert _image_drive(tmp_path, _NULL_TWRF, _NULL_TWRF) is None

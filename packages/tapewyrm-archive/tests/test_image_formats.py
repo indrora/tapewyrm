@@ -26,7 +26,8 @@ def test_tape_image_round_trip_and_random_access(tmp_path):
 
 
 def test_volume_round_trip_and_hole_accounting(tmp_path):
-    vol = Volume(header={"format": "TWVL", "holes": [[4, 8]]}, data=b"0123\x00\x00\x00\x00890")
+    data = b"0123\x00\x00\x00\x00890"
+    vol = Volume(header={"format": "TWVL", "holes": [[4, 8]], "volume_size": len(data)}, data=data)
     path = tmp_path / "v.twvl"
     vol.save(path)
     back = Volume.load(path)

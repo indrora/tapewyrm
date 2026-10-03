@@ -68,9 +68,8 @@ SHOULD be reported.
     1. [Normative References](#121-normative-references)
     2. [Informative References](#122-informative-references)
 - [Appendix A. Example](#appendix-a-example)
-- [Appendix B. Legacy Headerless Streams](#appendix-b-legacy-headerless-streams)
-- [Appendix C. The dump.jsonl Sidecar](#appendix-c-the-dumpjsonl-sidecar)
-- [Appendix D. Change Log](#appendix-d-change-log)
+- [Appendix B. The dump.jsonl Sidecar](#appendix-b-the-dumpjsonl-sidecar)
+- [Appendix C. Change Log](#appendix-c-change-log)
 - [Author's Address](#authors-address)
 
 ## 1. Introduction
@@ -198,8 +197,8 @@ Section 4.2. Readers MUST NOT depend on member order or whitespace.
 ### 4.2. Members
 
 "Req." gives the requirement on a writer of this version (2). "Since"
-gives the format version that introduced the member. A version 1 file
-carries only the version 1 members.
+gives the format version that introduced the member; it is history only,
+since readers read version 2 alone (Section 9).
 
 | Member                | JSON type        | Req.     | Since | Meaning |
 |-----------------------|------------------|----------|:-----:|---------|
@@ -224,8 +223,10 @@ carries only the version 1 members.
 | `firmware_commit`     | string or null   | REQUIRED | 2 | Git commit (40 hex characters) of the device firmware, from its BUILD_INFO verb; `null` if unknown. |
 | `firmware_dirty`      | boolean or null  | REQUIRED | 2 | `true` if the firmware was built from a modified tree, `null` if unknown. |
 
-"REQUIRED" for the version 2 members means the member is present; its
-value MAY be `null`. All integers fit in a signed 64-bit integer.
+Every member is REQUIRED: a writer MUST write it and a reader MUST reject
+a header that lacks it (Section 8.2). For the members typed "or null",
+the member is present and its value MAY be `null`. All integers fit in a
+signed 64-bit integer.
 
 Notes:
 
@@ -624,18 +625,21 @@ missing END only lowers confidence in the tail.
 ### 8.2. Reader Requirements
 
 1. A reader MUST reject a file shorter than 10 bytes or whose first four
-   bytes are not `TWRF`.
+   bytes are not `TWRF`. A reader MUST identify a TWRF file by this
+   magic, never by its file name or suffix.
 2. A reader MUST reject a file whose `version` it does not support.
-   A reader conforming to this document MUST support versions 1 and 2.
+   A reader conforming to this document MUST support version 2 and MUST
+   reject every other version, version 1 included.
 3. A reader MUST parse exactly `hlen` bytes as the header and MUST start
    the flux body at offset `10 + hlen`.
 4. A reader MUST ignore header members it does not recognize.
-5. A reader MUST treat an absent version 2 member, or a `null` value, as
-   "not reported".
-6. A reader MAY reject a header whose `direction` is not `"forward"` or
-   `"reverse"`, or whose `tape_format` is not 0..4. The reference reader
-   does both, and also rejects a header lacking `direction` or
-   `tape_format`.
+5. A reader MUST reject a header that is not a JSON object, that lacks
+   any member of Section 4.2, or whose member has a JSON type other than
+   the one Section 4.2 gives. The error MUST name the file and SHOULD
+   name the member. A reader MUST treat a `null` value as "not reported".
+6. A reader MUST reject a header whose `direction` is not `"forward"` or
+   `"reverse"`, or whose `tape_format` is not 0..4. It MUST NOT
+   substitute a default for a missing or invalid member.
 7. A reader MUST decode the body sequentially per Section 5.5 and MUST
    NOT locate markers by searching for `0xFF`.
 8. A reader MUST NOT treat an unknown opcode as flux. It MAY stop or
@@ -654,13 +658,13 @@ missing END only lowers confidence in the tail.
 
 `version` changes when a reader of the previous version could misread a
 file of the new one, or when new header members are added. Readers keep
-a list of readable versions (the reference reader: `(1, 2)`) and refuse
+a list of readable versions (the reference reader: `(2,)`) and refuse
 others.
 
-- Version 1 had the twelve version 1 members of Section 4.2.
+- Version 1 had the twelve version 1 members of Section 4.2. It predates
+  the first release and is not read; a version 1 capture is re-dumped.
 - Version 2 added eight members, all nullable. The preamble and body are
-  unchanged. A version 1 file is a valid version 2 file with all the new
-  members `null`.
+  unchanged.
 
 New header members MAY be added in a later version; readers ignore
 members they do not know (Section 8.2, item 4). New marker codes MUST be
@@ -833,27 +837,7 @@ The bytes `fb ff ff 01` at offset `0x200` show why Section 5.1 forbids
 scanning for `0xFF`: the first `ff` belongs to a two-byte interval and the
 second begins an INDEX opcode.
 
-## Appendix B. Legacy Headerless Streams
-
-Captures made before TWRF existed are bare device streams: a flux body
-(Section 5) with no preamble and no header, conventionally named
-`track-NN.raw`. They are not TWRF files and carry no rate or identity.
-
-`tw convert` handles them as follows (informative):
-
-- A directory argument is expanded to its `track-*.twrf` files, sorted by
-  name; if it has none, to its `track-*.raw` files.
-- A file is treated as TWRF if and only if its name ends in `.twrf`. Any
-  other file is treated as a headerless stream, without checking for the
-  `TWRF` magic.
-- A headerless stream is decoded at 500 kbit/s (all such captures were
-  QIC-80), with the sample clock from its SESSION_START marker, or
-  72 MHz if it has none. The only provenance recorded for it in the image
-  [TWS-2] is `{"rate_kbps": 500}`.
-
-New captures MUST NOT be written in this form.
-
-## Appendix C. The dump.jsonl Sidecar
+## Appendix B. The dump.jsonl Sidecar
 
 `tw dump` appends one line to `dump.jsonl`, in the capture directory, after
 each pass. Each line is a JSON object (JSON Lines). The file is a log, not
@@ -884,12 +868,12 @@ or whose `missing_est` exceeds 5 % of `index_pulses` (and, with `--check`,
 whose good fraction is below 0.8). The line for that pass is still
 written.
 
-## Appendix D. Change Log
+## Appendix C. Change Log
 
 | Version | Date       | Change |
 |--------:|------------|--------|
 | 1       | 2026       | Initial format: preamble, twelve-member header, verbatim body. |
-| 2       | 2026-10-01 | Header gains `drive_status`, `drive_config`, `drive_rom`, `drive_vendor_id`, `tape_status`, `tw_commit`, `firmware_commit`, `firmware_dirty` (all nullable). Layout unchanged. |
+| 2       | 2026-10-01 | Header gains `drive_status`, `drive_config`, `drive_rom`, `drive_vendor_id`, `tape_status`, `tw_commit`, `firmware_commit`, `firmware_dirty` (all nullable). Layout unchanged. 2026-10-03, before release: every member is required and readers MUST reject a header lacking one (Section 8.2); version 1 is no longer read; headerless pre-TWRF streams are no longer accepted by any tool, and their appendix is removed. |
 
 ## Author's Address
 

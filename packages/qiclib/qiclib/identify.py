@@ -27,11 +27,12 @@ On top of the raw fields it makes two guesses:
 
 Sources, all offline:
 
-  * a TWTI image (``tw convert`` output) -- already placed and corrected, so
-    this is just two segment reads;
-  * TWRF captures, legacy ``.raw`` streams, or a dump directory -- the flux is
-    decoded to sectors (the slow part), then only the header and volume table
-    are corrected. A capture of just the start of track 0 is enough.
+  * a TWTI or TWTZ image (``tw convert`` output) -- already placed and
+    corrected, so this is just two segment reads;
+  * sectors already decoded from flux (:func:`from_sectors`); TWRF captures
+    themselves are not read here, since decoding flux is tapewyrm-cli's job
+    (``tw convert`` them first). A capture of just the start of track 0 is
+    enough.
 
 The live-drive path (wind to BOT, capture a few seconds, identify) is built on
 :func:`from_sectors`.

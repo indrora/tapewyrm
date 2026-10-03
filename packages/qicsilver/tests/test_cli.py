@@ -140,7 +140,7 @@ def test_extract_truncated_twtz_is_a_clean_error(tmp_path):
     twtz = tmp_path / "t.twtz"
     packed = zstd.compress(twti.read_bytes())
     twtz.write_bytes(packed[: len(packed) // 2])
-    result = CliRunner().invoke(cli, ["extract", str(twtz), "-o", str(tmp_path / "out")])
+    result = CliRunner().invoke(cli, ["extract", str(twtz), str(tmp_path / "out")])
     _assert_clean_error(result, "t.twtz", "truncated")
 
 
@@ -151,9 +151,9 @@ def test_tar_truncated_volume_is_a_clean_error(tmp_path):
     Volume(header={"format": "TWVL", "holes": [], "volume_size": 100}, data=bytes(100)).save(path)
     with path.open("r+b") as f:
         f.truncate(path.stat().st_size - 10)
-    result = CliRunner().invoke(cli, ["tar", str(path), "-o", str(tmp_path / "x.tar")])
+    result = CliRunner().invoke(cli, ["tar", str(path), str(tmp_path / "x.tar")])
     _assert_clean_error(result, "vol-00.twvl", "truncated")
     short = tmp_path / "short.twvl"
     short.write_bytes(b"TWVL\x01")  # cut inside the preamble
-    result = CliRunner().invoke(cli, ["tar", str(short), "-o", str(tmp_path / "y.tar")])
+    result = CliRunner().invoke(cli, ["tar", str(short), str(tmp_path / "y.tar")])
     _assert_clean_error(result, "short.twvl", "truncated")

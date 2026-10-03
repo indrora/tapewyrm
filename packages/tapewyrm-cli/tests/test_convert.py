@@ -12,7 +12,6 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 from qiclib.testing.builders import (
@@ -295,12 +294,3 @@ def test_describe_header_without_a_tape_status_uses_the_header_format():
         utc="",
     )
     assert convert.describe_header(hdr) == "track 3 reverse, QIC-80"
-
-
-def test_legacy_stream_still_converts(tmp_path, tape_flux):
-    """Headerless .raw captures decode at the legacy rate with the same stages."""
-    blob, _, sectors = tape_flux
-    path = tmp_path / "track-00.raw"
-    path.write_bytes(blob)
-    found, meta = convert.decode_capture(Path(path))
-    assert len(found) == len(sectors) and meta["twrf"]["rate_kbps"] == 500

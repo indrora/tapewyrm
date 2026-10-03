@@ -763,24 +763,31 @@ def _parse_tracks(spec: str) -> list[int]:
         lo, hi = int(a), int(b or a)
         if not 0 <= lo <= hi <= 63:
             log.debug("track range %r -> %d..%d outside 0..63 or reversed; refusing", part, lo, hi)
-            raise click.BadParameter(f"bad track range {part!r}", param_hint="--tracks")
+            raise click.BadParameter(f"bad track range {part!r}", param_hint="TRACKS")
         out.update(range(lo, hi + 1))
     return sorted(out)
 
 
+# Positional-argument convention for every command (tw and qicsilver alike):
+# required things are positional, inputs come first and the output comes last,
+# like cp(1): `tw convert SOURCE... OUTPUT`, `qicsilver extract IMAGE OUTDIR`,
+# `qicsilver tar VOLUME OUTPUT`. `tw dump` reads from the drive, so its only
+# path is its output, and the optional TRACKS selector follows it (an optional
+# positional can only come last). Options with defaults stay options.
 @cli.command()
-@click.option("--tracks", required=True, help="tracks to capture, e.g. 0-12 or 0,2,5-7")
-@click.option(
-    "--out", "out", type=click.Path(file_okay=False), required=True, help="output directory"
-)
+@click.argument("outdir", metavar="OUTDIR", type=click.Path(file_okay=False, path_type=Path))
+@click.argument("tracks", metavar="[TRACKS]", required=False, default=None)
 @click.option(
     "--check", is_flag=True, help="also decode each pass and stop if < 80% of sectors CRC-clean"
 )
 @click.pass_obj
-def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
-    """Capture whole tracks to TWRF files, one Logical Forward pass each.
+def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool) -> None:
+    """Capture whole tracks to TWRF files in OUTDIR, one Logical Forward pass each.
 
-    Each pass winds to its track's starting end, then ends when the tape stops
+    TRACKS is a list of tracks and ranges such as 0-12 or 0,2,5-7. Without it,
+    every track of the tape is dumped: the count comes from the format the
+    drive reports (QIC-80: 0-27), and the dump refuses to start if the drive
+    can't say. Each pass winds to its track's starting end, then ends when the tape stops
     at logical EOT. Dump only reads transitions; `tw convert` judges the data.
     After every pass it checks, without decoding, that the pass ended cleanly
     and the drive found as many segments as before, and stops early if the
@@ -789,11 +796,12 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
     """
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
 
-    track_list = _parse_tracks(tracks)
-    log.debug("dumping tracks %s to %s (check=%s)", track_list, out, check)
+    # Parse TRACKS before touching the drive so a typo fails fast.
+    track_list = _parse_tracks(tracks) if tracks is not None else None
+    log.debug("dumping tracks %s to %s (check=%s)", track_list or "all", outdir, check)
     with _drive_session(app) as d, app.progress() as prog:
         try:
-            results = dump_tracks(d, track_list, Path(out), progress=prog, check=check)
+            results = dump_tracks(d, outdir, track_list, progress=prog, check=check)
         except DumpStopped as exc:
             log.debug("dump stopped: %r", exc)
             raise click.ClickException(f"dump stopped: {exc}") from exc
@@ -803,7 +811,7 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
         good = sum(r.good or 0 for r in results)
         total = sum(r.sectors or 0 for r in results)
         line += f", {good}/{total} sectors CRC-clean"
-    click.echo(f"{line} -> {out}")
+    click.echo(f"{line} -> {outdir}")
 
 
 # ---------------------------------------------------------------------------
@@ -812,26 +820,28 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
 
 
 @cli.command()
-@click.argument("sources", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
-@click.option(
-    "-o", "--out", "out", required=True, type=click.Path(dir_okay=False, path_type=Path),
-    help="tape image to write: .twti (sparse) or .twtz (zstd-compressed)",
+@click.argument(
+    "sources", metavar="SOURCE...", nargs=-1, required=True,
+    type=click.Path(exists=True, path_type=Path),
 )  # fmt: skip
+@click.argument("output", metavar="OUTPUT", type=click.Path(dir_okay=False, path_type=Path))
 @click.pass_obj
-def convert(app: AppContext, sources: tuple[Path, ...], out: Path) -> None:
-    """TWRF dump(s) -> TWTI logical tape image (.twtz: zstd-compressed).
+def convert(app: AppContext, sources: tuple[Path, ...], output: Path) -> None:
+    """TWRF dump(s) -> TWTI logical tape image OUTPUT (.twtz: zstd-compressed).
 
-    SOURCES are dump directories (or individual track-NN.twrf files). Every
+    Each SOURCE is a dump directory (or an individual track-NN.twrf file);
+    OUTPUT comes last, as with cp, and its suffix picks the image kind: .twti
+    (sparse) or .twtz (zstd-compressed). Every
     capture is decoded at its own recorded bit rate; when several dumps of the
     same tape are given, their sectors are merged so a re-read fills the gaps
     of an earlier pass. No hardware needed.
     """
     from tapewyrm.image.convert import convert as do_convert
 
-    log.debug("converting %d sources to %s", len(sources), out)
+    log.debug("converting %d sources to %s", len(sources), output)
     try:
         with app.progress() as prog:
-            do_convert(list(sources), out, progress=prog)
+            do_convert(list(sources), output, progress=prog)
     except ValueError as exc:
         log.debug("convert failed: %r", exc)
         raise click.ClickException(str(exc)) from exc

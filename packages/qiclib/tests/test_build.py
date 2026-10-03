@@ -115,7 +115,6 @@ REAL_REPORTS = {
     "firmware_commit": "abc123",
 }
 OTHER_DRIVE = {**REAL_REPORTS, "device_serial": "GW-0002", "drive_vendor_id": 71}
-LEGACY = {"rate_kbps": 500}  # a headerless legacy .raw stream
 
 
 def _drive_of(tmp_path, *twrfs: dict) -> dict:
@@ -135,11 +134,6 @@ def test_drive_skips_a_capture_whose_reports_are_all_null(tmp_path):
     assert _drive_of(tmp_path, NULL_REPORTS, REAL_REPORTS) == REAL_REPORTS
 
 
-def test_drive_is_never_a_legacy_raw_source(tmp_path):
-    """A legacy .raw source carries no reports, so it never speaks for the drive."""
-    assert _drive_of(tmp_path, LEGACY, REAL_REPORTS) == REAL_REPORTS
-
-
 def test_drive_disagreement_keeps_the_first_and_warns(tmp_path, caplog):
     """Captures from two drives: the first reporting one wins, with a warning."""
     import logging
@@ -155,5 +149,5 @@ def test_drive_disagreement_keeps_the_first_and_warns(tmp_path, caplog):
 
 def test_drive_members_are_null_when_no_capture_reported(tmp_path):
     """No reporting source: all eight members are present and null."""
-    drive = _drive_of(tmp_path, NULL_REPORTS, LEGACY)
+    drive = _drive_of(tmp_path, NULL_REPORTS, NULL_REPORTS)
     assert drive == dict.fromkeys(REAL_REPORTS)

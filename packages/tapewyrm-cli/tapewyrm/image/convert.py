@@ -26,19 +26,21 @@ from tapewyrm.codec import gwpll, gwstream, mfm
 
 log = logging.getLogger(__name__)
 
-# Bare device streams from before TWRF carry no header; they were all QIC-80.
-LEGACY_RAW_RATE_KBPS = 500
-
 
 def capture_files(sources: Iterable[Path]) -> list[Path]:
-    """Expand dump directories into their track captures (TWRF, else legacy .raw)."""
+    """Expand dump directories into their track captures.
+
+    A directory contributes its ``track-*.twrf`` files, the names ``tw dump``
+    writes (TWS-1 8.1 rule 7). A file named on the command line is taken
+    whatever its name; :func:`decode_capture` then accepts it only if it
+    starts with the TWRF magic, so the name never decides the format.
+    """
     out: list[Path] = []
     for src in sources:
         if src.is_dir():
             twrf = sorted(src.glob("track-*.twrf"))
-            if not twrf:
-                log.debug("%s: no track-*.twrf captures; falling back to legacy track-*.raw", src)
-            out += twrf or sorted(src.glob("track-*.raw"))
+            log.debug("%s: %d track-*.twrf captures", src, len(twrf))
+            out += twrf
         else:
             log.debug("%s: not a directory; using it as a capture file", src)
             out.append(src)
@@ -59,25 +61,13 @@ def decode_capture(
     started = time.perf_counter()
     name = path.name
     log.debug("reading capture %s", path)
+    # read_header checks the magic and every header member before the (slow)
+    # read of the flux, and raises a ValueError naming the file for anything
+    # that is not a well-formed TWRF capture, whatever the file is called.
+    hdr, flux_at = read_header(path)
     blob = path.read_bytes()
-    if path.suffix == ".twrf":
-        hdr, flux_at = read_header(path)
-        flux, rate, meta = blob[flux_at:], hdr.rate_kbps, header_to_dict(hdr)
-        log.info("%s: %s, %d kbps, %s of flux", name, describe_header(hdr), rate, _mb(len(flux)))
-    else:
-        log.debug(
-            "%s: suffix %r is not .twrf; treating as headerless legacy stream at %d kbps",
-            path,
-            path.suffix,
-            LEGACY_RAW_RATE_KBPS,
-        )
-        flux, rate, meta = blob, LEGACY_RAW_RATE_KBPS, {"rate_kbps": LEGACY_RAW_RATE_KBPS}
-        log.info(
-            "%s: headerless legacy stream, assuming %d kbps, %s of flux",
-            name,
-            rate,
-            _mb(len(flux)),
-        )
+    flux, rate, meta = blob[flux_at:], hdr.rate_kbps, header_to_dict(hdr)
+    log.info("%s: %s, %d kbps, %s of flux", name, describe_header(hdr), rate, _mb(len(flux)))
     log.debug("%s: parsing %d bytes of flux stream", name, len(flux))
     ps = gwstream.parse(flux, progress=progress)
     del blob, flux  # the parsed intervals are all later stages need
@@ -170,12 +160,12 @@ def convert(sources: Iterable[Path], out: Path, *, progress: Progress = NULL_PRO
     :func:`decode_capture` under it; then :func:`qiclib.build.build_image`'s.
     """
     started = time.perf_counter()
+    sources = list(sources)
     files = capture_files(sources)
     if not files:
-        log.debug(
-            "sources expanded to no track captures (no files, or directories without track-*); refusing"
-        )
-        raise ValueError("no track captures found")
+        log.debug("sources expanded to no captures (directories without track-*.twrf); refusing")
+        named = ", ".join(str(src) for src in sources)
+        raise ValueError(f"no track-*.twrf captures found in {named}")
     count = len(files)
     log.info("converting %d capture(s) into %s", count, out.name)
     passes, source_meta = [], []

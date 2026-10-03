@@ -22,9 +22,9 @@ in ``qiclib.extract``.
 
 :meth:`Volume.load` refuses a file cut short (TWS-3 section 6.2) with
 ``tapewyrm_archive.errors.TruncatedFileError``: the preamble, the header, or
-the volume bytes, judged against the header's ``volume_size`` (or, in files
-written before that member existed, against the furthest hole end and
-``directory_offset``, which a writer never puts past the end).
+the volume bytes, judged against the header's ``volume_size``. That member is
+required: without it a cut file cannot be told from a short volume, so a
+header lacking it is refused as malformed.
 """
 
 from __future__ import annotations
@@ -138,9 +138,9 @@ class Volume:
         """Read a TWVL file, refusing one that is truncated or malformed.
 
         Raises :class:`TruncatedFileError` when the file is shorter than its
-        preamble, its header, or the volume size the header implies
-        (:func:`_implied_size`), :class:`MalformedFileError` for a header
-        that is not a JSON object of the right shape, and ``ValueError``
+        preamble, its header, or the header's ``volume_size``,
+        :class:`MalformedFileError` for a header that is not a JSON object
+        of the right shape (``volume_size`` included), and ``ValueError``
         for a file that is not a TWVL at all.
         """
         log.debug("loading TWVL volume %s", path)
@@ -166,8 +166,8 @@ class Volume:
             raise TruncatedFileError(path, "TWVL", "JSON header", header_end, len(blob))
         header = _parse_header(path, blob[_PREAMBLE.size : header_end])
         data = blob[header_end:]
-        size = _implied_size(header)
-        if size is not None and len(data) < size:
+        size = header["volume_size"]  # _parse_header checked it
+        if len(data) < size:
             log.debug("%s: %d volume bytes, header implies %d; refusing", path, len(data), size)
             raise TruncatedFileError(path, "TWVL", "volume bytes", header_end + size, len(blob))
         return cls(header=header, data=data)
@@ -196,28 +196,15 @@ def _parse_header(path: Path, raw: bytes) -> dict[str, Any]:
     ):
         raise malformed("holes must be a list of [start, end] integer pairs")
     header.setdefault("holes", holes)
-    size = header.get("volume_size")
-    if size is not None and (type(size) is not int or size < 0):
+    # Required (TWS-3 3.1): the only way to tell a truncated file from a
+    # short volume. No fallback for headers without it; there are none to
+    # be compatible with before the release.
+    if "volume_size" not in header:
+        raise malformed("the header lacks the required member volume_size")
+    size = header["volume_size"]
+    if type(size) is not int or size < 0:
         raise malformed(f"volume_size is {size!r}; it must be a non-negative integer")
     return header
-
-
-def _implied_size(header: dict[str, Any]) -> int | None:
-    """How many volume bytes the header says the file holds, at least.
-
-    ``volume_size`` when present (TWS-3 3.1). Files written before that
-    member existed give only a lower bound: no writer puts a hole end or
-    ``directory_offset`` past the end of the volume bytes (section 5), so the
-    furthest of them must still be inside the file. None when there is
-    nothing to go on (no holes, no directory offset): truncation of such an
-    old file cannot be told from a short volume.
-    """
-    if header.get("volume_size") is not None:
-        return int(header["volume_size"])
-    bounds = [end for _start, end in header["holes"]]
-    if type(header.get("directory_offset")) is int:
-        bounds.append(header["directory_offset"])
-    return max(bounds, default=None)
 
 
 def find_holes(stream: SparseVolume, size: int) -> list[list[int]]:

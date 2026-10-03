@@ -54,6 +54,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
+from tapewyrm_archive.errors import MalformedFileError, TruncatedFileError
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.types import CaptureHeader, Direction, Marker, MarkerKind, TapeFormat
 
@@ -62,10 +63,11 @@ log = logging.getLogger(__name__)
 MAGIC = b"TWRF"
 # v2 (2026-10-01): the header gains the drive's raw QIC-117 report bytes
 # (status, configuration -- hence the bit rate --, ROM, vendor ID, tape status)
-# and the tw/firmware commits. All new fields are optional, so v1 files load
-# with them as None; the on-disk layout is otherwise unchanged.
+# and the tw/firmware commits. Version 2 is the only version read: version 1
+# predates the release, nobody holds v1 captures but us, and the cure for one
+# is to dump the tape again (no compatibility before release, STYLE.md §2).
 FORMAT_VERSION = 2
-READABLE_VERSIONS = (1, 2)
+READABLE_VERSIONS = (2,)
 _PREAMBLE = struct.Struct("<4sHI")  # magic, version, header length
 ESC = 0xFF  # GW's opcode escape: introduces FLUXOP_* and Tapewyrm markers
 _FLUXOP_INDEX = 1  # GW cdc_acm_protocol.h: FF 01 N28
@@ -574,25 +576,106 @@ def write_preamble(f: BinaryIO, hdr: CaptureHeader) -> int:
     return _PREAMBLE.size + len(hdr_json)
 
 
+# Every member of a version 2 header (TWS-1 section 4.2) and the JSON types
+# it may hold. The writer (``header_to_dict`` of a whole ``CaptureHeader``)
+# always writes all of them, so the reader requires all of them: a missing
+# one means the header was not written by a conforming writer, and guessing
+# a default (QIC-80 for a missing tape_format, say) would decode the flux
+# under an assumption nobody recorded. ``None`` in a tuple means the member
+# may be JSON null ("the drive did not report"); present-but-null is fine,
+# absent is not. ``bool`` is listed only where it is meant: JSON ``true`` is
+# a Python ``bool``, which is an ``int`` subclass, so integer members are
+# checked with ``type(x) is int`` rather than ``isinstance``.
+_HEADER_MEMBERS: dict[str, tuple[type | None, ...]] = {
+    "rate_kbps": (int,),
+    "sample_clock_hz": (int,),
+    "track": (int,),
+    "direction": (str,),
+    "pass_id": (int,),
+    "utc": (str,),
+    "tape_format": (int,),
+    "segments_per_track": (int,),
+    "tracks": (int,),
+    "sectors_per_segment": (int,),
+    "device_serial": (str,),
+    "physical_reverse": (bool,),
+    "drive_status": (int, None),
+    "drive_config": (int, None),
+    "drive_rom": (int, None),
+    "drive_vendor_id": (int, None),
+    "tape_status": (int, None),
+    "tw_commit": (str, None),
+    "firmware_commit": (str, None),
+    "firmware_dirty": (bool, None),
+}
+
+
+def _check_member(value: object, allowed: tuple[type | None, ...]) -> bool:
+    """Whether ``value`` has one of the JSON types in ``allowed`` (exact types)."""
+    return any(value is None if kind is None else type(value) is kind for kind in allowed)
+
+
 def _read_header(f: BinaryIO, name: str) -> tuple[CaptureHeader, int]:
+    """Parse and check the preamble and JSON header; return it and the flux offset.
+
+    Raises plain ``ValueError`` for a file that is not TWRF at all (no magic:
+    TWS-1 8.2 rule 1), and :class:`MalformedFileError` -- also a
+    ``ValueError``, so the CLIs report it in one line -- for a TWRF file that
+    is cut short in its preamble or header, has an unreadable version, or
+    whose header lacks a member or holds one of the wrong type or range
+    (rules 2, 3 and 6). Unknown members are ignored (rule 4).
+    """
+
+    def malformed(problem: str) -> MalformedFileError:
+        log.debug("%s: %s; refusing", name, problem)
+        return MalformedFileError(name, "TWRF", problem)
+
     pre = f.read(_PREAMBLE.size)
-    if len(pre) < _PREAMBLE.size or pre[:4] != MAGIC:
-        log.debug(
-            "%s: preamble %r (%d bytes) lacks magic %r; refusing", name, pre[:4], len(pre), MAGIC
+    if pre[:4] != MAGIC:
+        log.debug("%s: preamble starts %r, not magic %r; refusing", name, pre[:4], MAGIC)
+        raise ValueError(
+            f"{name}: not a TWRF capture (it does not start with the TWRF magic); "
+            "only TWRF captures written by `tw dump` can be converted"
         )
-        raise ValueError(f"not a RawFluxCapture file (bad magic): {name}")
+    if len(pre) < _PREAMBLE.size:
+        raise TruncatedFileError(name, "TWRF", "preamble", _PREAMBLE.size, len(pre))
     _, version, hlen = _PREAMBLE.unpack(pre)
     if version not in READABLE_VERSIONS:
-        log.debug("%s: version %d not in %s; refusing", name, version, READABLE_VERSIONS)
-        raise ValueError(f"unsupported RawFluxCapture version {version}: {name}")
-    d = json.loads(f.read(hlen))
-    d["direction"] = Direction(d["direction"])
-    d["tape_format"] = TapeFormat(d["tape_format"])
-    known = {fl.name for fl in dataclasses.fields(CaptureHeader)}
-    unknown = sorted(set(d) - known)
+        raise malformed(
+            f"it is version {version}, and only version {FORMAT_VERSION} is read; "
+            "dump the tape again with the current `tw`"
+        )
+    raw = f.read(hlen)
+    if len(raw) < hlen:
+        raise TruncatedFileError(
+            name, "TWRF", "JSON header", _PREAMBLE.size + hlen, _PREAMBLE.size + len(raw)
+        )
+    try:
+        # JSONDecodeError and UnicodeDecodeError are both ValueErrors.
+        d = json.loads(raw)
+    except ValueError as exc:
+        raise malformed(f"the header is not valid UTF-8 JSON ({exc})") from exc
+    if not isinstance(d, dict):
+        raise malformed(f"the header is a JSON {type(d).__name__}, not an object")
+    missing = [member for member in _HEADER_MEMBERS if member not in d]
+    if missing:
+        raise malformed(f"the header lacks the required member(s) {', '.join(missing)}")
+    for member, allowed in _HEADER_MEMBERS.items():
+        if not _check_member(d[member], allowed):
+            raise malformed(f"the header's {member} is {d[member]!r}, of the wrong JSON type")
+    try:
+        d["direction"] = Direction(d["direction"])
+    except ValueError as exc:
+        raise malformed(f"the header's direction is {d['direction']!r}") from exc
+    try:
+        d["tape_format"] = TapeFormat(d["tape_format"])
+    except ValueError as exc:
+        raise malformed(f"the header's tape_format is {d['tape_format']!r}, not 0..4") from exc
+    unknown = sorted(set(d) - set(_HEADER_MEMBERS))
     if unknown:
         log.debug("%s: ignoring unknown header fields %s", name, unknown)
-    return CaptureHeader(**{k: v for k, v in d.items() if k in known}), _PREAMBLE.size + hlen
+    fields = {member: d[member] for member in _HEADER_MEMBERS}
+    return CaptureHeader(**fields), _PREAMBLE.size + hlen
 
 
 def read_header(path: str | Path) -> tuple[CaptureHeader, int]:

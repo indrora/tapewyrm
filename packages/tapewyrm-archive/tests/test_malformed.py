@@ -211,17 +211,22 @@ def test_twvl_truncated_in_its_data_is_refused(tmp_path):
     assert info.value.expected - info.value.found == 2
 
 
-def test_twvl_without_volume_size_is_bounded_by_its_holes(tmp_path):
-    """Older files have no volume_size; a hole past the end still betrays a cut."""
+@pytest.mark.parametrize("size", [None, "missing", -1, "11"])
+def test_twvl_without_a_valid_volume_size_is_refused(tmp_path, size):
+    """TWS-3 3.1: volume_size is required; without it truncation is undetectable."""
+    header = {"format": "TWVL", "holes": [[4, 8]], "volume_size": size}
+    if size == "missing":
+        del header["volume_size"]
     path = tmp_path / "v.twvl"
-    Volume(header={"format": "TWVL", "holes": [[4, 20]]}, data=b"0123").save(path)
-    with pytest.raises(TruncatedFileError):
+    Volume(header=header, data=b"0123\x00\x00\x00\x00890").save(path)
+    with pytest.raises(MalformedFileError, match="volume_size") as info:
         Volume.load(path)
+    assert "v.twvl" in str(info.value)
 
 
 def test_twvl_with_the_wrong_format_member_is_refused(tmp_path):
     path = tmp_path / "v.twvl"
-    Volume(header={"format": "TWTI", "holes": []}, data=b"").save(path)
+    Volume(header={"format": "TWTI", "holes": [], "volume_size": 0}, data=b"").save(path)
     with pytest.raises(MalformedFileError, match="format"):
         Volume.load(path)
 

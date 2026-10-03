@@ -181,12 +181,14 @@ cartridge is not referenced yet, `tw --profile colorado drive load-point`
 ## 5. Dump the tape: `tw dump`
 
 ```sh
-tw --profile colorado --progress dump --tracks 0-27 --out captures/NAME
+tw --profile colorado --progress dump captures/NAME
 ```
 
-- `--tracks` takes ranges and lists: `0-27`, `0`, `0,3,5-7`. A QIC-40 tape has
-  20 tracks, QIC-80 28, QIC-3010 and QIC-3020 40 (wide cartridges: 36 and 50).
-  `qicsilver identify` on a dump of track 0 tells you the real count.
+- The synopsis is `tw dump OUTDIR [TRACKS]`. With no TRACKS it dumps every
+  track of the tape, counted from the format the drive reports: a QIC-40 tape
+  has 20 tracks, QIC-80 28, QIC-3010 and QIC-3020 40 (wide cartridges: 36 and
+  50). If the drive can't report the format, the dump refuses to start and
+  asks for TRACKS. TRACKS takes ranges and lists: `0-27`, `0`, `0,3,5-7`.
 - Each track is one **Logical Forward** pass, streamed to
   `captures/NAME/track-NN.twrf`. A TWRF file records the raw flux plus the
   drive's identity and the bit rate, so it can be decoded later without
@@ -202,14 +204,14 @@ tw --profile colorado --progress dump --tracks 0-27 --out captures/NAME
   old tape can shed oxide, and every pass over a failing tape costs something.
 - **`--check`** also decodes each pass (about 20 s more per track) and stops if
   fewer than 80% of its sectors are CRC-clean. Use it on a tape you don't
-  trust yet, or with `--tracks 0` as a first look.
+  trust yet, or on track 0 alone (`tw dump captures/NAME 0`) as a first look.
 - **How long.** A pass takes as long as the tape takes to run end to end at the
   drive's speed: a couple of minutes per track for a short QIC-80 cartridge, and
   about 9 minutes for a track of a 1,000 ft QIC-3020 cartridge, plus winding.
   A whole QIC-80 tape is an hour or more.
 
 ```console
-$ tw --profile colorado dump --tracks 0-1 --out captures/NAME
+$ tw --profile colorado dump captures/NAME 0-1
 [12:00:01] INFO     drive: config 0x90 -> 500 kbps, tape QIC80; writing TWRF to captures/NAME
            INFO     track  0: winding to its start...
 [12:00:40] INFO     track  0: wound to its start in 38.9s
@@ -223,15 +225,16 @@ done: 2 tracks, 414 segments by INDEX -> captures/NAME
 
 If the dump stops (`dump stopped: track N: ...`), read the reason, clean the
 head, and dump the rest into a **new** directory, e.g.
-`--tracks 5-27 --out captures/NAME-pass2`. `tw convert` merges them.
+`tw dump captures/NAME-pass2 5-27`. `tw convert` merges them.
 
 ## 6. Make a tape image: `tw convert`
 
 ```sh
-tw --progress convert captures/NAME -o captures/NAME.twtz
+tw --progress convert captures/NAME captures/NAME.twtz
 ```
 
-No hardware is needed. `tw convert` decodes every capture at the rate it
+The synopsis is `tw convert SOURCE... OUTPUT`: sources first, the image last,
+as with `cp`. No hardware is needed. `tw convert` decodes every capture at the rate it
 recorded (flux -> MFM -> sectors), places each sector by its own address,
 applies the Reed-Solomon ECC, reads the header and bad-sector map, and writes
 a **TWTI** logical tape image. It takes roughly a quarter of the tape's running
@@ -243,7 +246,7 @@ time: a 9-minute QIC-3020 track converts in about 2.5 minutes.
   written sparse, so unrecovered or blank segments take no disk space on file
   systems that support holes. Use `.twtz` unless a tool needs random access.
 - **Merging dumps.** Give several sources to merge them:
-  `tw convert captures/NAME captures/NAME-pass2 -o captures/NAME.twtz`. Sources can be
+  `tw convert captures/NAME captures/NAME-pass2 captures/NAME.twtz`. Sources can be
   dump directories or single `track-NN.twrf` files. A sector read on any pass
   fills the gaps of the others, so re-reading only the bad tracks is enough.
 
@@ -302,7 +305,7 @@ Reading it:
   compression (`no`, `QIC-122`) and the description.
 
 Only track 0 is needed: the header and volume table are at its start, so
-`--tracks 0` is enough to identify a tape.
+`tw dump captures/NAME 0` is enough to identify a tape.
 
 Options:
 
@@ -319,11 +322,12 @@ Options:
 ## 8. Get the files: `qicsilver extract` and `qicsilver tar`
 
 ```sh
-qicsilver --progress extract captures/NAME.twtz -o captures/NAME-vols
-qicsilver --progress tar captures/NAME-vols/vol-00.twvl -o captures/NAME.tar
+qicsilver --progress extract captures/NAME.twtz captures/NAME-vols
+qicsilver --progress tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 ```
 
-`extract` writes one `vol-NN.twvl` per volume in the volume table and prints
+The synopses are `qicsilver extract IMAGE OUTDIR` and `qicsilver tar VOLUME
+OUTPUT`: input first, output last. `extract` writes one `vol-NN.twvl` per volume in the volume table and prints
 their paths. It decompresses QIC-122 data and lays each volume out by its
 QIC-113 offsets; bytes from segments that were not recovered become recorded
 holes, so nothing after a hole is shifted. It takes `--volume-profile` like
@@ -333,7 +337,7 @@ holes, so nothing after a hole is shifted. It takes `--volume-profile` like
 (including long Windows 95 names), modification times and DOS attributes:
 
 ```console
-$ qicsilver tar captures/NAME-vols/vol-00.twvl -o captures/NAME.tar
+$ qicsilver tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 captures/NAME.tar: 2000 files, 150 directories, 12 damaged (report: captures/NAME.tar.damaged.txt)
 ```
 (example output)
@@ -392,7 +396,7 @@ captures/info.json` stays clean.
 `qicsilver identify` says `no header segment found: the capture must include
 the start of track 0`, or `neither copy of the header segment was recovered`.
 
-- The image must include track 0: `tw dump --tracks 0` and convert again.
+- The image must include track 0: `tw dump DIR 0` and convert again.
 - The rate may be wrong. Check `drive config` in `tw drive status`. A QIC-3010
   drive reading a QIC-80 tape may need `tw drive rate 500` after the tape is
   referenced.

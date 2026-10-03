@@ -44,8 +44,7 @@ _FROM_RS = {
 # has every one of these keys, with null for a report the drive did not
 # answer, so *presence* of a key says nothing; only a non-null value means
 # "the drive reported". rate_kbps, device_serial and firmware_commit are
-# deliberately absent: they describe the capture device, not the drive, and a
-# legacy .raw source's synthetic {"rate_kbps": 500} must never count.
+# deliberately absent: they describe the capture device, not the drive.
 DRIVE_REPORTS = ("drive_status", "drive_config", "drive_rom", "drive_vendor_id", "tape_status")
 
 # Members that identify *which* drive and tape a capture came from. Two
@@ -59,8 +58,8 @@ def reporting_drive(sources: list[dict]) -> dict | None:
 
     ``sources`` is a TWTI ``sources`` array (TWS-2 section 4.5). A source
     "reported" when at least one of :data:`DRIVE_REPORTS` is non-null in its
-    ``twrf``; legacy .raw sources and v2 captures whose drive stayed silent
-    are skipped. Returns None when no source reported.
+    ``twrf``; captures whose drive stayed silent are skipped. Returns None
+    when no source reported.
 
     When later reporting sources disagree with the chosen one on a member of
     :data:`DRIVE_IDENTITY` (each side non-null and non-empty), the first is

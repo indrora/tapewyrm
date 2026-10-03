@@ -7,11 +7,11 @@ qicsilver does everything after that, offline.
 
 ```sh
 # from the repository root
-uv run --project packages/tapewyrm-cli tw --profile colorado dump --tracks 0-27 --out captures/NAME
-uv run --project packages/tapewyrm-cli tw convert captures/NAME -o captures/NAME.twtz
+uv run --project packages/tapewyrm-cli tw --profile colorado dump captures/NAME
+uv run --project packages/tapewyrm-cli tw convert captures/NAME captures/NAME.twtz
 uv run --project packages/qicsilver qicsilver identify captures/NAME.twtz
-uv run --project packages/qicsilver qicsilver extract captures/NAME.twtz -o captures/NAME-vols
-uv run --project packages/qicsilver qicsilver tar captures/NAME-vols/vol-00.twvl -o captures/NAME.tar
+uv run --project packages/qicsilver qicsilver extract captures/NAME.twtz captures/NAME-vols
+uv run --project packages/qicsilver qicsilver tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 ```
 
 `tw convert` is the slow step (roughly a quarter of the tape's running time: a
@@ -32,11 +32,11 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   machine-readable JSON, `--raw` adds the raw records and the profile scoring.
   Only the header and the volume table at the start of track 0 are needed, so
   a short capture of track 0 is enough.
-- **`extract IMAGE -o DIR`**: one TWVL file (`DIR/vol-NN.twvl`) per backup
+- **`extract IMAGE DIR`**: one TWVL file (`DIR/vol-NN.twvl`) per backup
   volume. QIC-122 data is decompressed and each volume is laid out by its
   QIC-113 offsets; byte ranges in unrecovered segments are recorded as holes,
   never silently shifted. Takes `--volume-profile` like `identify`.
-- **`tar VOLUME -o OUT.tar`**: a POSIX (pax) tar of the volume's files and
+- **`tar VOLUME OUT.tar`**: a POSIX (pax) tar of the volume's files and
   directories, with the original names (long Windows 95 names), modification
   times and DOS attributes (pax header `TAPEWYRM.dos_attributes`). Both QIC-113
   directory formats work: **extended** (Colorado/HP backup software) and

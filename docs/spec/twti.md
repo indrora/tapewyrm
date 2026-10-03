@@ -291,7 +291,7 @@ source capture whose drive reported: one in which at least one of
 `drive_status`, `drive_config`, `drive_rom`, `drive_vendor_id` and
 `tape_status` is non-null. The presence of a member in a TWRF header is not a
 report, since a TWRF v2 header carries every member and stores `null` for a
-report the drive did not answer; a headerless legacy source never reports.
+report the drive did not answer.
 When present, all eight members are present; a value is `null` when the
 drive did not report it or no capture recorded it, and all are `null` when no
 source reported.
@@ -323,7 +323,7 @@ Each element describes one capture file the image was built from.
 | `file`     | string    | REQUIRED | The capture file, as the name of the directory that held it, `/`, and its file name (e.g. `jc-1998/track-00.twrf` for `/Users/x/captures/jc-1998/track-00.twrf`), or the bare file name when it was given without a directory. Never an absolute path, and nothing above that one directory (Section 11.1). |
 | `verified` | boolean   | REQUIRED | True when the capture's flux stream parsed in agreement with its END marker [TWS-1]. |
 | `sectors`  | integer   | REQUIRED | Sectors the converter recovered from this capture. |
-| `twrf`     | object    | REQUIRED | The capture's TWRF header [TWS-1], every member as stored there. For a headerless legacy stream it is `{"rate_kbps": 500}`. |
+| `twrf`     | object    | REQUIRED | The capture's TWRF header [TWS-1], every member as stored there. |
 
 The members of `twrf` are defined by [TWS-1], not by this document.
 
@@ -868,7 +868,7 @@ for byte.
 
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
-| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). Same date, before release: readers MUST reject truncated and malformed files (Section 9.2); `sources[].file` records only the directory name and file name; decompression is unbounded by design (Section 11.3). |
+| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). Same date, before release: readers MUST reject truncated and malformed files (Section 9.2); `sources[].file` records only the directory name and file name; `sources[].twrf` is always a full TWRF version 2 header (the headerless-stream form `{"rate_kbps": 500}` is gone); decompression is unbounded by design (Section 11.3). |
 
 ## Author's Address
 

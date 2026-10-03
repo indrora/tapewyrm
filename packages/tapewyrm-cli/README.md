@@ -26,8 +26,8 @@ logs and bars to stderr.
 | `tw drive load-point` / `fwd` / `rev` / `stop` / `track N` / `micro up\|down` | drive | Move the tape or the head by hand. |
 | `tw drive rate KBPS` / `format FMT` | drive | Select the data rate (500, 1000, 2000) or tape format (command 27). Writes nothing to tape. |
 | `tw drive flux` / `scope` | drive | Diagnostics: record whatever the head sees to a TWRF file; edge-log the TRK0/INDEX/WRPROT/pin 34 lines. |
-| `tw dump --tracks 0-27 --out DIR [--check]` | drive | One Logical Forward pass per track, streamed to `DIR/track-NN.twrf`, with a `dump.jsonl` log of each pass. Stops early if the tape looks unhealthy. |
-| `tw convert SOURCES... -o IMAGE` | no | TWRF captures (dump directories or single files) -> TWTI (`.twti`, sparse) or TWTZ (`.twtz`, zstd). Several dumps of one tape are merged. |
+| `tw dump DIR [TRACKS] [--check]` | drive | One Logical Forward pass per track (TRACKS such as `0-27` or `0,2,5-7`; default: every track of the format the drive reports), streamed to `DIR/track-NN.twrf`, with a `dump.jsonl` log of each pass. Stops early if the tape looks unhealthy. |
+| `tw convert SOURCE... IMAGE` | no | TWRF captures (dump directories or single files) -> TWTI (`.twti`, sparse) or TWTZ (`.twtz`, zstd). Several dumps of one tape are merged. |
 | `tw flash IMAGE [--dfu]` | Greaseweazle | Update the firmware through the Greaseweazle-compatible bootloader. |
 | `tw dfu IMAGE` | Greaseweazle (DFU strap) | First flash or recovery through the AT32 ROM bootloader, using `dfu-util`. |
 

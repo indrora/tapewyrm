@@ -2,7 +2,7 @@
 
 The last step after ``tw dump -> tw convert -> qicsilver extract``::
 
-    qicsilver tar jc-1998/vol-00.twvl -o jc-1998.tar
+    qicsilver tar jc-1998/vol-00.twvl jc-1998.tar
 
 (This was ``contrib/qic2tar.py`` before qicsilver existed.) The input is a TWVL
 volume written by ``qicsilver extract``. Every directory and file
@@ -16,7 +16,7 @@ of the backup goes into a POSIX (pax) tar:
 
 Files whose bytes fall partly in holes (tape segments that could not be
 recovered) are still written, zero-filled, unless ``--skip-damaged`` is given.
-Either way they are listed in the damage report (``OUT.damaged.txt`` by
+Either way they are listed in the damage report (``OUTPUT.damaged.txt`` by
 default), separately from files the original backup software could not read.
 
 Both QIC-113 directory formats are supported, chosen from the volume table
