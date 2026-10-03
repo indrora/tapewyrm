@@ -33,5 +33,12 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local captures (large flux dumps)
+# Tape-derived files, wherever they land (captures/ is ignored above too).
+# The tapes are strangers' backups: their data never goes in this repo.
 *.twrf
+*.twti
+*.twtz
+*.twvl
+*.raw
+*.damaged.txt
+dump.jsonl
