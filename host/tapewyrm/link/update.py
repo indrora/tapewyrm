@@ -17,9 +17,12 @@ Two paths, mirroring the design's flashing tiers:
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # AT32F403 built-in ROM DFU identity (Artery). Left as the documented default;
 # dfu-util can usually auto-detect, so we don't force --device unless asked.
@@ -71,19 +74,25 @@ def run_dfu(
     """
     path = Path(binfile)
     if not path.exists():
+        log.debug("dfu: image %s does not exist; refusing", path)
         raise FlashError(f"firmware image not found: {path}")
     if shutil.which(dfu_util) is None:
+        log.debug("dfu: %r not on PATH; refusing", dfu_util)
         raise FlashError(
             f"{dfu_util!r} not found on PATH. Install dfu-util (or use Artery ISP/"
             f"AT-Link if the AT32 ROM-DFU doesn't enumerate under stock dfu-util — "
             f"DESIGN.md §12.3)."
         )
     argv = dfu_argv(path, dfu_util=dfu_util, alt=alt, vid_pid=vid_pid, serial=serial, reset=reset)
+    log.info("flashing %s with %s", path, dfu_util)
+    log.debug("running: %s", " ".join(argv))
     try:
         proc = subprocess.run(argv, check=False)
     except OSError as exc:  # pragma: no cover - environment dependent
+        log.debug("dfu: could not start %s: %s", dfu_util, exc)
         raise FlashError(f"failed to run {dfu_util}: {exc}") from exc
     if proc.returncode != 0:
+        log.debug("dfu: %s exited %d; flash failed", dfu_util, proc.returncode)
         raise FlashError(f"{dfu_util} exited with status {proc.returncode}")
     return proc.returncode
 
@@ -100,7 +109,9 @@ def app_update(hexfile: str | Path, *, port: str | None = None) -> int:
     """
     path = Path(hexfile)
     if not path.exists():
+        log.debug("app_update: image %s does not exist; refusing", path)
         raise FlashError(f"firmware image not found: {path}")
+    log.debug("app_update: bootloader protocol not implemented; pointing at DFU")
     raise FlashError(
         "over-USB application-bootloader update is not yet wired (TODO(bench), "
         "DESIGN.md §13.6 item 2). Use the DFU path for now:  tw dfu <image.bin>  "

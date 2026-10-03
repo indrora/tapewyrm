@@ -21,8 +21,11 @@ flux intervals cluster at 2, 3 and 4 cells -- exactly floppy HD timing.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,18 @@ def flux_to_bitcells(
     pll_period_adj = pll.period_adj_pct / 100
     pll_phase_adj = pll.phase_adj_pct / 100
 
+    # [tapewyrm] Guard tallies, logged once after the loop. This loop runs per
+    # flux transition (millions per track): no per-iteration logging, and the
+    # counters only cost anything on the rare branches that bump them.
+    n_short = n_unsync = 0
+    log.debug(
+        "PLL: nominal cell %.3g s, sample %.6g Hz, period adj %d%%, phase adj %d%%",
+        clock_centre,
+        sample_freq,
+        pll.period_adj_pct,
+        pll.phase_adj_pct,
+    )
+
     # ---- GW flux_to_bitcells, verbatim from here except where marked ----
     ticks = 0.0
     clock = clock_centre
@@ -70,6 +85,7 @@ def flux_to_bitcells(
         # Gather enough ticks to generate at least one bitcell.
         ticks += x / freq
         if ticks < clock / 2:
+            n_short += 1  # [tapewyrm]
             continue
 
         # Clock out zero or more 0s, followed by a 1.
@@ -93,10 +109,19 @@ def flux_to_bitcells(
             clock += ticks * pll_period_adj
         else:
             # Out of sync: adjust clock towards centre.
+            n_unsync += 1  # [tapewyrm]
             clock += (clock_centre - clock) * pll_period_adj
         # Clamp the clock's adjustment range.
         clock = min(max(clock, clock_min), clock_max)
 
         ticks = new_ticks
 
+    log.debug(
+        "PLL done: %d bitcells; %d sub-half-cell intervals merged into the next, "
+        "%d out-of-sync gaps (>3 zeros) pulled clock to centre; final clock %.3g s",
+        len(bits),
+        n_short,
+        n_unsync,
+        clock,
+    )
     return bits

@@ -49,6 +49,7 @@ that the ``qic80-rev-n`` and ``cms-qic113`` profiles agree with it.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -61,6 +62,8 @@ from tapewyrm.codec.volume import (
     decode_short_date,
     parse_vtbl_base,
 )
+
+log = logging.getLogger(__name__)
 
 PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles" / "tape"
 GUESS = "guess"
@@ -121,29 +124,36 @@ def _resolve_path(name_or_path: str) -> Path:
     """
     p = Path(name_or_path)
     if p.suffix == ".toml" or p.exists() or p.is_absolute() or len(p.parts) > 1:
+        log.debug("tape profile %r is path-like; using it as a path", name_or_path)
         return p
+    log.debug("tape profile %r is a bare name; looking in %s", name_or_path, PROFILES_DIR)
     return PROFILES_DIR / f"{name_or_path}.toml"
 
 
 def load(name_or_path: str) -> TapeProfile:
     path = _resolve_path(name_or_path)
     if not path.is_file():
+        log.debug("tape profile %s is not a file; raising", path)
         known = ", ".join(builtin_names())
         raise TapeProfileError(f"no tape profile {name_or_path!r} (built in: {known})")
+    log.debug("reading tape profile %s", path)
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
+        log.debug("tape profile %s: TOML error %s; raising", path, exc)
         raise TapeProfileError(f"{path}: {exc}") from exc
     return _from_dict(data, path)
 
 
 def _from_dict(data: dict, path: Path) -> TapeProfile:
     if "name" not in data:
+        log.debug("tape profile %s has no 'name' key (keys %s); raising", path, sorted(data))
         raise TapeProfileError(f"{path}: missing 'name'")
     match = data.get("match", {})
     fields: dict[str, FieldSpec] = {}
     for key, value in data.get("vtbl", {}).items():
         if key not in FIELD_NAMES:
+            log.debug("tape profile %s: [vtbl] key %r not a known field; raising", path, key)
             raise TapeProfileError(
                 f"{path}: unknown [vtbl] field {key!r} (known: {', '.join(sorted(FIELD_NAMES))})"
             )
@@ -151,6 +161,13 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
         if not (57 <= offset and offset + length <= 128 and length > 0):
             # Bytes 0-56 are fixed by Rev N for everyone; profiles only place
             # what comes after.
+            log.debug(
+                "tape profile %s: [vtbl] %s offset %s length %s outside 57-127; raising",
+                path,
+                key,
+                offset,
+                length,
+            )
             raise TapeProfileError(f"{path}: [vtbl] {key} = {value} is outside bytes 57-127")
         fields[key] = FieldSpec(int(offset), int(length))
     vtbl_bytes = tuple(
@@ -169,6 +186,7 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
 
 def builtin_names() -> list[str]:
     if not PROFILES_DIR.is_dir():
+        log.debug("profile directory %s missing; no built-in tape profiles", PROFILES_DIR)
         return []
     return sorted(p.stem for p in PROFILES_DIR.iterdir() if p.suffix == ".toml")
 
@@ -346,12 +364,23 @@ def evaluate(
 ) -> Verdict:
     entries: list[VtblEntry] = []
     checks: list[Check] = []
+    log.debug("tape profile %s: evaluating %d VTBL records", profile.name, len(records))
     for rec in records:
         entry = decode_entry(rec, profile)
         entries.append(entry)
         checks += match_checks(rec, vol, profile)
         checks += entry_checks(entry, vol, now)
-    return Verdict(profile, entries, checks)
+    verdict = Verdict(profile, entries, checks)
+    # score/failures walk the checks, so only pay for them when DEBUG is on.
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "tape profile %s: score %d, %d of %d checks failed",
+            profile.name,
+            verdict.score,
+            len(verdict.failures),
+            len(checks),
+        )
+    return verdict
 
 
 def guess(
@@ -361,6 +390,9 @@ def guess(
     now: datetime | None = None,
 ) -> list[Verdict]:
     """Every profile's verdict, best first (ties keep catalogue order)."""
+    if profiles is None:
+        log.debug("guess: no profiles given; loading the built-in ones")
     candidates = profiles if profiles is not None else load_builtin()
+    log.debug("guess: scoring %d tape profiles against %d records", len(candidates), len(records))
     verdicts = [evaluate(records, vol, p, now) for p in candidates]
     return sorted(verdicts, key=lambda v: v.score, reverse=True)

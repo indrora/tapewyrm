@@ -92,6 +92,9 @@ class Volume:
 
     def save(self, path: Path) -> None:
         hdr = json.dumps(self.header, indent=1).encode("utf-8")
+        log.debug(
+            "writing TWVL volume %s: %d-byte header, %d data bytes", path, len(hdr), len(self.data)
+        )
         with path.open("wb") as f:
             f.write(_PREAMBLE.pack(MAGIC, VERSION, len(hdr)))
             f.write(hdr)
@@ -99,9 +102,18 @@ class Volume:
 
     @classmethod
     def load(cls, path: Path) -> Volume:
+        log.debug("loading TWVL volume %s", path)
         blob = path.read_bytes()
         magic, version, hlen = _PREAMBLE.unpack_from(blob, 0)
         if magic != MAGIC or version != VERSION:
+            log.debug(
+                "%s: magic %r version %d != %r version %d; refusing",
+                path,
+                magic,
+                version,
+                MAGIC,
+                VERSION,
+            )
             raise ValueError(f"{path}: not a TWVL v{VERSION} volume")
         at = _PREAMBLE.size + hlen
         return cls(header=json.loads(blob[_PREAMBLE.size : at]), data=blob[at:])
@@ -117,19 +129,75 @@ def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
 
 def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRESS) -> list[Path]:
     """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``."""
+    log.info("extracting volumes from %s...", image_path.name)
     img = TapeImage.open(image_path)
     q80 = img.header["qic80_header"]
     vt_seg = q80["first_data_seg"]
-    if img.entries[vt_seg].state in (SegmentState.MISSING, SegmentState.BAD):
+    vt_entry = img.entries[vt_seg]
+    log.debug(
+        "volume table at segment %d (first_data_seg): state %s, %d erasures, data_len %d",
+        vt_seg,
+        vt_entry.state.name,
+        vt_entry.erasures,
+        vt_entry.data_len,
+    )
+    if vt_entry.state in (SegmentState.MISSING, SegmentState.BAD):
+        log.debug("volume table segment %d is %s; refusing", vt_seg, vt_entry.state.name)
         raise ValueError(f"volume table segment {vt_seg} was not recovered")
+    if vt_entry.state is SegmentState.UNCORRECTABLE:
+        # Not refused (behaviour unchanged), but the table may be garbage.
+        log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
+    log.debug("parsing volume table from segment %d", vt_seg)
     vtbl = volume_mod.parse_volume_table_data(img.segment(vt_seg))
+    log.debug("volume table: %d entries", len(vtbl))
+    if not vtbl:
+        log.debug("volume table segment %d parsed to no entries; nothing to extract", vt_seg)
+    log.debug("creating output directory %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     with progress.task("extracting volumes", total=len(vtbl), unit="volumes") as overall:
         for k, e in enumerate(vtbl):
             size = (e.data_section_size or 0) + (e.dir_section_size or 0)
+            log.debug(
+                "volume %d %r: segments %d..%d, compressed=%r, data_section_size=%r, "
+                "dir_section_size=%r -> %d bytes",
+                k,
+                e.description,
+                e.start_seg,
+                e.end_seg,
+                e.compressed,
+                e.data_section_size,
+                e.dir_section_size,
+                size,
+            )
+            if e.end_seg < e.start_seg:
+                log.debug(
+                    "volume %d: end_seg %d < start_seg %d; no segments will be read",
+                    k,
+                    e.end_seg,
+                    e.start_seg,
+                )
+            elif e.end_seg >= len(img.entries):
+                log.debug(
+                    "volume %d: end_seg %d is past the image's %d segments; "
+                    "extraction will fail with IndexError",
+                    k,
+                    e.end_seg,
+                    len(img.entries),
+                )
+            if size == 0:
+                log.debug(
+                    "volume %d: section sizes give 0 bytes (missing/None in the table?); "
+                    "volume body will be empty",
+                    k,
+                )
+            if e.compressed is None:
+                log.debug(
+                    "volume %d: compressed flag is None; treating segments as QIC-122 extents", k
+                )
             stream = SparseVolume(size=size)
             lost: list[int] = []
+            n_bad = 0
             with progress.task(
                 f"volume {k}", total=e.end_seg + 1 - e.start_seg, unit="segments"
             ) as bar:
@@ -137,8 +205,11 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
                     bar.advance()
                     st = img.entries[n].state
                     if st is SegmentState.BAD:
+                        log.debug("segment %d (volume %d): BAD per bad-sector map; skipping", n, k)
+                        n_bad += 1
                         continue
                     if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
+                        log.debug("segment %d (volume %d): state %s; marking lost", n, k, st.name)
                         lost.append(n)
                         continue
                     data = img.segment(n)
@@ -148,10 +219,37 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
                         continue
                     try:
                         ext = qic122.decode_extent(data)
-                    except qic122.Qic122Error:
+                    except qic122.Qic122Error as exc:
+                        log.debug(
+                            "segment %d (volume %d): QIC-122 decode failed (state %s, "
+                            "%d bytes): %s; marking lost",
+                            n,
+                            k,
+                            st.name,
+                            len(data),
+                            exc,
+                        )
                         lost.append(n)
                         continue
+                    if ext.uncompressed_offset + len(ext.data) > size:
+                        log.debug(
+                            "segment %d (volume %d): extent at offset %d + %d bytes runs "
+                            "past volume size %d; bytes beyond it are dropped",
+                            n,
+                            k,
+                            ext.uncompressed_offset,
+                            len(ext.data),
+                            size,
+                        )
                     stream.add(ext.uncompressed_offset, ext.data)
+            log.debug(
+                "volume %d: %d segments skipped (BAD), %d lost, %d of %d bytes covered",
+                k,
+                n_bad,
+                len(lost),
+                stream.coverage(),
+                size,
+            )
             body, _ = stream.read(0, size)
             holes = _holes(stream, size)
             vol = Volume(
@@ -171,6 +269,7 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
                 data=body,
             )
             path = out_dir / f"vol-{k:02d}.twvl"
+            log.debug("volume %d: %d holes; saving to %s", k, len(holes), path)
             vol.save(path)
             missing = sum(b - a for a, b in holes)
             log.info(

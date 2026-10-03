@@ -31,10 +31,13 @@ bench tape those sums total the VTBL's data-section size exactly.
 
 from __future__ import annotations
 
+import logging
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+log = logging.getLogger(__name__)
 
 DATA_ENTRY_SIG = b"\xcc\x33\xcc\x33"  # 0x33CC33CC little endian
 DATA_AREA_SIG = b"\x99\x66\x99\x66"  # 0x66996699 little endian
@@ -83,6 +86,7 @@ class DirEntry:
             d = self._dd(want)
             if d is not None and d.name:
                 return d.name
+        log.debug("entry: no OS-specific name, falling back to first named description")
         return next((d.name for d in self.descriptions if d.name), "")
 
     @property
@@ -110,10 +114,19 @@ class DirEntry:
         d = self._dd(DD_WIN95, DD_NT, DD_OS2)
         off = 20
         if d is None:
+            log.debug("entry %r: no Win95/NT/OS2 description, trying DOS for mtime", self.name)
             d, off = self._dd(DD_DOS), 1
         if d is None or len(d.struct) < off + 4:
+            log.debug(
+                "entry %r: date struct length %s < %d bytes (None = no description); mtime unknown",
+                self.name,
+                None if d is None else len(d.struct),
+                off + 4,
+            )
             return None
         (secs,) = struct.unpack_from("<I", d.struct, off)
+        if secs == _UNKNOWN_DATE:
+            log.debug("entry %r: mtime is the unknown-date marker; returning None", self.name)
         return None if secs == _UNKNOWN_DATE else datetime.fromtimestamp(secs, UTC)
 
 
@@ -122,6 +135,13 @@ def parse_entry(buf: bytes, off: int) -> tuple[DirEntry, int]:
     (rest,) = struct.unpack_from("<H", buf, off)
     end = off + 2 + rest
     if end > len(buf) or rest < 13:
+        log.debug(
+            "dir entry at %d: size %d (end %d) vs buffer %d / minimum 13; raising",
+            off,
+            rest,
+            end,
+            len(buf),
+        )
         raise ValueError(f"directory entry at {off} runs past the buffer")
     e = DirEntry(*struct.unpack_from("<QHHB", buf, off + 2))
     p = off + 15
@@ -139,14 +159,23 @@ def parse_directory(buf: bytes) -> list[DirEntry]:
     """All entries of a File Set Directory Section, up to 'last in set'."""
     entries: list[DirEntry] = []
     off = 0
+    log.debug("directory: parsing %d bytes", len(buf))
     while off + 2 <= len(buf):
         (rest,) = struct.unpack_from("<H", buf, off)
         if rest == 0:
+            log.debug("directory: zero-size entry at %d; end of section", off)
             break
         e, off = parse_entry(buf, off)
         entries.append(e)
         if e.traversal & T_LAST_IN_SET:
+            log.debug(
+                "directory: entry %d %r is last in set; stopping at %d",
+                len(entries) - 1,
+                e.name,
+                off,
+            )
             break
+    log.debug("directory: %d entries", len(entries))
     return entries
 
 
@@ -159,6 +188,7 @@ def directory_paths(entries: list[DirEntry]) -> list[str]:
     '/'; the root entry's own name (e.g. "C:") is the first component.
     """
     if not entries:
+        log.debug("directory_paths: no entries; returning []")
         return []
     paths = [entries[0].name]
     pending = [entries[0].name]  # directories whose level is still to come
@@ -176,6 +206,12 @@ def directory_paths(entries: list[DirEntry]) -> list[str]:
             if e.traversal & T_LAST_IN_DIR:
                 break
         pending[:0] = subdirs
+    if len(paths) < len(entries):
+        log.debug(
+            "directory_paths: traversal placed %d of %d entries; keeping bare names for the rest",
+            len(paths),
+            len(entries),
+        )
     while len(paths) < len(entries):  # malformed tail: keep the names at least
         paths.append(entries[len(paths)].name)
     return paths
@@ -216,6 +252,11 @@ def layout(entries: list[DirEntry], volume: bytes | None = None) -> Iterator[Ent
     otherwise we use the directory's (they agree on the bench tape).
     """
     off = 0
+    log.debug(
+        "layout: placing %d entries (volume %s)",
+        len(entries),
+        "given" if volume is not None else "absent",
+    )
     for k, e in enumerate(entries):
         copy_size = None
         if (
@@ -224,6 +265,12 @@ def layout(entries: list[DirEntry], volume: bytes | None = None) -> Iterator[Ent
             and volume[off : off + 4] == DATA_ENTRY_SIG
         ):
             (copy_size,) = struct.unpack_from("<H", volume, off + 4)
+        if copy_size is None and volume is not None:
+            # Only interesting when we had a volume to read: without one every
+            # entry takes this path by design.
+            log.debug(
+                "layout: entry %d at %d has no Data Entry signature; using directory size", k, off
+            )
         if copy_size is None:
             copy_size = _entry_size(e)
         p = off + 4 + 2 + copy_size + e.path_entry_size

@@ -17,8 +17,12 @@ half above is real and fully tested.
 
 from __future__ import annotations
 
+import logging
+
 from tapewyrm.rawflux import container as rawflux
 from tapewyrm.types import FluxStream, Marker
+
+log = logging.getLogger(__name__)
 
 
 def load(cap: object) -> tuple[FluxStream, list[Marker]]:
@@ -31,8 +35,10 @@ def load(cap: object) -> tuple[FluxStream, list[Marker]]:
     flux_blob: bytes = cap.flux  # type: ignore[attr-defined]
     sample_clock_hz: int = cap.header.sample_clock_hz  # type: ignore[attr-defined]
 
+    log.debug("splitting markers out of %d-byte flux blob", len(flux_blob))
     markers = list(rawflux.iter_markers(flux_blob))
     data = rawflux.flux_data_only(flux_blob)
+    log.debug("decoding %d flux data bytes into intervals (%d markers)", len(data), len(markers))
     intervals = decode_flux_intervals(data)
     return FluxStream(intervals=intervals, sample_clock_hz=sample_clock_hz), markers
 

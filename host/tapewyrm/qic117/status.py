@@ -11,6 +11,8 @@ is the canonical fatal case; reset-occurred is benign.
 
 from __future__ import annotations
 
+import logging
+
 # Re-export the decoders for convenience (they live in types.py — single source).
 from tapewyrm.types import (
     DriveConfig,
@@ -18,6 +20,8 @@ from tapewyrm.types import (
     ErrorCode,
     TapeStatus,
 )
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "DriveConfig",
@@ -174,6 +178,7 @@ def decode_vendor_id(value: int) -> tuple[int, int, str]:
     (value, 0, name) rather than being mis-split into a bogus make/model.
     """
     if value in LEGACY_VENDOR_IDS:
+        log.debug("vendor id 0x%04x is a legacy whole-word id; not splitting make/model", value)
         return value, 0, LEGACY_VENDOR_IDS[value]
     make, model = value >> 6, value & 0x3F
     return make, model, VENDOR_MAKES.get(make, f"unknown make {make}")

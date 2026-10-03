@@ -13,8 +13,11 @@ on it (DESIGN.md §6A.3).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum, auto
+
+log = logging.getLogger(__name__)
 
 
 class Kind(Enum):
@@ -156,6 +159,7 @@ MAX_ARG = 63
 
 def _plus2(value: int) -> int:
     if not 0 <= value <= MAX_ARG:
+        log.debug("argument %d outside 0..%d; refusing", value, MAX_ARG)
         raise ValueError(f"argument {value} outside the 6-bit range 0..{MAX_ARG}")
     return value + 2
 
@@ -180,14 +184,18 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
     """
     if cmd.code == SOFT_SELECT.code:
         # Literal 20 pulses, regardless of value.
+        log.debug("soft select: literal %d pulses, ignoring value %d", SOFT_SELECT_PULSES, value)
         return [SOFT_SELECT_PULSES]
     if not cmd.takes_arg:
+        log.debug("%r (code %d) takes no argument but got %d; refusing", cmd.name, cmd.code, value)
         raise ValueError(f"command {cmd.name!r} (code {cmd.code}) takes no argument")
     if value < 0:
+        log.debug("negative argument %d for %r; refusing", value, cmd.name)
         raise ValueError(f"negative argument for {cmd.name!r}: {value}")
 
     # Diagnostic modes: the command is simply repeated.
     if cmd.code in (TABLE["ENTER_DIAG_MODE_1"].code, TABLE["ENTER_DIAG_MODE_2"].code):
+        log.debug("%r: repeating command code %d, ignoring value %d", cmd.name, cmd.code, value)
         return [cmd.code]
 
     # Two-nibble forms (8-bit value, low nibble then high nibble). Rev J writes
@@ -195,6 +203,7 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
     # masked (a skip of 300 became a skip of 44).
     if cmd.code in (TABLE["SKIP_N_SEGS_REVERSE"].code, TABLE["SKIP_N_SEGS_FORWARD"].code):
         if value > 0xFF:
+            log.debug("Skip N value %d > 255; refusing", value)
             raise ValueError(f"Skip N takes 0..255 segments, got {value} (use the Extended form)")
         return [_plus2(value & 0x0F), _plus2(value >> 4)]
 
@@ -205,6 +214,7 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
         TABLE["SET_N_FORMAT_SEGMENTS"].code,
     ):
         if value > 0xFFF:
+            log.debug("%r value %d > 4095; refusing", cmd.name, value)
             raise ValueError(f"{cmd.name!r} takes 0..4095, got {value}")
         return [
             _plus2(value & 0x0F),

@@ -29,8 +29,11 @@ QIC-113 segment layout (non-spanning volume, the only kind seen so far)::
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 HISTORY = 2048
 _RAW_FRAME = 0x8000
@@ -51,20 +54,32 @@ def decompress(data: bytes) -> bytes:
     i = 0
     while True:
         if i >= n:
+            log.debug(
+                "qic122: bit %d of %d reached with no end marker (%d bytes out); raising",
+                i,
+                n,
+                len(out),
+            )
             raise Qic122Error("stream ended without an end marker")
         if bits[i] == "0":  # raw byte
             if i + 9 > n:
+                log.debug(
+                    "qic122: raw byte at bit %d needs 9 bits, only %d left; raising", i, n - i
+                )
                 raise Qic122Error("truncated raw byte")
             out.append(int(bits[i + 1 : i + 9], 2))
             i += 9
             continue
         # back-reference: offset
         if i + 2 > n:
+            log.debug("qic122: string token at bit %d with only %d bits left; raising", i, n - i)
             raise Qic122Error("truncated string token")
         if bits[i + 1] == "1":
             offset = int(bits[i + 2 : i + 9], 2)
             i += 9
             if offset == 0:
+                # Once per frame, not per token: cheap enough to log.
+                log.debug("qic122: end marker at bit %d of %d; %d bytes out", i, n, len(out))
                 return bytes(out)  # end marker
         else:
             offset = int(bits[i + 2 : i + 13], 2)
@@ -88,6 +103,13 @@ def decompress(data: bytes) -> bytes:
                     if nib != 15:
                         break
         if offset > len(out) or offset > HISTORY:
+            log.debug(
+                "qic122: offset %d > history (%d bytes out, max %d) at bit %d; raising",
+                offset,
+                len(out),
+                HISTORY,
+                i,
+            )
             raise Qic122Error(f"offset {offset} reaches before the start of the history")
         # Byte at a time: the source may overlap the bytes being written
         # (offset < length repeats a pattern, e.g. offset 1 = a run).
@@ -107,8 +129,10 @@ class Extent:
 def decode_extent(segment_data: bytes) -> Extent:
     """Decompress a non-spanning QIC-113 Compression Extent (one segment)."""
     if len(segment_data) < 10:
+        log.debug("extent: segment data is %d bytes (< 10); raising", len(segment_data))
         raise Qic122Error("segment too short for an extent")
     (uoff,) = struct.unpack_from("<Q", segment_data, 0)
+    log.debug("extent: decoding %d bytes at uncompressed offset %d", len(segment_data), uoff)
     pos, end = 8, len(segment_data)
     out = bytearray()
     frames = 0
@@ -116,11 +140,14 @@ def decode_extent(segment_data: bytes) -> Extent:
         (size,) = struct.unpack_from("<H", segment_data, pos)
         n = size & ~_RAW_FRAME
         if n == 0:
+            log.debug("extent: null fill at %d after %d frames; stopping", pos, frames)
             break  # null fill
         body = segment_data[pos + 2 : pos + 2 + n]
         if len(body) != n:
+            log.debug("extent: frame at %d wants %d bytes, %d remain; raising", pos, n, len(body))
             raise Qic122Error(f"frame of {n} bytes overruns the segment at {pos}")
         out += body if size & _RAW_FRAME else decompress(body)
         frames += 1
         pos += 2 + n
+    log.debug("extent: %d frames -> %d bytes", frames, len(out))
     return Extent(uncompressed_offset=uoff, data=bytes(out), frames=frames)

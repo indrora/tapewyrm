@@ -25,9 +25,12 @@ takes ``ftk_per_side`` (default 255, Rev N) and :class:`Geometry` carries it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from tapewyrm.types import Direction, TapeFormat
+
+log = logging.getLogger(__name__)
 
 SECTORS_PER_SEGMENT = 32
 SEGMENTS_PER_FTK = 4
@@ -83,6 +86,7 @@ _SPT_FALLBACK_THRESHOLD = 153
 def fallback_spt(calibrated_length: int | None) -> int:
     """Segments-per-track fallback when geometry can't be reported (§7.3)."""
     if calibrated_length is None:
+        log.debug("no calibrated length; defaulting to %d segments/track", _SPT_FALLBACK_LARGE)
         return _SPT_FALLBACK_LARGE  # 425ft-class default
     return (
         _SPT_FALLBACK_SMALL if calibrated_length <= _SPT_FALLBACK_THRESHOLD else _SPT_FALLBACK_LARGE
@@ -120,7 +124,14 @@ class Geometry:
             tracks = 40 if fmt is TapeFormat.QIC3010 else 50  # TODO(bench): confirm
         else:
             tracks = 28  # 0.250 in QIC-40/80
+        if not segments_per_track:
+            log.debug(
+                "segments_per_track %r not reported; using fallback for calibrated length %r",
+                segments_per_track,
+                calibrated_length,
+            )
         spt = segments_per_track if segments_per_track else fallback_spt(calibrated_length)
+        log.debug("geometry for %s (wide=%s): %d tracks x %d spt", fmt.name, wide, tracks, spt)
         return cls(tracks=tracks, segments_per_track=spt)
 
     def total_segments(self) -> int:

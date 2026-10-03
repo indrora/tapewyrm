@@ -16,6 +16,7 @@ Key hazards honored here:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -32,6 +33,8 @@ from tapewyrm.types import (
     TapeFormat,
     TapeStatus,
 )
+
+log = logging.getLogger(__name__)
 
 
 class TapeError(Exception):
@@ -56,12 +59,14 @@ class TapeTransport:
     @property
     def geometry(self) -> Geometry:
         if self._geom is None:
+            log.debug("geometry requested before identify(); refusing")
             raise TapeError("geometry unknown — call identify() first")
         return self._geom
 
     @property
     def config(self) -> DriveConfig:
         if self._cfg is None:
+            log.debug("drive config requested before identify(); refusing")
             raise TapeError("drive config unknown — call identify() first")
         return self._cfg
 
@@ -74,29 +79,43 @@ class TapeTransport:
         (Report Format Segments, cmd 37, CCS-2); otherwise it falls back to the
         QIC-117 fixed spt override inside ``Geometry.for_format`` (DESIGN.md §7.3).
         """
+        log.debug("identify: waking drive")
         self.drive.wake()
+        log.debug("identify: reading drive configuration")
         cfg = self.drive.config()
         unsupported = False
+        log.debug("identify: reading tape status (cmd 33)")
         try:
             tape = self.drive.tape_status()  # cmd 33 (CCS-1)
-        except LinkError:
+        except LinkError as exc:
             # Pre-CCS-1 drives (e.g. the bench Colorado Jumbo 350) never ACK
             # Report Tape Status. QIC-117 Rev J Note 4: if Report Drive
             # Configuration says QIC-80, the host may assume a QIC-80 tape.
             unsupported = True
             fmt = TapeFormat.QIC80 if cfg.qic80_mode else TapeFormat.QIC40
+            log.debug(
+                "tape status unsupported (%s); assuming %s from qic80_mode=%s",
+                exc,
+                fmt.name,
+                cfg.qic80_mode,
+            )
             tape = TapeStatus(format=fmt, tape_type=0, wide=False, raw=0)
 
         spt: int | None = None
+        log.debug("identify: reading format segments (cmd 37)")
         try:
             reported = self.drive.format_segments()  # cmd 37 (CCS-2)
             spt = reported if reported > 0 else None
-        except LinkError:
+            if spt is None:
+                log.debug("drive reported %d segments/track; using fixed fallback", reported)
+        except LinkError as exc:
             # Basic drive lacking 36/37: fall back to fixed geometry (§2.1, §7.3).
+            log.debug("format segments unsupported (%s); using fixed fallback geometry", exc)
             unsupported = True
             spt = None
 
         if unsupported:
+            log.debug("identify: an unsupported command may have latched; reading status to clear")
             # An unsupported command may latch "undefined command"; read status
             # (which reads+clears the error) so later commands aren't rejected.
             self.drive.status()
@@ -109,10 +128,12 @@ class TapeTransport:
 
     def load_point(self) -> None:
         """Seek load point (cmd 14)."""
+        log.debug("seeking load point")
         self.drive.command(commands.SEEK_LOAD_POINT)
 
     def seek_track(self, t: int) -> None:
         """Seek head to track (cmd 13), operand as N+2 pulses (DESIGN.md §2.1)."""
+        log.debug("seeking head to track %d", t)
         self.drive.command(commands.SEEK_HEAD_TO_TRACK, arg=t)
 
     # --- capture ---
@@ -145,6 +166,14 @@ class TapeTransport:
         )
         stop = StopCond(byte_budget=geom.byte_budget(cfg.rate_kbps))
 
+        log.debug(
+            "capturing track %d pass %d at %d kbps, %s, byte budget %d",
+            track,
+            pass_id,
+            cfg.rate_kbps,
+            hdr.direction.name,
+            stop.byte_budget,
+        )
         with self.drive.link.capture(commands.LOGICAL_FORWARD.code, stop) as cap:
             return RawFluxCapture.from_stream(hdr, cap.chunks())
 
@@ -171,10 +200,11 @@ class TapeTransport:
             code = ec.code if ec is not None else 0
             if classify_error(code):
                 # Stop the tape before raising (DESIGN.md §5.2 — stop, always).
+                log.debug("fatal drive error %d; sending Stop Tape before aborting", code)
                 try:
                     self.drive.command(commands.STOP_TAPE)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Stop Tape failed (%s); aborting anyway", exc)
                 raise TapeError(
                     f"fatal drive error {code} (broken tape?) — aborting sweep (DESIGN.md §6A.4)"
                 )
@@ -196,4 +226,6 @@ class TapeTransport:
 
     def _device_serial(self) -> str:
         info = self.drive.link.info
+        if info is None:
+            log.debug("no device INFO; recording empty device serial")
         return info.serial if info is not None else ""

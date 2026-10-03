@@ -33,6 +33,7 @@ errors.
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -47,6 +48,8 @@ from tapewyrm.console import make_console, progress_display, setup_logging
 from tapewyrm.progress import Progress
 from tapewyrm.qic117.profile import load_profile
 from tapewyrm.types import DriveProfile
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,20 +85,27 @@ class AppContext:
         otherwise the profile / built-in defaults apply.
         """
         file_settings: dict[str, Any] = {}
+        # Note: this runs before setup_logging(), so these debug lines only
+        # show if logging was configured by something else first.
         if config is not None:
             cfg_path = Path(config)
             if cfg_path.exists():
+                log.debug("loading config %s", cfg_path)
                 with cfg_path.open("rb") as f:
                     file_settings = tomllib.load(f)
+            else:
+                log.debug("config %s does not exist; using CLI/profile defaults", cfg_path)
 
         # Precedence for each resolvable setting.
         resolved_port = port if port is not None else file_settings.get("port")
         resolved_profile_name = (
             profile if profile is not None else file_settings.get("profile", "default")
         )
+        log.debug("loading drive profile %r", resolved_profile_name)
         try:
             prof = load_profile(resolved_profile_name)
         except Exception as exc:  # ProfileError or IO — surface as a CLI error
+            log.debug("profile %r failed to load: %r", resolved_profile_name, exc)
             raise click.ClickException(
                 f"could not load profile {resolved_profile_name!r}: {exc}"
             ) from exc
@@ -143,6 +153,14 @@ def cli(
     app = AppContext.load(port, profile, config)
     app.show_progress = show_progress
     setup_logging(app.console, verbose, quiet)
+    log.debug(
+        "context: port=%r profile=%r passes=%d out_dir=%s progress=%s",
+        app.port,
+        app.profile_name,
+        app.passes,
+        app.out_dir,
+        show_progress,
+    )
     ctx.obj = app
 
 
@@ -172,19 +190,26 @@ def _drive_session(
 
     link = DeviceLink()
     try:
+        log.debug("opening link on port %r", app.port)
         link.open(app.port)
+        log.debug("releasing drive-select lines before wake")
         link.deselect()  # phantom drives want every DS line idle
         drive = Qic117Drive(link, profile or app.profile)
         if wake:
+            log.debug("waking drive with profile %r", (profile or app.profile).name)
             drive.wake()
+        else:
+            log.debug("skipping wake sequence (wake=False)")
         yield drive
     except (LinkError, DriveError) as exc:
+        log.debug("drive session failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     finally:
+        log.debug("closing drive session: deselect and close link")
         try:
             link.deselect()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("deselect on close failed (ignored): %r", exc)
         link.close()
 
 
@@ -332,6 +357,7 @@ def drive_deselect(app: AppContext) -> None:
     from tapewyrm.qic117 import commands
 
     with _drive_session(app, wake=False) as d:
+        log.debug("sending Phantom Deselect")
         d.link.command_txn(commands.TABLE["PHANTOM_DESELECT"].code)
         period = _cue_period_ms(d.link.scope(0, 30))
         click.echo(
@@ -368,7 +394,8 @@ def drive_status(app: AppContext) -> None:
         for label, name, bits, decode in reports:
             try:
                 val = d.report(commands.TABLE[name], bits)
-            except LinkError:
+            except LinkError as exc:
+                log.debug("%s (%s) not acknowledged: %r; clearing status", label, name, exc)
                 click.echo(f"{label:<13}: not supported by this drive (no ACK)")
                 d.status()  # clear whatever the unsupported command latched
                 continue
@@ -388,6 +415,7 @@ def drive_report(app: AppContext, name: str) -> None:
     else:  # accept "rom version" as well as "report rom version"
         cmd = commands.TABLE.get(key) or commands.TABLE.get(f"REPORT_{key}")
     if cmd is None or cmd.code not in _REPORT_BITS:
+        log.debug("report name %r -> key %r -> %r; not a report command", name, key, cmd)
         names = ", ".join(commands.BY_CODE[c].name for c in sorted(_REPORT_BITS))
         raise click.BadParameter(f"not a report command; one of: {names}", param_hint="NAME")
     with _drive_session(app) as d:
@@ -594,9 +622,13 @@ def info(app: AppContext) -> None:
 
     link = DeviceLink()
     try:
+        log.debug("opening link on port %r (ungated) for info", app.port)
         dev = link.open(app.port, gate=False)
+        if not dev.proto_ver:
+            log.debug("no Tapewyrm protocol version; skipping BUILD_INFO")
         fw = link.build_info() if dev.proto_ver else None
     except LinkError as exc:
+        log.debug("info: link failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     finally:
         link.close()
@@ -622,6 +654,7 @@ def _parse_tracks(spec: str) -> list[int]:
         a, _, b = part.strip().partition("-")
         lo, hi = int(a), int(b or a)
         if not 0 <= lo <= hi <= 63:
+            log.debug("track range %r -> %d..%d outside 0..63 or reversed; refusing", part, lo, hi)
             raise click.BadParameter(f"bad track range {part!r}", param_hint="--tracks")
         out.update(range(lo, hi + 1))
     return sorted(out)
@@ -649,10 +682,12 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
 
     track_list = _parse_tracks(tracks)
+    log.debug("dumping tracks %s to %s (check=%s)", track_list, out, check)
     with _drive_session(app) as d, app.progress() as prog:
         try:
             results = dump_tracks(d, track_list, Path(out), progress=prog, check=check)
         except DumpStopped as exc:
+            log.debug("dump stopped: %r", exc)
             raise click.ClickException(f"dump stopped: {exc}") from exc
     segments = sum(r.index_pulses for r in results)
     line = f"done: {len(results)} tracks, {segments} segments by INDEX"
@@ -685,10 +720,12 @@ def convert(app: AppContext, sources: tuple[Path, ...], out: Path) -> None:
     """
     from tapewyrm.image.twti import convert as do_convert
 
+    log.debug("converting %d sources to %s", len(sources), out)
     try:
         with app.progress() as prog:
             do_convert(list(sources), out, progress=prog)
     except ValueError as exc:
+        log.debug("convert failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
 
 
@@ -708,10 +745,12 @@ def extract(app: AppContext, image: Path, out: Path) -> None:
     """
     from tapewyrm.image.twvl import extract as do_extract
 
+    log.debug("extracting %s to %s", image, out)
     try:
         with app.progress() as prog:
             do_extract(image, out, progress=prog)
     except ValueError as exc:
+        log.debug("extract failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
 
 
@@ -737,10 +776,12 @@ def identify(app: AppContext, source: Path, as_json: bool, tape_profile: str, ra
     from tapewyrm.codec.tape_profile import TapeProfileError
     from tapewyrm.image.identify import format_info, identify, to_dict
 
+    log.debug("identifying %s (tape profile %r)", source, tape_profile)
     try:
         with app.progress() as prog:
             info = identify(source, tape_profile=tape_profile, progress=prog)
     except (ValueError, TapeProfileError) as exc:
+        log.debug("identify failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     if as_json:
         click.echo(json.dumps(to_dict(info), indent=1))
@@ -762,11 +803,14 @@ def flash(app: AppContext, image: str, use_dfu: bool) -> None:
 
     try:
         if use_dfu:
+            log.debug("flashing %s via DFU", image)
             run_dfu(image)
         else:
+            log.debug("flashing %s via app bootloader on port %r", image, app.port)
             app_update(image, port=app.port)
         click.echo(f"flashed {image}")
     except FlashError as exc:
+        log.debug("flash failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
 
 
@@ -780,10 +824,12 @@ def dfu(app: AppContext, image: str, dfu_util: str, vid_pid: str | None, alt: in
     """Recovery / first flash via the AT32 ROM bootloader (strap the DFU header)."""
     from tapewyrm.link.update import FlashError, run_dfu  # noqa: PLC0415
 
+    log.debug("running %s for %s (device %r, alt %d)", dfu_util, image, vid_pid, alt)
     try:
         run_dfu(image, dfu_util=dfu_util, vid_pid=vid_pid, alt=alt)
         click.echo(f"flashed {image} via DFU")
     except FlashError as exc:
+        log.debug("dfu failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
 
 

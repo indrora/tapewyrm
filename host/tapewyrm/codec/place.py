@@ -13,10 +13,13 @@ counted as erasures downstream (the RS layer treats ``deleted`` as an erasure).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from tapewyrm.tape.geometry import Geometry
 from tapewyrm.types import RawSector, Segment
+
+log = logging.getLogger(__name__)
 
 
 def place(sectors: Iterable[RawSector], geom: Geometry) -> dict[tuple[int, int], Segment]:
@@ -29,6 +32,9 @@ def place(sectors: Iterable[RawSector], geom: Geometry) -> dict[tuple[int, int],
     wins — see the slot-fill rule below).
     """
     segments: dict[tuple[int, int], Segment] = {}
+    # Slot collisions are tallied and logged once after the loop.
+    n_placed = n_replaced = n_kept = 0
+    log.debug("placing sectors into segment bins")
 
     for sec in sectors:
         seg_abs, tpt, tps, slot = geom.place(sec.fsd, sec.ftk, sec.fsc)
@@ -40,8 +46,21 @@ def place(sectors: Iterable[RawSector], geom: Geometry) -> dict[tuple[int, int],
 
         existing = segment.sectors[slot]
         if _prefer(sec, existing):
+            if existing is not None:
+                n_replaced += 1
             segment.sectors[slot] = sec
+        else:
+            n_kept += 1
+        n_placed += 1
 
+    log.debug(
+        "placed %d sectors into %d segments; %d slot collisions replaced a CRC-bad copy, "
+        "%d kept the existing copy",
+        n_placed,
+        len(segments),
+        n_replaced,
+        n_kept,
+    )
     return segments
 
 

@@ -22,11 +22,14 @@ a clear ``TODO(bench)`` drop-in for STAC LZS / DCLZ (DESIGN.md §7.5, §9 item 7
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
 
 from tapewyrm.codec.volume import VtblEntry, decode_short_date
 from tapewyrm.types import FileEntry, FileSet
+
+log = logging.getLogger(__name__)
 
 # Signatures (DESIGN.md §7.5) ------------------------------------------------
 #: Directory/Data Entry signature 0x33CC33CC, little-endian on tape -> CC 33 CC 33.
@@ -77,6 +80,7 @@ class DirEntry:
     def mtime_epoch(self) -> int | None:
         decoded = decode_short_date(self.modify_date)
         if decoded is None:
+            log.debug("entry %r: no modify date (0x%08x); mtime None", self.name, self.modify_date)
             return None
         import calendar
 
@@ -85,6 +89,7 @@ class DirEntry:
             # decode_short_date already returns a 1-based month and day.
             return calendar.timegm((year, mo, dy, hr, mn, sc, 0, 0, 0))
         except (ValueError, OverflowError):
+            log.debug("entry %r: date %r is out of range; mtime None", self.name, decoded)
             return None
 
 
@@ -96,6 +101,9 @@ def _parse_dir_entry(stream: bytes, off: int) -> tuple[DirEntry, int] | None:
     Name Portion: 1B name size + ASCII name.
     """
     if off + 11 > len(stream):
+        log.debug(
+            "dir entry at %d: fixed portion runs past %d-byte stream; stopping", off, len(stream)
+        )
         return None
     fixed_vendor_size = stream[off]
     attrs = stream[off + 1]
@@ -112,6 +120,13 @@ def _parse_dir_entry(stream: bytes, off: int) -> tuple[DirEntry, int] | None:
         cursor += vendor_len
 
     if cursor >= len(stream):
+        log.debug(
+            "dir entry at %d: name portion at %d is past %d-byte stream (vendor size %d); stopping",
+            off,
+            cursor,
+            len(stream),
+            fixed_vendor_size,
+        )
         return None
     name_size = stream[cursor]
     cursor += 1
@@ -153,14 +168,20 @@ def _parse_directory_section(stream: bytes) -> tuple[list[DirEntry], int]:
     """
     entries: list[DirEntry] = []
     off = 0
+    log.debug("directory: parsing section from %d-byte stream", len(stream))
     while off < len(stream):
         parsed = _parse_dir_entry(stream, off)
         if parsed is None:
+            log.debug(
+                "directory: unparseable entry at %d; stopping with %d entries", off, len(entries)
+            )
             break
         entry, off = parsed
         entries.append(entry)
         if entry.last_in_table:
+            log.debug("directory: %r is last in table; section ends at %d", entry.name, off)
             break
+    log.debug("directory: %d entries, section ends at %d", len(entries), off)
     return entries, off
 
 
@@ -221,6 +242,7 @@ class DataEntry:
 def _parse_path_entry(stream: bytes, off: int) -> tuple[str, int] | None:
     """Parse a Path Entry: 1B size + null-separated ASCII path."""
     if off >= len(stream):
+        log.debug("path entry at %d is past %d-byte stream; stopping", off, len(stream))
         return None
     size = stream[off]
     off += 1
@@ -235,17 +257,21 @@ def _parse_basic_data_section(stream: bytes, start: int) -> list[DataEntry]:
     entries: list[DataEntry] = []
     off = start
     n = len(stream)
+    log.debug("basic data: walking data entries from %d of %d bytes", start, n)
     while off < n:
         sig_at = stream.find(SIG_DATA_ENTRY, off)
         if sig_at < 0:
+            log.debug("basic data: no data entry signature after %d; done", off)
             break
         cursor = sig_at + 4
         parsed = _parse_dir_entry(stream, cursor)
         if parsed is None:
+            log.debug("basic data: bad directory entry copy at %d; stopping", cursor)
             break
         dir_entry, cursor = parsed
         path_parsed = _parse_path_entry(stream, cursor)
         if path_parsed is None:
+            log.debug("basic data: no path entry for %r at %d; stopping", dir_entry.name, cursor)
             break
         path, cursor = path_parsed
         size = dir_entry.data_entry_size
@@ -253,6 +279,7 @@ def _parse_basic_data_section(stream: bytes, start: int) -> list[DataEntry]:
         cursor += size
         entries.append(DataEntry(path=path, data=data, dir_entry=dir_entry))
         off = cursor
+    log.debug("basic data: %d data entries", len(entries))
     return entries
 
 
@@ -275,17 +302,21 @@ def _parse_extended_data_section(stream: bytes, start: int) -> list[DataEntry]:
     entries: list[DataEntry] = []
     off = start
     n = len(stream)
+    log.debug("extended data: walking data entries from %d of %d bytes", start, n)
     while off < n:
         sig_at = stream.find(SIG_DATA_ENTRY, off)
         if sig_at < 0:
+            log.debug("extended data: no data entry signature after %d; done", off)
             break
         cursor = sig_at + 4
         parsed = _parse_dir_entry(stream, cursor)
         if parsed is None:
+            log.debug("extended data: bad directory entry copy at %d; stopping", cursor)
             break
         dir_entry, cursor = parsed
         path_parsed = _parse_path_entry(stream, cursor)
         if path_parsed is None:
+            log.debug("extended data: no path entry for %r at %d; stopping", dir_entry.name, cursor)
             break
         path, cursor = path_parsed
 
@@ -300,6 +331,11 @@ def _parse_extended_data_section(stream: bytes, start: int) -> list[DataEntry]:
                 break
             apos = area_sig + 4
             if apos + 2 > area_end:
+                log.debug(
+                    "extended data: %r area at %d has no room for its ID; ending entry",
+                    path,
+                    area_sig,
+                )
                 break
             (area_id,) = struct.unpack_from("<H", stream, apos)
             apos += 2
@@ -315,6 +351,7 @@ def _parse_extended_data_section(stream: bytes, start: int) -> list[DataEntry]:
 
         entries.append(DataEntry(path=path, data=primary, dir_entry=dir_entry))
         off = area_end
+    log.debug("extended data: %d data entries", len(entries))
     return entries
 
 
@@ -338,9 +375,20 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
         # section 6: F = 6, G = 7). Any revision counts -- this used to demand
         # exactly 7 and so misread the bench tape's Rev F volume as Basic DOS.
         if ext1 == 113 and ext2 >= 1:
+            log.debug(
+                "vtbl %r: QIC-113 signature %d rev %d; Extended-OS", vtbl.description, ext1, ext2
+            )
             return True
+        log.debug(
+            "vtbl %r: vendor bit set but ext words %d/%d; not Extended-OS",
+            vtbl.description,
+            ext1,
+            ext2,
+        )
     if len(raw) >= 126 and raw[125] == 1:
+        log.debug("vtbl %r: OS type byte 125 = 1; Basic-DOS", vtbl.description)
         return False  # explicit Basic-DOS
+    log.debug("vtbl %r: no Extended-OS marker; defaulting to Basic-DOS", vtbl.description)
     return False
 
 
@@ -361,8 +409,17 @@ def maybe_decompress(stream: bytes, vtbl: VtblEntry) -> bytes:
     ``FileSet.compressed`` so the user knows the bytes are still compressed.
     """
     if not vtbl.compressed:
+        log.debug(
+            "vtbl %r: compressed=%s; passing stream through", vtbl.description, vtbl.compressed
+        )
         return stream
     # TODO(bench): parse Compression Extents/Frames and invoke STAC LZS / DCLZ.
+    log.debug(
+        "vtbl %r: compressed (code %s) but no codec hooked in; passing %d bytes through as-is",
+        vtbl.description,
+        vtbl.compression_code,
+        len(stream),
+    )
     return stream
 
 
@@ -375,6 +432,7 @@ def _strip_link_subsection(stream: bytes) -> bytes:
     """Recognize and drop a trailing multi-cartridge ``LTLT`` sub-section."""
     idx = stream.find(SIG_LTLT)
     if idx >= 0:
+        log.debug("LTLT link sub-section at %d of %d; truncating", idx, len(stream))
         return stream[:idx]
     return stream
 
@@ -385,6 +443,7 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
     Handles Directory-First vs Directory-Last layout (VTBL byte 56 bit 5),
     Basic-DOS vs Extended-OS, the ``LTLT`` skip, and the compression hook.
     """
+    log.debug("extract: %r, %d-byte volume data area", vtbl.description, len(stream))
     extended = is_extended_os(vtbl)
     fileset = FileSet(
         name=vtbl.description or ("C:" if not extended else "volume"),
@@ -400,13 +459,16 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
         # directory by subtracting Directory Section Size (rounded up to whole
         # segments) from the end. At the framing level we scan from there.
         dir_start = _directory_last_offset(stream, vtbl)
+        log.debug("extract: directory-last layout, directory at %d", dir_start)
         dir_entries, _ = _parse_directory_section(stream[dir_start:])
         data_section_start = 0
     else:
+        log.debug("extract: directory-first layout")
         dir_entries, dir_end = _parse_directory_section(stream)
         data_section_start = dir_end
 
     # Build the tree (gives directory nodes + full paths) and add directories.
+    log.debug("extract: building tree from %d directory entries", len(dir_entries))
     tree = _build_tree(dir_entries)
     flat = _flatten(tree)
     dirs_by_path: dict[str, _TreeNode] = {n.path: n for n in flat}
@@ -433,6 +495,10 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
         # Prefer the tree node's metadata if the path matches; fall back to the
         # data entry's own copy of the directory entry.
         match = dirs_by_path.get(de.path)
+        if match is None:
+            log.debug(
+                "extract: %r not in the directory tree; using its data entry's metadata", de.path
+            )
         meta = match.entry if match is not None else de.dir_entry
         fileset.files.append(
             FileEntry(
@@ -462,10 +528,17 @@ def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:
     """
     size = vtbl.dir_section_size or 0  # None for vendor-specific volumes
     if 0 < size <= len(stream):
+        log.debug("directory-last: section size %d fits %d-byte stream", size, len(stream))
         return len(stream) - size
+    log.debug(
+        "directory-last: section size %s unusable for %d-byte stream; scanning for last data entry",
+        vtbl.dir_section_size,
+        len(stream),
+    )
     # Fallback: assume the directory begins right after the final data entry.
     last_sig = stream.rfind(SIG_DATA_ENTRY)
     if last_sig < 0:
+        log.debug("directory-last: no data entry signature; assuming directory at 0")
         return 0
     # Skip past the last data entry's anchor; the directory follows the gap.
     return last_sig

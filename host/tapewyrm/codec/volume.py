@@ -15,6 +15,7 @@ file set's Volume Data Area byte stream (DESIGN.md §7.5 input).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
@@ -22,6 +23,8 @@ from tapewyrm.codec import place
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.tape.geometry import Geometry, coord_to_lsn
 from tapewyrm.types import RawSector, Segment, SegmentStatus
+
+log = logging.getLogger(__name__)
 
 # Format parameter record (DESIGN.md §7.3) ----------------------------------
 FPR_SIGNATURE = b"\x55\xaa\x55\xaa"
@@ -149,6 +152,7 @@ def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None
     ``0`` and all-ones are treated as undefined -> None.
     """
     if packed == 0 or packed == 0xFFFFFFFF:
+        log.debug("short date 0x%08x is undefined; returning None", packed)
         return None
     year = (packed >> 25) & 0x7F
     rest = packed & 0x01FFFFFF
@@ -185,6 +189,9 @@ def parse_header_data(data: bytes) -> tuple[VolumeInfo, BadSectorMap]:
     ``data`` is the header segment's corrected data area (29 sectors); sector 0
     holds the format parameter record, sectors 0..28 the bad-sector map.
     """
+    log.debug("header: parsing format parameter record from %d bytes", len(data))
+    if len(data) < 1024:
+        log.debug("header: data is %d bytes (< 1024); zero-padding sector 0", len(data))
     sector0 = data[:1024] if len(data) >= 1024 else data.ljust(1024, b"\x00")
 
     def u16(off: int) -> int:
@@ -264,22 +271,39 @@ def locate_header(sectors: Iterable[RawSector], fallback: Geometry) -> LocatedHe
     Returns ``None`` when no segment carries the signature.
     """
     merged = list(sectors)
+    log.debug("locate_header: placing %d sectors under fallback geometry %s", len(merged), fallback)
     segs = place.place(merged, fallback)
+    log.debug("locate_header: searching %d segments for the header", len(segs))
     found = _find_header(segs)
     if found is None:
+        log.debug("locate_header: no segment carries the FPR signature; returning None")
         return None
     header, header_status, header_data = found
     vol, bsm = parse_header_data(header_data)
 
     geom = fallback
+    if not vol.segments_per_track:
+        log.debug("locate_header: header has segments_per_track=0; keeping fallback geometry")
     if vol.segments_per_track:
+        if not vol.tracks:
+            log.debug("locate_header: header tracks=0; using fallback %d", fallback.tracks)
+        if not vol.max_ftk:
+            log.debug(
+                "locate_header: header max_ftk=0; using fallback ftk_per_side %d",
+                fallback.ftk_per_side,
+            )
         geom = Geometry(
             tracks=vol.tracks or fallback.tracks,
             segments_per_track=vol.segments_per_track,
             ftk_per_side=vol.max_ftk + 1 if vol.max_ftk else fallback.ftk_per_side,
         )
+        log.debug(
+            "locate_header: re-placing %d sectors under header geometry %s", len(merged), geom
+        )
         segs = place.place(merged, geom)
-    apply_bsm(segs, bsm)
+    log.debug("locate_header: applying bad-sector map")
+    marked = apply_bsm(segs, bsm)
+    log.debug("locate_header: %d sectors excluded by the bad-sector map", marked)
     return LocatedHeader(vol, bsm, geom, segs, header, header_status)
 
 
@@ -287,19 +311,38 @@ def _find_header(
     segs: dict[tuple[int, int], Segment],
 ) -> tuple[Segment, SegmentStatus, bytes] | None:
     """First segment whose (possibly RS-corrected) data begins with the FPR signature."""
+    # Per-segment misses are counted, not logged one by one: with no header on
+    # the capture, every segment on the tape would land here.
+    skipped_readable = 0
+    rs_tried = 0
     for seg in sorted(segs.values(), key=lambda s: s.seg):
         data = seg_mod.segment_data(seg)
         if data[:4] == FPR_SIGNATURE:
+            log.debug(
+                "header: FPR signature in raw segment %d (after %d readable misses, %d RS tries)",
+                seg.seg,
+                skipped_readable,
+                rs_tried,
+            )
             return seg, seg_mod.classify(seg), data
         sector0 = seg.sectors[0]
         if sector0 is not None and sector0.data_crc_ok and not sector0.deleted:
+            skipped_readable += 1
             continue  # sector 0 read fine and is not a header: not this one
         # Sector 0 is unreadable. Only RS can say whether this was the header.
         # (Deleted-data segments before the header land here too; they are all
         # erasures, so the solve gives up at once.)
+        log.debug("header: segment %d sector 0 unreadable; trying RS correction", seg.seg)
+        rs_tried += 1
         res = seg_mod.correct_segment(seg)
         if res.status is not SegmentStatus.UNCORRECTABLE and res.data[:4] == FPR_SIGNATURE:
+            log.debug("header: FPR signature in RS-corrected segment %d (%s)", seg.seg, res.status)
             return seg, res.status, res.data
+    log.debug(
+        "header: not found (%d readable non-header segments, %d RS tries); returning None",
+        skipped_readable,
+        rs_tried,
+    )
     return None
 
 
@@ -334,7 +377,11 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
     scan from a conventional offset and stop at the terminator.
     """
     bsm = BadSectorMap()
+    log.debug("bsm: parsing bad-sector map for format code %d", format_code)
     if format_code != 4:
+        log.debug(
+            "bsm: format code %d is not 4; using the fixed per-segment mask layout", format_code
+        )
         end = min(len(header_data), 29 * 1024)
         for seg_abs, off in enumerate(range(FIXED_BSM_OFFSET, end - 3, 4)):
             mask = int.from_bytes(header_data[off : off + 4], "little")
@@ -344,6 +391,7 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
                 bsm.bad_lsns.update(
                     seg_abs * Segment.SECTORS + k for k in range(32) if mask >> k & 1
                 )
+        log.debug("bsm: %d bad segments, %d bad sectors", len(bsm.bad_segments), len(bsm.bad_lsns))
         return bsm
     i = BSM_OFFSET
     end = len(header_data)
@@ -352,10 +400,12 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
         b1 = header_data[i + 1]
         b2 = header_data[i + 2]
         if b0 == 0 and b1 == 0 and b2 == 0:
+            log.debug("bsm: terminator at offset %d", i)
             break  # terminator
         seg_flag = bool(b2 & 0x80)
         lsn_1based = b0 | (b1 << 8) | ((b2 & 0x7F) << 16)
         if lsn_1based == 0:
+            log.debug("bsm: entry at offset %d has LSN 0 (segment flag only); stopping", i)
             break
         lsn0 = lsn_1based - 1
         if seg_flag:
@@ -363,6 +413,7 @@ def _parse_bsm(header_data: bytes, format_code: int = 4) -> BadSectorMap:
         else:
             bsm.bad_lsns.add(lsn0)
         i += 3
+    log.debug("bsm: %d bad segments, %d bad sectors", len(bsm.bad_segments), len(bsm.bad_lsns))
     return bsm
 
 
@@ -392,6 +443,7 @@ def apply_bsm(segs: dict[tuple[int, int], Segment], bsm: BadSectorMap) -> int:
 
 def parse_volume_table(seg: Segment) -> list[VtblEntry]:
     """Parse a volume-table :class:`Segment` (see :func:`parse_volume_table_data`)."""
+    log.debug("vtbl: parsing volume table from segment %d", seg.seg)
     return parse_volume_table_data(seg_mod.segment_data(seg))
 
 
@@ -420,6 +472,7 @@ def vtbl_records(data: bytes) -> list[bytes]:
         if sig == SIG_VTBL:
             records.append(rec)
         elif sig in (SIG_XTBL, SIG_UTID, SIG_EXVT):
+            log.debug("vtbl: %r record at %d is not a file set; skipping", sig, off)
             # Rev N §8.1-8.3: XTBL extends the preceding VTBL (unicode name and
             # password), UTID is a unicode tape name, EXVT chains the table into
             # another segment. None of them is a file set of its own (XTBL used to
@@ -427,9 +480,13 @@ def vtbl_records(data: bytes) -> list[bytes]:
             # TODO: follow EXVT (bytes 6-7 = child segment) for long tables.
             pass
         elif sig == b"\x00\x00\x00\x00":
+            log.debug("vtbl: empty record at %d; end of table", off)
             break  # empty record => end of table
+        else:
+            log.debug("vtbl: unknown signature %r at %d; skipping record", sig, off)
         # Unknown 4cc: skip this record and continue scanning.
         off += VTBL_ENTRY_LEN
+    log.debug("vtbl: %d VTBL records", len(records))
     return records
 
 
@@ -468,6 +525,12 @@ def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
     if entry.flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:
         # Vendor specific and NOT a QIC-113 volume: per QIC-80 Rev N nothing
         # past byte 56 is defined.
+        log.debug(
+            "vtbl %r: vendor-specific, signature %d != %d; leaving bytes 57+ undecoded",
+            entry.description,
+            int.from_bytes(rec[58:60], "little"),
+            QIC113_SIGNATURE,
+        )
         return entry
     # Either a plain QIC-80 entry, or a vendor-specific one carrying the QIC-113
     # signature (58/59 = 113, 60/61 = QIC-113 revision: F = 6, G = 7), whose
@@ -508,24 +571,44 @@ def volume_streams(
     spt = vol.segments_per_track or 1
     by_abs = _segments_by_abs(segs)
 
+    log.debug("volume_streams: looking for the volume table among %d segments", len(segs))
     vtbl_seg = find_volume_table_segment(segs)
     if vtbl_seg is None:
+        log.debug("volume_streams: no volume table segment; returning no streams")
         return []
     entries = parse_volume_table(vtbl_seg)
 
     streams: list[tuple[VtblEntry, bytes]] = []
     for entry in entries:
+        log.debug(
+            "volume_streams: assembling %r from segments %d-%d",
+            entry.description,
+            entry.start_seg,
+            entry.end_seg,
+        )
         out = bytearray()
+        # Per-segment skips are counted and summarized after the loop.
+        bad_skipped = 0
+        missing = 0
         for seg_abs in range(entry.start_seg, entry.end_seg + 1):
             if bsm.is_segment_bad(seg_abs):
+                bad_skipped += 1
                 continue
             tpt, tps = divmod(seg_abs, spt)
             seg = by_abs.get(seg_abs) or segs.get((tpt, tps))
             if seg is None:
                 # Missing segment: emit zero-filled data area to preserve offsets.
+                missing += 1
                 out.extend(bytes(DATA_SECTORS_PER_SEGMENT * 1024))
                 continue
             out.extend(seg_mod.segment_data(seg))
+        if bad_skipped or missing:
+            log.debug(
+                "volume_streams: %r skipped %d BSM-bad segments, zero-filled %d missing",
+                entry.description,
+                bad_skipped,
+                missing,
+            )
         streams.append((entry, bytes(out)))
     return streams
 
@@ -541,7 +624,9 @@ def find_volume_table_segment(segs: dict[tuple[int, int], Segment]) -> Segment |
     for seg in candidates:
         data = seg_mod.segment_data(seg)
         if data[:4] in (SIG_VTBL, SIG_XTBL):
+            log.debug("vtbl: volume table signature %r in segment %d", data[:4], seg.seg)
             return seg
+    log.debug("vtbl: no VTBL/XTBL signature in %d segments; returning None", len(candidates))
     return None
 
 

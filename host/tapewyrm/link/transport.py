@@ -29,10 +29,16 @@ either without change.
 
 from __future__ import annotations
 
+import logging
 import struct
 from collections import deque
 from collections.abc import Iterator
 from typing import Protocol, runtime_checkable
+
+# Logging rule for this module: the read/write paths run once per USB packet
+# while a capture streams, so they log ONLY on guard/failure branches -- never
+# on the success path. Lifecycle (open/close/abort) is rare and logs freely.
+log = logging.getLogger(__name__)
 
 # GW command-packet framing. Request header = cmd:u8 + total_len:u8 (total_len
 # counts the 2 header bytes); response header = cmd_echo:u8 + ack:u8.
@@ -61,8 +67,10 @@ class TransportClosed(TransportError):
 def encode_frame(opcode: int, payload: bytes = b"") -> bytes:
     """Encode one GW request packet: {cmd:u8, total_len:u8, payload}."""
     if not 0 <= opcode <= 0xFF:
+        log.debug("encode_frame: opcode %d outside 0..255; refusing", opcode)
         raise ValueError(f"opcode out of range: {opcode}")
     if len(payload) > MAX_PAYLOAD:
+        log.debug("encode_frame: payload %d B > max %d B; refusing", len(payload), MAX_PAYLOAD)
         raise ValueError(f"payload too long for GW u8 length field: {len(payload)}")
     return _FRAME_HEADER.pack(opcode, FRAME_HEADER_LEN + len(payload)) + payload
 
@@ -70,6 +78,7 @@ def encode_frame(opcode: int, payload: bytes = b"") -> bytes:
 def decode_frame_header(header: bytes) -> tuple[int, int]:
     """Decode a 2-byte GW response header into (cmd_echo, ack)."""
     if len(header) != FRAME_HEADER_LEN:
+        log.debug("frame header is %d B, want %d; refusing", len(header), FRAME_HEADER_LEN)
         raise TransportError(f"short frame header: {len(header)} bytes")
     echo, ack = _FRAME_HEADER.unpack(header)
     return echo, ack
@@ -146,30 +155,36 @@ class SerialTransport:
 
     def open(self) -> None:
         if self.is_open:
+            log.debug("%s already open; nothing to do", self.port)
             return
         try:
             import serial  # pyserial; imported lazily so the module loads w/o hardware
         except ImportError as exc:  # pragma: no cover - dep is declared, defensive only
+            log.debug("pyserial import failed: %s", exc)
             raise TransportError("pyserial is required for SerialTransport") from exc
+        log.debug("opening %s at %d baud (timeout %.1f s)", self.port, self.baud, self.timeout_s)
         try:
             self._serial = serial.Serial(
                 self.port, self.baud, timeout=self.timeout_s, write_timeout=self.timeout_s
             )
         except Exception as exc:  # serial.SerialException et al.
+            log.debug("open %s failed: %s", self.port, exc)
             raise TransportError(f"could not open serial port {self.port!r}: {exc}") from exc
 
     def close(self) -> None:
         ser = self._serial
         if ser is not None:
+            log.debug("closing %s", self.port)
             try:
                 ser.close()  # type: ignore[attr-defined]
-            except Exception:  # pragma: no cover - best-effort teardown
-                pass
+            except Exception as exc:  # pragma: no cover - best-effort teardown
+                log.debug("close %s failed (ignored): %s", self.port, exc)
         self._serial = None
 
     def _require(self) -> object:
         ser = self._serial
         if ser is None or not self.is_open:
+            log.debug("%s: transport used while closed; refusing", self.port)
             raise TransportClosed("serial transport is not open")
         return ser
 
@@ -179,6 +194,7 @@ class SerialTransport:
             ser.write(encode_frame(opcode, payload))  # type: ignore[attr-defined]
             ser.flush()  # type: ignore[attr-defined]
         except Exception as exc:
+            log.debug("write of frame 0x%02x failed: %s", opcode, exc)
             raise TransportError(f"frame write failed: {exc}") from exc
 
     # Greaseweazle's out-of-band reset: a CDC SET_LINE_CODING to this baud makes
@@ -197,19 +213,26 @@ class SerialTransport:
         flux still in flight is drained so the next response starts clean.
         """
         ser = self._require()
+        log.debug("abort: clear-comms baud change on %s", self.port)
+        drained = 0
         try:
             ser.baudrate = self.BAUD_CLEAR_COMMS  # type: ignore[attr-defined]
             ser.baudrate = self.baud  # type: ignore[attr-defined]
             old_timeout = ser.timeout  # type: ignore[attr-defined]
             ser.timeout = self._DRAIN_QUIET_S  # type: ignore[attr-defined]
             try:
-                while ser.read(65536):  # type: ignore[attr-defined]
-                    pass  # discard until the line has been quiet for a moment
+                # Discard until the line has been quiet for a moment. The byte
+                # count is kept only for the debug line below: a big number
+                # means a lot of flux was still in flight when we pulled the plug.
+                while chunk := ser.read(65536):  # type: ignore[attr-defined]
+                    drained += len(chunk)
             finally:
                 ser.timeout = old_timeout  # type: ignore[attr-defined]
             ser.reset_input_buffer()  # type: ignore[attr-defined]
         except Exception as exc:
+            log.debug("clear-comms abort failed after draining %d B: %s", drained, exc)
             raise TransportError(f"clear-comms abort failed: {exc}") from exc
+        log.debug("abort: drained %d B of stale stream", drained)
 
     def _read_exact(self, n: int) -> bytes:
         ser = self._require()
@@ -218,8 +241,10 @@ class SerialTransport:
             try:
                 chunk = ser.read(n - len(buf))  # type: ignore[attr-defined]
             except Exception as exc:
+                log.debug("read of %d B failed after %d B: %s", n, len(buf), exc)
                 raise TransportError(f"read failed: {exc}") from exc
             if not chunk:
+                log.debug("short read: wanted %d B, got %d B before timeout", n, len(buf))
                 raise TransportError(f"short read: wanted {n}, got {len(buf)} (timeout?)")
             buf.extend(chunk)
         return bytes(buf)
@@ -236,8 +261,12 @@ class SerialTransport:
             if timeout_s is not None:
                 ser.timeout = self.timeout_s  # type: ignore[attr-defined]
         if echo != opcode:
+            # The stream is out of step with our requests (leftover flux, a
+            # missed response); everything after this on the link is suspect.
+            log.debug("desync: response echo 0x%02x != request 0x%02x", echo, opcode)
             raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
         if ack != ACK_OKAY:
+            log.debug("0x%02x -> ACK_%s", opcode, ACK_NAMES.get(ack, ack))
             return ack, b""
         return ack, self._read_exact(resp_len) if resp_len else b""
 
@@ -249,6 +278,7 @@ class SerialTransport:
         try:
             return bytes(ser.read(max_bytes))  # type: ignore[attr-defined]
         except Exception as exc:
+            log.debug("stream read failed: %s", exc)
             raise TransportError(f"stream read failed: {exc}") from exc
 
 
@@ -307,6 +337,7 @@ class FakeTransport:
 
     def _require(self) -> None:
         if not self._open:
+            log.debug("fake transport used while closed; refusing")
             raise TransportClosed("fake transport is not open")
 
     def send_frame(self, opcode: int, payload: bytes = b"") -> None:
@@ -325,15 +356,20 @@ class FakeTransport:
     ) -> tuple[int, bytes]:
         self._require()
         if self._tail:
+            log.debug("fake: %d B of previous response unread; refusing", len(self._tail))
             raise TransportError(f"{len(self._tail)} B of the previous response unread")
         if not self._responses:
+            log.debug("fake: no queued response for 0x%02x; refusing", opcode)
             raise TransportError("no queued response frame")
         echo, ack, payload = self._responses.popleft()
         if echo != opcode:
+            log.debug("fake: desync, echo 0x%02x != request 0x%02x", echo, opcode)
             raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
         if ack != ACK_OKAY:
+            log.debug("fake: 0x%02x -> ACK_%s", opcode, ACK_NAMES.get(ack, ack))
             return ack, b""
         if len(payload) < resp_len:
+            log.debug("fake: queued payload %d B < expected %d B", len(payload), resp_len)
             raise TransportError(f"queued payload {len(payload)} B < expected {resp_len} B")
         self._tail = payload[resp_len:]
         return ack, payload[:resp_len]
@@ -341,6 +377,7 @@ class FakeTransport:
     def read_exact(self, n: int) -> bytes:
         self._require()
         if len(self._tail) < n:
+            log.debug("fake: short read, wanted %d B, have %d B", n, len(self._tail))
             raise TransportError(f"short read: wanted {n}, have {len(self._tail)}")
         head, self._tail = self._tail[:n], self._tail[n:]
         return head

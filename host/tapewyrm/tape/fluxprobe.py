@@ -101,6 +101,7 @@ def probe(
         direction=1 if motion == "rev" else 0,  # SESSION_START: 0 fwd, 1 rev
     )
     nbytes = 0
+    log.debug("streaming probe capture to %s", path)
     with path.open("wb") as f, progress.task(cmd.name, total=seconds, unit="s") as bar:
         write_preamble(f, hdr)
         for chunk in cap.chunks_for(seconds):
@@ -109,7 +110,9 @@ def probe(
             # Wall time, not bytes, bounds a probe; clamp the read-timeout overshoot.
             bar.update(min(time.monotonic() - t0, seconds))
     wall = time.monotonic() - t0
+    log.debug("probe captured %d bytes in %.1f s; waiting for drive to settle", nbytes, wall)
     drive.wait_ready(30)  # the abort issued Stop Tape; let the drive settle
+    log.info(f"analysing {path}...")
     return analyse(path, wall_s=wall)
 
 
@@ -117,14 +120,23 @@ def analyse(path: Path, *, wall_s: float = 0.0) -> FluxReport:
     """Summarise a probe (or any TWRF) capture: amount, shape, decodability."""
     hdr, flux_at = read_header(path)
     blob = path.read_bytes()[flux_at:]
+    log.debug("parsing %d bytes of flux from %s", len(blob), path)
     ps = gwstream.parse(blob)
     ticks_per_us = ps.sample_clock_hz / 1e6
     nbuckets = int(HIST_MAX_US / HIST_BUCKET_US)
     counts = Counter(min(int(v / ticks_per_us / HIST_BUCKET_US), nbuckets) for v in ps.intervals)
     histogram = [(k * HIST_BUCKET_US, counts.get(k, 0)) for k in range(nbuckets + 1)]
     sample = ps.intervals[:DECODE_LIMIT]
+    if len(ps.intervals) > DECODE_LIMIT:
+        log.debug(
+            "%d transitions > DECODE_LIMIT %d; decoding only the first %d",
+            len(ps.intervals),
+            DECODE_LIMIT,
+            DECODE_LIMIT,
+        )
     sectors: dict[int, tuple[int, int]] = {}
     for rate in sorted({hdr.rate_kbps, *DECODE_RATES_KBPS}):
+        log.debug("decoding %d transitions at %d kbps", len(sample), rate)
         found = mfm.recover_sectors_from_flux(sample, ps.sample_clock_hz, rate)
         sectors[rate] = (len(found), sum(1 for s in found if s.id_crc_ok and s.data_crc_ok))
     return FluxReport(

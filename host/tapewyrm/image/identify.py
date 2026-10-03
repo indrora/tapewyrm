@@ -137,10 +137,15 @@ def identify(
     still takes the fast path.
     """
     if path.is_file():
+        log.debug("%s: reading magic to check for a TWTI image", path)
         with path.open("rb") as f:
             magic = f.read(len(twti.MAGIC))
         if magic == twti.MAGIC:
+            log.debug("%s: TWTI magic; identifying from the image", path)
             return from_image(twti.TapeImage.open(path), tape_profile=tape_profile)
+        log.debug("%s: magic %r != %r; treating it as a capture", path, magic, twti.MAGIC)
+    else:
+        log.debug("%s: not a file; treating it as a dump directory", path)
     return from_captures([path], tape_profile=tape_profile, progress=progress)
 
 
@@ -153,19 +158,25 @@ def from_captures(
     """Decode capture flux to sectors (merging passes), then :func:`from_sectors`."""
     files = twti.capture_files(sources)
     if not files:
+        log.debug("sources expanded to no track captures; refusing")
         raise ValueError("no track captures found")
     passes: list[list[RawSector]] = []
     drive: dict | None = None
     with progress.task("decoding captures", total=len(files), unit="captures") as bar:
         for path in files:
+            log.info("decoding %s...", path.name)
             sectors, meta = twti.decode_capture(path)
             log.info(f"{path.name}: {meta['sectors']} sectors")
             passes.append(sectors)
             # The first capture that recorded the drive's reports speaks for it
             # (legacy .raw streams carry none).
             if drive is None and "tape_status" in meta["twrf"]:
+                log.debug("%s: carries drive reports; using it for the drive identity", path.name)
                 drive = meta["twrf"]
             bar.advance()
+    if drive is None:
+        log.debug("no capture carried drive reports (tape_status); drive identity unknown")
+    log.debug("merging %d passes", len(passes))
     return from_sectors(merge.union(passes), tape_profile=tape_profile, drive=drive)
 
 
@@ -180,8 +191,10 @@ def from_sectors(
     Raises ``ValueError`` when there is no header segment among the sectors --
     without it there is no geometry, no bad-sector map and no volume table.
     """
+    log.debug("locating the header segment under fallback geometry %s", FALLBACK_GEOMETRY)
     located = volume_mod.locate_header(sectors, FALLBACK_GEOMETRY)
     if located is None:
+        log.debug("locate_header found no header segment; refusing")
         raise ValueError("no header segment found: the capture must include the start of track 0")
     vol = located.vol
     notes: list[str] = []
@@ -190,7 +203,15 @@ def from_sectors(
 
     by_abs = {seg.seg: seg for seg in located.segs.values()}
     vtbl_seg = by_abs.get(vol.first_data_seg) if vol.first_data_seg else None
+    log.debug(
+        "header at segment %d (%s); first_data_seg %r %s",
+        located.header.seg,
+        located.header_status.value,
+        vol.first_data_seg,
+        "captured" if vtbl_seg is not None else "not captured",
+    )
     if vtbl_seg is None:
+        log.debug("searching %d segments for a VTBL signature", len(located.segs))
         # The header should always name the first data segment; if it doesn't,
         # or that segment never made it into the capture, fall back to looking
         # for a raw VTBL signature anywhere we have data.
@@ -203,12 +224,19 @@ def from_sectors(
 
     vtbl_data: bytes | None = None
     if vtbl_seg is None:
+        log.debug("no volume table segment found; continuing without volumes")
         notes.append(_missing_vtbl_note(vol))
         vtbl_at, vtbl_state = vol.first_data_seg or None, SegmentStatus.MISSING.value
     else:
+        log.debug("correcting volume table segment %d", vtbl_seg.seg)
         res = seg_mod.correct_segment(vtbl_seg)
         vtbl_at, vtbl_state = vtbl_seg.seg, res.status.value
         if res.status is SegmentStatus.UNCORRECTABLE:
+            log.debug(
+                "volume table segment %d uncorrectable (%d erasures); continuing without volumes",
+                vtbl_seg.seg,
+                res.erasure_count,
+            )
             notes.append(
                 f"volume table segment {vtbl_seg.seg} is uncorrectable "
                 f"({res.erasure_count} sectors bad or missing); re-capture the start of track 0"
@@ -243,21 +271,41 @@ def from_image(img: twti.TapeImage, *, tape_profile: str = tp.GUESS) -> TapeInfo
     header_seg = None
     for candidate in (q80.get("header_seg", 0), q80.get("dup_header_seg")):
         if candidate is None or candidate >= len(img.entries):
+            log.debug(
+                "header candidate %r absent or past %d segments; skipping",
+                candidate,
+                len(img.entries),
+            )
             continue
         if _image_state(img, candidate) in ("clean", "corrected"):
             header_seg = candidate
             break
+        log.debug(
+            "header candidate %d is %s; trying the next copy",
+            candidate,
+            _image_state(img, candidate),
+        )
     if header_seg is None:
+        log.debug("no header copy clean or corrected; refusing")
         raise ValueError("neither copy of the header segment was recovered in this image")
+    log.debug("parsing header segment %d", header_seg)
     header_data = img.segment(header_seg)
     vol, bsm = volume_mod.parse_header_data(header_data)
     if not vol.valid_signature:
+        log.debug(
+            "segment %d starts %r, not the FPR signature; refusing", header_seg, header_data[:4]
+        )
         raise ValueError(f"segment {header_seg} does not hold a format parameter record")
     _note_header_copy(notes, vol, header_seg)
 
     vt = vol.first_data_seg
     vtbl_data: bytes | None = None
     if not vt or vt >= len(img.entries):
+        log.debug(
+            "first_data_seg %r is zero or past %d segments; no volume table",
+            vt,
+            len(img.entries),
+        )
         notes.append(_missing_vtbl_note(vol))
         vtbl_state = SegmentStatus.MISSING.value
     else:
@@ -265,6 +313,7 @@ def from_image(img: twti.TapeImage, *, tape_profile: str = tp.GUESS) -> TapeInfo
         if vtbl_state in ("clean", "corrected"):
             vtbl_data = img.segment(vt)
         else:
+            log.debug("volume table segment %d is %s; continuing without volumes", vt, vtbl_state)
             notes.append(f"volume table segment {vt} is {vtbl_state} in this image")
     # TWTI keeps the drive's reports per source capture; the first one with
     # them speaks for the drive, as in from_captures.
@@ -302,16 +351,28 @@ def _assemble(
 ) -> TapeInfo:
     """The source-independent half: pick a profile, guess the cartridge, gather notes."""
     records = volume_mod.vtbl_records(vtbl_data) if vtbl_data is not None else []
+    log.debug("volume table: %d records", len(records))
     if vtbl_data is not None:
         notes += _extension_notes(vtbl_data)
     if tape_profile == tp.GUESS:
+        if not records:
+            log.debug("no volume table records; no tape profile to guess")
+        else:
+            log.debug("guessing tape profile from %d records", len(records))
         verdicts = tp.guess(records, vol) if records else []
         if len(verdicts) > 1 and verdicts[0].score == verdicts[1].score:
+            log.debug(
+                "profiles %s and %s tie at score %d; using the first",
+                verdicts[0].profile.name,
+                verdicts[1].profile.name,
+                verdicts[0].score,
+            )
             notes.append(
                 f"tape profiles {verdicts[0].profile.name} and {verdicts[1].profile.name} "
                 "fit equally well; showing the first. Pick one with --tape-profile"
             )
     else:
+        log.debug("loading forced tape profile %r", tape_profile)
         verdicts = [tp.evaluate(records, vol, tp.load(tape_profile))]
     guess = cartridge.guess(vol.tracks, vol.segments_per_track)
     return TapeInfo(
@@ -334,6 +395,11 @@ def _header_raw(seg) -> bytes:
     """The header segment's format parameter record (RS-corrected if needed)."""
     data = seg_mod.segment_data(seg)
     if data[:4] != volume_mod.FPR_SIGNATURE:
+        log.debug(
+            "header segment %d raw data starts %r, not the FPR signature; RS-correcting",
+            seg.seg,
+            data[:4],
+        )
         data = seg_mod.correct_segment(seg).data
     return data[:FPR_LEN]
 
@@ -345,6 +411,7 @@ def _image_state(img: twti.TapeImage, n: int) -> str:
 def _note_header_copy(notes: list[str], vol: VolumeInfo, read_from: int) -> None:
     """Say so when the header came from the duplicate (the first copy is damaged)."""
     if vol.header_seg != read_from:
+        log.debug("header read from segment %d, not first copy %d", read_from, vol.header_seg)
         notes.append(
             f"header read from segment {read_from}; the first copy "
             f"(segment {vol.header_seg}) could not be read"
@@ -370,9 +437,11 @@ def _extension_notes(data: bytes) -> list[str]:
     for off in range(0, len(data) - volume_mod.VTBL_ENTRY_LEN + 1, volume_mod.VTBL_ENTRY_LEN):
         sig = data[off : off + 4]
         if sig == b"\x00\x00\x00\x00":
+            log.debug("volume table: zero signature at offset %d; end of records", off)
             break
         if sig == volume_mod.SIG_EXVT:
             child = int.from_bytes(data[off + 6 : off + 8], "little")
+            log.debug("volume table: EXVT at offset %d -> segment %d (not followed)", off, child)
             # TODO: follow EXVT chains (same TODO as volume.vtbl_records).
             notes.append(
                 f"volume table continues in segment {child} (EXVT); "

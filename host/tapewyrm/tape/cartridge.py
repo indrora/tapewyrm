@@ -28,7 +28,10 @@ Cartridge names (DC2080, DC2120) are the ones the standards' covers use.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 # QIC-80-MC Rev N §5.4.1 constants (inches): long-term speed variation, max
 # beginning gap, erase gap, and the length of one floppy track's 4 segments.
@@ -116,16 +119,29 @@ def guess(tracks: int, segments_per_track: int) -> CartridgeGuess:
     """Name the cartridge from the header's tracks and segments per track."""
     candidates = [c for c in CATALOGUE if c.tracks == tracks]
     if not candidates:
+        log.debug("no catalogue entry has %d tracks; guessing unknown", tracks)
         return CartridgeGuess(None, None, False, f"no standard here uses {tracks} tracks")
 
     # Standards that fix the count (QIC-40): exact match or nothing.
     for c in candidates:
         if c.segments_per_track == segments_per_track:
+            log.debug(
+                "%d segments/track exactly matches %s %g ft",
+                segments_per_track,
+                c.standard,
+                c.length_ft,
+            )
             return CartridgeGuess(
                 c, None, True, f"{segments_per_track} segments/track is exactly {c.standard}'s"
             )
     if all(c.segments_per_track is not None for c in candidates):
         counts = ", ".join(str(c.segments_per_track) for c in candidates)
+        log.debug(
+            "%d tracks: all standards fix spt (%s), none is %d; guessing unknown",
+            tracks,
+            counts,
+            segments_per_track,
+        )
         return CartridgeGuess(
             None, None, False, f"{segments_per_track} segments/track; expected one of {counts}"
         )
@@ -133,6 +149,12 @@ def guess(tracks: int, segments_per_track: int) -> CartridgeGuess:
     est = length_from_segments(segments_per_track)
     best = min(candidates, key=lambda c: abs(c.length_ft - est))
     if abs(best.length_ft - est) > best.length_ft * _LENGTH_TOLERANCE:
+        log.debug(
+            "estimated %.1f ft is > %.0f%% from nearest %g ft; guessing unknown",
+            est,
+            _LENGTH_TOLERANCE * 100,
+            best.length_ft,
+        )
         return CartridgeGuess(
             None,
             est,

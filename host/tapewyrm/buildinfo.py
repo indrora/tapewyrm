@@ -16,10 +16,13 @@ is no git history to read).
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,9 +34,12 @@ class HostBuild:
 
 
 def _git(cwd: Path, *args: str) -> str | None:
+    log.debug("running git %s in %s", " ".join(args), cwd)
     try:
         out = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # Expected outside a checkout (no git, or files untracked): debug only.
+        log.debug("git %s in %s failed: %s", " ".join(args), cwd, exc)
         return None
     return out.stdout.strip()
 
@@ -42,6 +48,7 @@ def host_build() -> HostBuild:
     try:
         version = metadata.version("tapewyrm")
     except metadata.PackageNotFoundError:
+        log.debug("tapewyrm package metadata not found; version unknown")
         version = "unknown"
 
     pkg = Path(__file__).resolve().parent
@@ -52,10 +59,18 @@ def host_build() -> HostBuild:
         if commit:
             # Dirty = tracked changes anywhere in the host project (host/).
             status = _git(pkg, "status", "--porcelain", "--untracked-files=no", "--", "..")
+            log.debug("host build from git checkout: %s%s", commit, " (dirty)" if status else "")
             return HostBuild(version, commit, bool(status), "git checkout")
+        log.debug("package tracked but rev-parse gave nothing; trying build stamp")
+    else:
+        log.debug("package not tracked by a git checkout; trying build stamp")
 
     try:
         from tapewyrm import _build_stamp  # type: ignore[attr-defined]
     except ImportError:
+        log.debug("host build unknown: not a git checkout and no build stamp")
         return HostBuild(version, None, False, "unknown")
+    log.debug(
+        "host build from stamp: %s%s", _build_stamp.COMMIT, " (dirty)" if _build_stamp.DIRTY else ""
+    )
     return HostBuild(version, _build_stamp.COMMIT or None, bool(_build_stamp.DIRTY), "build stamp")

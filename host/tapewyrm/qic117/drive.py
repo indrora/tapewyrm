@@ -19,6 +19,8 @@ follow-up policy lives here. Report bytes are converted to ints honoring
 
 from __future__ import annotations
 
+import logging
+
 from tapewyrm.link.device import DeviceLink
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.commands import Cmd, Kind, encode_arg
@@ -30,6 +32,8 @@ from tapewyrm.types import (
     ErrorCode,
     TapeStatus,
 )
+
+log = logging.getLogger(__name__)
 
 
 class DriveError(Exception):
@@ -58,6 +62,7 @@ def bits_to_int(raw: bytes, bit_order: str) -> int:
             if (value >> i) & 1:
                 rev |= 1 << (nbits - 1 - i)
         return rev
+    log.debug("bit_order %r is neither 'lsb' nor 'msb'; refusing", bit_order)
     raise ValueError(f"unknown bit_order {bit_order!r} (expected 'lsb' or 'msb')")
 
 
@@ -71,6 +76,10 @@ class Qic117Drive:
         self.profile = profile
         self.allow_writes = allow_writes
         self._last_error: ErrorCode | None = None
+        # True while wait_ready()/jog() poll status: report() then stays quiet so
+        # a long motion doesn't log two lines per poll (the loops log start and
+        # outcome themselves).
+        self._polling = False
 
     @property
     def last_error(self) -> ErrorCode | None:
@@ -80,8 +89,10 @@ class Qic117Drive:
 
     def _send_arg(self, cmd: Cmd, arg: int) -> None:
         """Send the command then its operand as N+2 pulse train(s) (DESIGN.md §13.1)."""
+        trains = encode_arg(cmd, arg)
+        log.debug("sending %r (code %d) arg %d as pulse trains %s", cmd.name, cmd.code, arg, trains)
         self.link.command_txn(cmd.code)
-        for pulses in encode_arg(cmd, arg):
+        for pulses in trains:
             self.link.command_txn(pulses)
 
     # --- dispatch ---
@@ -94,15 +105,20 @@ class Qic117Drive:
         immediately with NO wait-ready/status.
         """
         if cmd.writes and not self.allow_writes:
+            log.debug("%r (code %d) writes and allow_writes is False; refusing", cmd.name, cmd.code)
             raise DriveError(
                 f"refusing {cmd.name!r} (code {cmd.code}): it writes to tape and this "
                 "drive was not opened with allow_writes=True"
             )
         if cmd.takes_arg:
             if arg is None:
+                log.debug(
+                    "%r (code %d) takes an argument but got None; refusing", cmd.name, cmd.code
+                )
                 raise ValueError(f"command {cmd.name!r} requires an argument")
             self._send_arg(cmd, arg)
         else:
+            log.debug("sending %r (code %d), kind %s", cmd.name, cmd.code, cmd.kind.name)
             self.link.command_txn(cmd.code)
 
         # Streaming motion (Logical Forward): never wait-ready/status — a status
@@ -110,6 +126,7 @@ class Qic117Drive:
         # capture is armed via link.capture(); command() with LF is the bare verb.
         if cmd.kind is Kind.MOTION and not cmd.is_streaming:
             return self.wait_ready(self._ready_timeout(cmd))
+        log.debug("%r is %s, not non-streaming motion; no wait-ready", cmd.name, cmd.kind.name)
         return None
 
     def _ready_timeout(self, cmd: Cmd) -> float:
@@ -123,6 +140,11 @@ class Qic117Drive:
         trips alone (each status poll costs a few ms of pulse train + report).
         """
         if cmd.timeout_s is None:
+            log.debug(
+                "%r has no spec timeout; using profile motion_timeout_s=%s",
+                cmd.name,
+                self.profile.timing.motion_timeout_s,
+            )
             return float(self.profile.timing.motion_timeout_s)
         return max(cmd.timeout_s, 1.0)
 
@@ -140,16 +162,32 @@ class Qic117Drive:
         import time
 
         if cmd.code not in (commands.PHYSICAL_FORWARD.code, commands.PHYSICAL_REVERSE.code):
+            log.debug(
+                "jog() got %r (code %d), not Physical Forward/Reverse; refusing", cmd.name, cmd.code
+            )
             raise ValueError(f"jog() takes Physical Forward/Reverse, not {cmd.name!r}")
+        log.debug(
+            "jog: sending %r (code %d) for %.2f s, polling every %.2f s",
+            cmd.name,
+            cmd.code,
+            seconds,
+            poll_s,
+        )
         self.link.command_txn(cmd.code)
         try:
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
                 time.sleep(poll_s)
-                st = self.status()
+                self._polling = True
+                try:
+                    st = self.status()
+                finally:
+                    self._polling = False
                 if st.ready:  # hit BOT/EOT (or stopped on an error -- only valid when ready)
+                    log.debug("jog: drive went Ready early (%s); stopping", st)
                     break
         finally:
+            log.debug("jog: sending Stop Tape")
             stopped = self.command(commands.STOP_TAPE)
         assert stopped is not None  # Stop Tape is non-streaming motion
         return stopped
@@ -163,12 +201,22 @@ class Qic117Drive:
         """
         import time
 
-        deadline = time.monotonic() + timeout_s
+        log.debug("waiting up to %s s for Ready (poll every %s s)", timeout_s, poll_s)
+        start = time.monotonic()
+        deadline = start + timeout_s
+        polls = 0
         while True:
-            st = self.status()
+            self._polling = True
+            try:
+                st = self.status()
+            finally:
+                self._polling = False
+            polls += 1
             if st.ready:
+                log.debug("Ready after %.2f s, %d polls: %s", time.monotonic() - start, polls, st)
                 return st
             if time.monotonic() >= deadline:
+                log.debug("not Ready after %s s, %d polls (last %s); raising", timeout_s, polls, st)
                 raise DriveError(f"drive not ready after {timeout_s} s (last status {st})")
             time.sleep(poll_s)
 
@@ -179,8 +227,13 @@ class Qic117Drive:
         (FALSE => error); the link raises on a bad ACK/Final and returns the data
         bytes here, which we convert honoring ``profile.bit_order``.
         """
+        if not self._polling:
+            log.debug("report %r (code %d), %d bits", cmd.name, cmd.code, nbits)
         raw = self.link.command_txn(cmd.code, report_bits=nbits)
-        return bits_to_int(raw, self.profile.bit_order)
+        value = bits_to_int(raw, self.profile.bit_order)
+        if not self._polling:
+            log.debug("report %r -> raw %s = 0x%x", cmd.name, raw.hex(), value)
+        return value
 
     # --- status / error ---
 
@@ -197,9 +250,15 @@ class Qic117Drive:
         st = DriveStatus.decode(b)
         if st.ready and (st.new_cartridge or st.error):
             # Both cleared via Report Error Code (errors latch — DESIGN.md §6A.3).
+            log.debug(
+                "status ready with new_cartridge=%s error=%s; reading+clearing error code",
+                st.new_cartridge,
+                st.error,
+            )
             w = self.report(commands.REPORT_ERROR_CODE, 16)
             code = w & 0xFF
             self._last_error = ErrorCode.decode(w, fatal=classify_error(code))
+            log.debug("latched error: %s", self._last_error)
         return st
 
     def error(self) -> ErrorCode:
@@ -240,6 +299,11 @@ class Qic117Drive:
         # Push the profile's pulse/report timing first: until now nothing ever
         # called set_timing(), so the firmware always ran its compiled-in
         # defaults and profile timings were dead configuration.
+        log.debug(
+            "wake: pushing profile %r timing (report_strategy=%s)",
+            self.profile.name,
+            self.profile.report_strategy,
+        )
         self.link.set_timing(
             replace(
                 self.profile.timing,
@@ -248,16 +312,19 @@ class Qic117Drive:
         )
         for name, arg, delay_ms in self.profile.wake_sequence:
             cmd = self._lookup(name)
+            log.debug("wake step: %r arg=%s, then %d ms delay", cmd.name, arg, delay_ms)
             self.command(cmd, arg=arg)
             if delay_ms:
                 time.sleep(delay_ms / 1000.0)
         # Read status last: it also reads+clears any latched error / new-cartridge
         # state (power-on leaves error 26 latched), without which the drive
         # rejects many later commands (QIC-117 Rev J §3).
+        log.debug("wake: reading status to clear latched error/new-cartridge")
         self.status()
 
     def reset(self) -> None:
         """Soft Reset (cmd 1) — single pulse; clears state, drops to known mode."""
+        log.debug("sending %r (code %d)", commands.SOFT_RESET.name, commands.SOFT_RESET.code)
         self.link.command_txn(commands.SOFT_RESET.code)
         self._last_error = None
 
@@ -266,5 +333,6 @@ class Qic117Drive:
         key = name.upper().replace(" ", "_").replace("-", "_")
         cmd = commands.TABLE.get(key)
         if cmd is None:
+            log.debug("profile command name %r (key %r) not in table; refusing", name, key)
             raise DriveError(f"unknown command name in profile: {name!r}")
         return cmd

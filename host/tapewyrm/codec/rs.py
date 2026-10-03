@@ -45,7 +45,11 @@ decoder packs the present non-excluded sectors down, decodes, then unpacks.
 
 from __future__ import annotations
 
+import logging
+
 from tapewyrm.types import Segment, SegmentResult, SegmentStatus
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # GF(256) field tables
@@ -88,6 +92,7 @@ def gmul(a: int, b: int) -> int:
 def gdiv(a: int, b: int) -> int:
     """GF(256) divide (b != 0)."""
     if b == 0:
+        log.debug("gdiv(%#04x, 0): divisor is zero; raising", a)
         raise ZeroDivisionError("GF(256) divide by zero")
     if a == 0:
         return 0
@@ -97,6 +102,7 @@ def gdiv(a: int, b: int) -> int:
 def ginv(a: int) -> int:
     """GF(256) multiplicative inverse (a != 0)."""
     if a == 0:
+        log.debug("ginv(0): no inverse of zero; raising")
         raise ZeroDivisionError("GF(256) inverse of zero")
     return EXP[(255 - LOG[a]) % 255]
 
@@ -119,6 +125,7 @@ def _g_eval(x: int) -> int:
 def _find_roots() -> list[int]:
     roots = [e for e in range(1, 256) if _g_eval(e) == 0]
     if len(roots) != 3:
+        log.debug("generator %r has %d roots %r, expected 3; raising", GENERATOR, len(roots), roots)
         raise RuntimeError(f"generator must have exactly 3 roots, found {len(roots)}")
     return roots
 
@@ -157,6 +164,7 @@ def _solve_linear(matrix: list[list[int]], rhs: list[int]) -> list[int]:
     for col in range(m):
         pivot = next((r for r in range(col, m) if aug[r][col] != 0), None)
         if pivot is None:
+            log.debug("erasure system %dx%d singular at column %d; raising", m, m, col)
             raise ValueError("singular erasure system")
         aug[col], aug[pivot] = aug[pivot], aug[col]
         inv = ginv(aug[col][col])
@@ -177,6 +185,7 @@ def correct_codeword(recv: list[int], erasures: list[int], length: int) -> list[
     that case is the segment-level UNCORRECTABLE outcome).
     """
     if len(erasures) > REDUNDANCY:
+        log.debug("%d erasures > redundancy %d; raising", len(erasures), REDUNDANCY)
         raise ValueError("too many erasures for redundancy-3 code")
     if not erasures:
         return recv[:]
@@ -243,10 +252,22 @@ def correct(seg: Segment) -> SegmentResult:
 
     # If nothing was ever placed, the segment is MISSING.
     if all(seg.sectors[i] is None for i in range(Segment.SECTORS)):
+        log.debug(
+            "segment %d (tpt %d tps %d): no sectors placed; MISSING", seg.seg, seg.tpt, seg.tps
+        )
         return SegmentResult(status=SegmentStatus.MISSING, erasure_count=0)
 
     if erasure_count > REDUNDANCY:
         # Keep whatever clean data we have; do not attempt correction.
+        log.debug(
+            "segment %d: %d erasures at positions %r > redundancy %d (N=%d); "
+            "UNCORRECTABLE, keeping partial data",
+            seg.seg,
+            erasure_count,
+            erased,
+            REDUNDANCY,
+            n,
+        )
         data = _extract_participating_data(seg, participating, n)
         return SegmentResult(
             status=SegmentStatus.UNCORRECTABLE,
@@ -257,6 +278,14 @@ def correct(seg: Segment) -> SegmentResult:
 
     # Build the N x 1024 received matrix (erased rows are zeroed) and decode columns.
     width = _column_width(seg, participating)
+    log.debug(
+        "segment %d: RS-decoding %d columns, N=%d (%d excluded), erasures at %r",
+        seg.seg,
+        width,
+        n,
+        len(seg.excluded),
+        erased,
+    )
     columns_recv = _gather_columns(seg, participating, n, width, erased)
     if erasure_count:
         for c in range(width):
@@ -293,6 +322,7 @@ def _column_width(seg: Segment, participating: list[int]) -> int:
         sec = seg.sectors[i]
         if sec is not None and sec.data:
             return len(sec.data)
+    log.debug("no participating sector has data; assuming column width 1024")
     return 1024
 
 
@@ -315,6 +345,13 @@ def _gather_columns(
         elif sec is not None and sec.data and len(sec.data) == width:
             rows.append(sec.data)
         else:
+            log.debug(
+                "row %d (slot %d) not erased but has no %d-byte data (len %s); zero-filling",
+                pos,
+                slot,
+                width,
+                None if sec is None else len(sec.data),
+            )
             rows.append(bytes(width))
     columns: list[list[int]] = []
     for c in range(width):
@@ -334,6 +371,7 @@ def _scatter_columns(
             buf[c] = columns[c][r]
         sec = seg.sectors[slot]
         if sec is None:
+            log.debug("slot %d never read; solved row %d has nowhere to scatter, skipping", slot, r)
             continue
         sec.data = bytes(buf)
         # A solved/clean row is, after correction, CRC-consistent by construction.
@@ -354,5 +392,8 @@ def _extract_participating_data(seg: Segment, participating: list[int], n: int) 
         if sec is not None and sec.data:
             out.extend(sec.data)
         else:
+            log.debug(
+                "segment %d slot %d has no data; zero-filling in partial extract", seg.seg, slot
+            )
             out.extend(bytes(_column_width(seg, participating)))
     return bytes(out)

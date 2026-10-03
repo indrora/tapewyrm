@@ -34,6 +34,7 @@ Typed errors form a small tree::
 
 from __future__ import annotations
 
+import logging
 import struct
 import time
 from collections.abc import Iterator
@@ -51,6 +52,11 @@ from tapewyrm.link.transport import (
     TransportError,
 )
 from tapewyrm.types import DeviceInfo, SelectHint, StopCond, TimingParams
+
+# Everything here is bench detail, so it logs at DEBUG; the CLI decides what a
+# user sees. CaptureStream's read loops are a hot path (one read per USB
+# packet): they log only at session boundaries and on failure, never per chunk.
+log = logging.getLogger(__name__)
 
 # Required capabilities to refuse stock GW firmware (DESIGN.md §6A.2).
 REQUIRED_CAPS = frozenset({"verbs", "capture"})
@@ -174,6 +180,7 @@ def usb_serial_for(port: str) -> str:
     for p in list_ports.comports():
         if p.device == port:
             return p.serial_number or ""
+    log.debug("%s not in the USB port list; serial number unknown", port)
     return ""
 
 
@@ -187,9 +194,12 @@ def find_port() -> str:
 
     ports = [p.device for p in list_ports.comports() if (p.vid, p.pid) == (GW_USB_VID, GW_USB_PID)]
     if not ports:
+        log.debug("no port with USB %04x:%04x; refusing to guess", GW_USB_VID, GW_USB_PID)
         raise LinkError("no Greaseweazle found (USB 1209:4d69); pass --port")
     if len(ports) > 1:
+        log.debug("%d Greaseweazles found %s; refusing to guess", len(ports), ports)
         raise LinkError(f"several Greaseweazles found {ports}; pass --port to pick one")
+    log.debug("found Greaseweazle on %s", ports[0])
     return ports[0]
 
 
@@ -213,10 +223,14 @@ class DeviceLink:
         refuse it); then ``proto_ver`` is 0 and ``qic_caps`` is empty.
         """
         if self._transport is None:
+            if port is None:
+                log.debug("no port given; searching for a Greaseweazle")
             self._transport = SerialTransport(port if port is not None else find_port())
+        log.debug("opening device link")
         try:
             self._transport.open()
         except TransportError as exc:
+            log.debug("transport open failed: %s", exc)
             raise LinkError(f"failed to open transport: {exc}") from exc
 
         info = self._identify()
@@ -226,13 +240,21 @@ class DeviceLink:
                 port=self._transport.port,
                 serial=usb_serial_for(self._transport.port),
             )
+        log.debug(
+            "identified %s fw %s on %s: proto_ver %d, caps %s, sram %d B, sample clock %d Hz",
+            info.model, info.firmware, info.port or "?", info.proto_ver,
+            sorted(info.qic_caps), info.sram_bytes, info.sample_clock_hz,
+        )  # fmt: skip
         if gate:
             self._gate(info)
+        else:
+            log.debug("capability gate skipped (gate=False)")
         self._info = info
         return info
 
     def close(self) -> None:
         if self._transport is not None:
+            log.debug("closing device link")
             self._transport.close()
         self._info = None
 
@@ -255,18 +277,22 @@ class DeviceLink:
 
     def _txn(self) -> Transport:
         if self._transport is None or not self._transport.is_open:
+            log.debug("link used while not open; refusing")
             raise LinkClosed("device link is not open")
         return self._transport
 
     def _exchange(self, opcode: int, payload: bytes, resp_len: int) -> tuple[int, bytes]:
         """One request/response; returns (ack, payload) without judging the ack."""
         t = self._txn()
+        log.debug("sending 0x%02x [%s], expecting %d B", opcode, payload.hex(), resp_len)
         try:
             t.send_frame(opcode, payload)
             return t.recv_frame(opcode, resp_len)
         except TransportClosed as exc:
+            log.debug("0x%02x: transport closed mid-exchange: %s", opcode, exc)
             raise LinkClosed(str(exc)) from exc
         except TransportError as exc:
+            log.debug("0x%02x: exchange failed: %s", opcode, exc)
             raise LinkError(f"command 0x{opcode:02x} failed: {exc}") from exc
 
     def _request(self, opcode: int, payload: bytes = b"", resp_len: int = 0) -> bytes:
@@ -274,10 +300,12 @@ class DeviceLink:
         ack, body = self._exchange(opcode, payload, resp_len)
         if ack != ACK_OKAY:
             name = Txn(opcode).name if opcode in Txn._value2member_map_ else f"0x{opcode:02x}"
+            log.debug("command %s rejected: ACK_%s", name, ACK_NAMES.get(ack, ack))
             raise LinkError(f"command {name} rejected: ACK_{ACK_NAMES.get(ack, ack)}")
         return body
 
     def _identify(self) -> DeviceInfo:
+        log.debug("identifying board (GW GET_INFO, then INFO verb)")
         raw = self._request(_GW_GET_INFO, bytes([_GETINFO_FIRMWARE]), _GW_INFO_LEN)
         (fw_major, fw_minor, _is_main, _max_cmd, _sample_hz, hw_model, hw_sub,
          usb_speed, _mcu_id, mcu_mhz, mcu_sram_kb, _usb_buf_kb) = _GW_INFO.unpack_from(raw)  # fmt: skip
@@ -288,6 +316,8 @@ class DeviceLink:
         proto_ver, caps_mask, sram_bytes, sample_hz = 0, 0, 0, 0
         if ack == ACK_OKAY:
             proto_ver, caps_mask, sram_bytes, sample_hz = _QIC_INFO.unpack(body)
+        else:
+            log.debug("INFO verb answered ACK_%s: stock GW firmware?", ACK_NAMES.get(ack, ack))
         caps = frozenset(name for bit, name in _CAP_BITS.items() if caps_mask >> bit & 1)
 
         return DeviceInfo(
@@ -305,12 +335,16 @@ class DeviceLink:
     @staticmethod
     def _gate(info: DeviceInfo) -> None:
         if info.proto_ver < PROTO_VERSION:
+            log.debug("gate: proto_ver %d < %d; refusing", info.proto_ver, PROTO_VERSION)
             raise LinkVersionError(
                 f"device proto_ver {info.proto_ver} < required {PROTO_VERSION} "
                 "(refusing stock/old firmware)"
             )
         missing = REQUIRED_CAPS - info.qic_caps
         if missing:
+            log.debug(
+                "gate: missing caps %s (has %s); refusing", sorted(missing), sorted(info.qic_caps)
+            )
             raise LinkVersionError(
                 f"device missing required capabilities {sorted(missing)}; "
                 f"has {sorted(info.qic_caps)} (need at least {sorted(REQUIRED_CAPS)})"
@@ -335,6 +369,7 @@ class DeviceLink:
             t.report_settle_us,
             1 if t.report_on_index else 0,
         )
+        log.debug("set_timing: %s", t)
         self._request(int(Txn.SET_TIMING), payload)
 
     def select(self, hint: SelectHint) -> None:
@@ -346,7 +381,9 @@ class DeviceLink:
         """
         bus = _BUS_TYPES.get(hint.bus)
         if bus is None:
+            log.debug("select: unknown bus %r; refusing", hint.bus)
             raise ValueError(f"unknown bus type {hint.bus!r} (want one of {sorted(_BUS_TYPES)})")
+        log.debug("select: bus %s, unit %d, motor %s", hint.bus, hint.unit, hint.motor)
         self._request(_GW_SET_BUS_TYPE, bytes([bus]))
         self._request(_GW_SELECT, bytes([hint.unit & 0xFF]))
         if hint.motor:
@@ -354,6 +391,7 @@ class DeviceLink:
 
     def deselect(self) -> None:
         """Release drive select (GW DESELECT)."""
+        log.debug("deselect")
         self._request(_GW_DESELECT)
 
     def command_txn(self, n: int, report_bits: int = 0) -> bytes:
@@ -364,20 +402,28 @@ class DeviceLink:
         missing raises ``LinkError`` (DESIGN.md §2.1).
         """
         if not 0 <= n <= 0xFF:
+            log.debug("command_txn: n=%d outside 0..255; refusing", n)
             raise ValueError(f"command number out of range: {n}")
         if not 0 <= report_bits <= 16:
+            log.debug("command_txn: report_bits=%d outside 0..16; refusing", report_bits)
             raise ValueError(f"report_bits must be 0..16, got {report_bits}")
         body = self._request(int(Txn.COMMAND_TXN), bytes([n, report_bits]), _CMD_RESP.size)
         flags, bits, nbits = _CMD_RESP.unpack(body)
+        # One line per QIC-117 command: the bench transcript of what the drive
+        # was told and what it said back (bits are raw, LSB-first).
+        log.debug("cmd %d: flags 0x%02x, %d/%d bits = 0x%04x", n, flags, nbits, report_bits, bits)
         if report_bits == 0:
+            log.debug("cmd %d: no report requested; done", n)
             return b""
         timed_out = " (timed out)" if flags & _FLAG_TIMEOUT else ""
         if not flags & _FLAG_ACK:
+            log.debug("cmd %d: ACK bit missing (flags 0x%02x)%s; raising", n, flags, timed_out)
             raise LinkError(
                 f"command {n}: no ACK bit{timed_out} -- drive not selected/listening, "
                 "or reset/hardware failure (DESIGN.md §2.1)"
             )
         if not flags & _FLAG_FINAL:
+            log.debug("cmd %d: Final bit FALSE (flags 0x%02x)%s; raising", n, flags, timed_out)
             raise LinkError(
                 f"command {n}: Final bit FALSE after {nbits}/{report_bits} bits{timed_out} "
                 "(error mid-report; DESIGN.md §2.1)"
@@ -394,8 +440,12 @@ class DeviceLink:
         also wants the status bits; both are valid.
         """
         timeout_s = max(0, (timeout_ms + 999) // 1000)
+        log.debug("wait_ready: waiting up to %d s (asked %d ms)", timeout_s, timeout_ms)
         body = self._request(int(Txn.WAIT_READY), _u16le(timeout_s & 0xFFFF), _WAIT_RESP_LEN)
-        return body[0] == 0  # 0 = ready, 1 = timed out
+        ready = body[0] == 0  # 0 = ready, 1 = timed out
+        if not ready:
+            log.debug("wait_ready: not ready after %d s", timeout_s)
+        return ready
 
     def flux_status(self) -> int:
         """GW GET_FLUX_STATUS (cmd 9): the ACK of the read that just finished.
@@ -404,6 +454,8 @@ class DeviceLink:
         capture stream has drained.
         """
         ack, _ = self._exchange(_GW_GET_FLUX_STATUS, b"", 0)
+        if ack != ACK_OKAY:
+            log.debug("flux status after capture: ACK_%s", ACK_NAMES.get(ack, ack))
         return ack
 
     def build_info(self) -> FirmwareBuild | None:
@@ -413,6 +465,9 @@ class DeviceLink:
         """
         ack, body = self._exchange(int(Txn.BUILD_INFO), b"", _BUILD_INFO.size)
         if ack != ACK_OKAY:
+            log.debug(
+                "BUILD_INFO answered ACK_%s: image predates the verb", ACK_NAMES.get(ack, ack)
+            )
             return None
         raw, dirty = _BUILD_INFO.unpack(body)
         commit = raw.rstrip(b"\x00").decode("ascii", "replace")
@@ -428,10 +483,15 @@ class DeviceLink:
         ACK (or any other reaction) lands inside the window.
         """
         if not 0 <= cmd_n <= 0xFF:
+            log.debug("scope: cmd_n=%d outside 0..255; refusing", cmd_n)
             raise ValueError(f"cmd_n out of range: {cmd_n}")
-        duration_ms = min(max(0, duration_ms), _SCOPE_MAX_MS)
+        clamped = min(max(0, duration_ms), _SCOPE_MAX_MS)
+        if clamped != duration_ms:
+            log.debug("scope: duration %d ms clamped to %d ms", duration_ms, clamped)
+        duration_ms = clamped
         t = self._txn()
         payload = struct.pack("<BH", cmd_n, duration_ms)
+        log.debug("scope: cmd %d, %d ms window", cmd_n, duration_ms)
         try:
             t.send_frame(int(Txn.SCOPE), payload)
             # The device answers only when the window closes: allow for it.
@@ -439,12 +499,18 @@ class DeviceLink:
                 int(Txn.SCOPE), _SCOPE_HEAD.size, timeout_s=duration_ms / 1000 + 2.0
             )
             if ack != ACK_OKAY:
+                log.debug("command SCOPE rejected: ACK_%s", ACK_NAMES.get(ack, ack))
                 raise LinkError(f"command SCOPE rejected: ACK_{ACK_NAMES.get(ack, ack)}")
             initial, n_edges, overflow, *counts = _SCOPE_HEAD.unpack(head)
+            log.debug(
+                "scope: %d edges%s; reading edge log", n_edges, " (overflow)" if overflow else ""
+            )
             tail = t.read_exact(n_edges * _SCOPE_EDGE.size) if n_edges else b""
         except TransportClosed as exc:
+            log.debug("scope: transport closed: %s", exc)
             raise LinkClosed(str(exc)) from exc
         except TransportError as exc:
+            log.debug("scope: exchange failed: %s", exc)
             raise LinkError(f"command SCOPE failed: {exc}") from exc
         edges = tuple(_SCOPE_EDGE.iter_unpack(tail))
         return ScopeTrace(
@@ -477,8 +543,13 @@ class DeviceLink:
         yet; only ``byte_budget`` is enforced device-side.
         """
         if not 0 <= motion_cmd <= 0xFF:
+            log.debug("capture: motion_cmd=%d outside 0..255; refusing", motion_cmd)
             raise ValueError(f"motion command out of range: {motion_cmd}")
         payload = _CAPTURE.pack(motion_cmd, rate, tpt, direction, pass_id, stop.byte_budget or 0)
+        log.debug(
+            "capture: motion cmd %d, rate %d, tpt %d, dir %d, pass %d, budget %s",
+            motion_cmd, rate, tpt, direction, pass_id, stop.byte_budget or "free-run",
+        )  # fmt: skip
         self._request(int(Txn.CAPTURE), payload)
         return CaptureStream(self._txn())
 
@@ -502,13 +573,16 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
             try:
                 data = self._transport.read_stream()
             except TransportClosed as exc:
+                log.debug("capture stream: transport closed: %s", exc)
                 raise LinkClosed(str(exc)) from exc
             except TransportError as exc:
+                log.debug("capture stream read failed: %s", exc)
                 raise LinkError(f"capture stream read failed: {exc}") from exc
             if not data:
                 # The device drained the stream (END + NUL, then silence). Mark
                 # the session closed so __exit__ doesn't send ABORT -- which no
                 # firmware verb implements -- into an idle command channel.
+                log.debug("capture stream drained")
                 self._closed = True
                 break
             yield data
@@ -526,26 +600,34 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         stops the tape (the firmware's clear-comms path issues Stop Tape).
         """
         deadline = time.monotonic() + seconds
+        log.debug("timed capture: streaming for %.1f s", seconds)
         try:
             while time.monotonic() < deadline:
                 try:
                     data = self._transport.read_stream()
                 except TransportError as exc:
+                    log.debug("capture stream read failed: %s", exc)
                     raise LinkError(f"capture stream read failed: {exc}") from exc
                 if data:
                     yield data
         finally:
+            log.debug("timed capture over (%.1f s requested); aborting", seconds)
             self.abort()
             self._closed = True
 
     def abort(self) -> None:
         """Out-of-band stop, valid mid-stream (routes through Quiesce; §5.2)."""
         if self._aborted or self._closed:
+            log.debug(
+                "abort: already aborted=%s closed=%s; nothing to do", self._aborted, self._closed
+            )
             return
         self._aborted = True
+        log.debug("aborting capture session")
         try:
             self._transport.send_control(int(Txn.ABORT))
         except TransportError as exc:
+            log.debug("abort failed: %s", exc)
             raise LinkError(f"abort failed: {exc}") from exc
 
     def __exit__(
@@ -557,8 +639,11 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         # Guarantee teardown: if the session wasn't cleanly drained, abort it so
         # the device stops the tape (DESIGN.md §5.2 — stop before releasing).
         if not self._closed and not self._aborted:
+            log.debug("capture session still live at teardown; aborting")
             try:
                 self.abort()
-            except LinkError:
-                pass  # best-effort; closing the link below is the backstop
+            except LinkError as exc:
+                # Best-effort; closing the link is the backstop. But a failed
+                # abort can leave the tape moving, so a human should hear of it.
+                log.warning("could not abort capture on teardown: %s", exc)
         self._closed = True

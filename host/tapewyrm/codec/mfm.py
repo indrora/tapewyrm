@@ -25,9 +25,12 @@ and round-trip tested. The *interval -> MFM bitstream* PLL step
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 from tapewyrm.types import FluxStream, RawSector
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Address marks and constants
@@ -109,8 +112,14 @@ def build_sector_bytes(
     """
     if len(data) != SECTOR_SIZE:
         if len(data) < SECTOR_SIZE:
+            log.debug(
+                "build_sector_bytes: data is %d bytes < %d; zero-padding", len(data), SECTOR_SIZE
+            )
             data = data + bytes(SECTOR_SIZE - len(data))
         else:
+            log.debug(
+                "build_sector_bytes: data is %d bytes > %d; truncating", len(data), SECTOR_SIZE
+            )
             data = data[:SECTOR_SIZE]
 
     out = bytearray()
@@ -193,10 +202,15 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
     n = len(decoded)
     pos = 0
     pending: tuple[int, int, int, bool] | None = None  # (fsd, ftk, fsc, id_crc_ok)
+    # Per-call tallies, logged once after the scan. The guards below fire per
+    # mark (thousands per track), so they are counted rather than logged.
+    n_index = n_orphan = n_unknown = n_dropped_id = n_yielded = n_data_bad = 0
+    log.debug("scanning %d decoded MFM bytes for sector marks", n)
 
     while pos < n:
         found = _find_mark(decoded, pos)
         if found is None:
+            log.debug("no further sync mark after byte %d of %d; ending scan", pos, n)
             break
         mark_at, mark = found
         sync0 = decoded[mark_at]
@@ -204,12 +218,18 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
 
         if sync0 == C2 and mark == IXAM:
             # Segment boundary: any unpaired ID is dropped (no data field followed).
+            n_index += 1
+            if pending is not None:
+                n_dropped_id += 1
             pending = None
             pos = field_start
             continue
 
         if sync0 == A1 and mark == IDAM:
             if field_start + ID_FIELD_LEN + CRC_LEN > n:
+                log.debug(
+                    "ID mark at byte %d truncated (stream ends at %d); ending scan", mark_at, n
+                )
                 break
             field = decoded[field_start : field_start + ID_FIELD_LEN]
             stored = (decoded[field_start + ID_FIELD_LEN] << 8) | decoded[
@@ -224,6 +244,12 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
 
         if sync0 == A1 and mark in (DAM_NORMAL, DAM_DELETED):
             if field_start + SECTOR_SIZE + CRC_LEN > n:
+                log.debug(
+                    "data mark %#04x at byte %d truncated (stream ends at %d); ending scan",
+                    mark,
+                    mark_at,
+                    n,
+                )
                 break
             data = decoded[field_start : field_start + SECTOR_SIZE]
             stored = (decoded[field_start + SECTOR_SIZE] << 8) | decoded[
@@ -232,6 +258,8 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
             mark_bytes = decoded[mark_at : mark_at + 4]  # 3xA1 + DAM
             computed = crc_ccitt(mark_bytes + data)
             data_crc_ok = stored == computed
+            if not data_crc_ok:
+                n_data_bad += 1
             deleted = mark == DAM_DELETED
 
             if pending is not None:
@@ -239,8 +267,10 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
             else:
                 # Orphan data field with no preceding ID; keep it but flag the ID
                 # as unknown/bad so placement can decide what to do.
+                n_orphan += 1
                 fsd = ftk = fsc = 0
                 id_crc_ok = False
+            n_yielded += 1
             yield RawSector(
                 fsd=fsd,
                 ftk=ftk,
@@ -255,7 +285,19 @@ def recover_sectors_from_bytes(decoded: bytes) -> Iterator[RawSector]:
             continue
 
         # Unknown mark: step past the sync run and keep scanning.
+        n_unknown += 1
         pos = mark_at + 1
+
+    log.debug(
+        "sector scan done: %d sectors (%d data-CRC bad, %d orphan data fields), "
+        "%d index marks, %d IDs dropped unpaired, %d unknown marks skipped",
+        n_yielded,
+        n_data_bad,
+        n_orphan,
+        n_index,
+        n_dropped_id,
+        n_unknown,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +323,17 @@ def intervals_to_bytes(flux: FluxStream, rate_kbps: int) -> bytes:
     """
     # Offline/fixture convention: intervals already hold decoded byte values.
     if all(0 <= v <= 0xFF for v in flux.intervals):
+        log.debug(
+            "all %d intervals are byte-valued; passing through as decoded MFM bytes",
+            len(flux.intervals),
+        )
         return bytes(flux.intervals)
     # Real-flux fallback stub: cannot decode without the PLL (see TODO above).
+    log.debug(
+        "intervals are not byte-valued (%d intervals, %d kbps); PLL not wired, refusing",
+        len(flux.intervals),
+        rate_kbps,
+    )
     raise NotImplementedError(
         "interval->bitstream PLL not wired (TODO(bench), DESIGN §13.6 item 1)"
     )
@@ -294,6 +345,7 @@ def recover_sectors(flux: FluxStream, rate_kbps: int) -> Iterator[RawSector]:
     Thin wrapper over :func:`intervals_to_bytes` (the bench-seam PLL step) and
     :func:`recover_sectors_from_bytes` (fully real byte framing).
     """
+    log.debug("recovering sectors from %d intervals at %d kbps", len(flux.intervals), rate_kbps)
     decoded = intervals_to_bytes(flux, rate_kbps)
     yield from recover_sectors_from_bytes(decoded)
 
@@ -326,6 +378,7 @@ def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
         starts.append(p)
         p = text.find(_SYNC3_CELLS, p + len(_SYNC3_CELLS))
 
+    log.debug("found %d A1 sync runs in %d bitcells; decoding fields", len(starts), len(text))
     out = bytearray()
     for k, s in enumerate(starts):
         nxt = starts[k + 1] if k + 1 < len(starts) else len(text)
@@ -344,5 +397,12 @@ def recover_sectors_from_flux(
     """
     from tapewyrm.codec import gwpll
 
+    log.debug(
+        "running PLL over %d flux intervals (sample clock %d Hz, %d kbps)",
+        len(intervals),
+        sample_clock_hz,
+        rate_kbps,
+    )
     cells = gwpll.flux_to_bitcells(intervals, sample_clock_hz, 1 / (rate_kbps * 2000))
+    log.debug("PLL produced %d bitcells; framing MFM bytes", len(cells))
     return list(recover_sectors_from_bytes(bitcells_to_bytes(cells)))

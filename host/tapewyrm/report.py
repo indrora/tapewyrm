@@ -7,7 +7,11 @@ expected-vs-unexpected accounting, and the list of segments worth re-capturing.
 
 from __future__ import annotations
 
+import logging
+
 from tapewyrm.types import RecoveryReport, SegmentStatus
+
+log = logging.getLogger(__name__)
 
 _STATUS_ORDER = (
     SegmentStatus.CLEAN,
@@ -36,6 +40,7 @@ def format_track_coverage(report: RecoveryReport) -> str:
     """Per-track coverage %, one line per track (ascending)."""
     coverage = report.track_coverage()
     if not coverage:
+        log.debug("report has no per-track coverage; printing placeholder")
         return "no track coverage data"
     lines = [f"  track {t:>2}: {coverage[t] * 100:5.1f}%" for t in sorted(coverage)]
     return "track coverage:\n" + "\n".join(lines)
@@ -52,7 +57,10 @@ def format_bsm_accounting(report: RecoveryReport) -> str:
 def format_recapture(report: RecoveryReport, limit: int = 50) -> str:
     """List the segments worth re-capturing (keyed by (track, seg-in-track))."""
     if not report.recapture:
+        log.debug("report lists no segments to re-capture")
         return "recapture: none — all segments clean or corrected"
+    if len(report.recapture) > limit:
+        log.debug("%d recapture segments; showing the first %d", len(report.recapture), limit)
     shown = report.recapture[:limit]
     listing = ", ".join(f"(t{t},s{s})" for t, s in shown)
     suffix = "" if len(report.recapture) <= limit else f" (+{len(report.recapture) - limit} more)"

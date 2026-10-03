@@ -29,10 +29,13 @@ TOML schema (all keys optional except ``name``)::
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from pathlib import Path
 
 from tapewyrm.types import DriveProfile, TimingParams
+
+log = logging.getLogger(__name__)
 
 PROFILES_DIR = Path(__file__).resolve().parent.parent / "profiles" / "drive"
 
@@ -46,7 +49,9 @@ def _resolve_path(name_or_path: str) -> Path:
     p = Path(name_or_path)
     # Explicit path (has a separator or a .toml suffix or actually exists).
     if p.suffix == ".toml" or p.exists() or p.is_absolute() or len(p.parts) > 1:
+        log.debug("profile %r looks like a path; using it directly", name_or_path)
         return p
+    log.debug("profile %r is a bare name; resolving under %s", name_or_path, PROFILES_DIR)
     return PROFILES_DIR / f"{name_or_path}.toml"
 
 
@@ -63,15 +68,19 @@ def _parse_timing(d: dict) -> TimingParams:
 
 def _parse_wake(raw: object) -> tuple[tuple[str, int | None, int], ...]:
     if raw is None:
+        log.debug("profile has no [[wake]] steps; empty wake sequence")
         return ()
     if not isinstance(raw, list):
+        log.debug("`wake` is %s, not a list; refusing", type(raw).__name__)
         raise ProfileError("`wake` must be an array of tables")
     steps: list[tuple[str, int | None, int]] = []
     for i, step in enumerate(raw):
         if not isinstance(step, dict):
+            log.debug("wake step %d is %s, not a table; refusing", i, type(step).__name__)
             raise ProfileError(f"wake step {i} must be a table")
         cmd = step.get("cmd")
         if not isinstance(cmd, str):
+            log.debug("wake step %d cmd is %r, not a string; refusing", i, cmd)
             raise ProfileError(f"wake step {i} missing string `cmd`")
         arg_raw = step.get("arg")
         arg = None if arg_raw is None else int(arg_raw)
@@ -83,26 +92,32 @@ def _parse_wake(raw: object) -> tuple[tuple[str, int | None, int], ...]:
 def load_profile(name_or_path: str) -> DriveProfile:
     """Load a DriveProfile by bare name or path; ``default`` -> built-in fallback."""
     if name_or_path == "default":
+        log.debug("profile 'default' requested; using built-in DriveProfile.default()")
         return DriveProfile.default()
 
     path = _resolve_path(name_or_path)
     if not path.exists():
+        log.debug("profile %r resolved to %s, which does not exist; refusing", name_or_path, path)
         raise ProfileError(f"profile not found: {name_or_path} (looked at {path})")
+    log.debug("loading drive profile from %s", path)
     try:
         with path.open("rb") as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as exc:
+        log.debug("reading profile %s failed (%s); refusing", path, exc)
         raise ProfileError(f"could not read profile {path}: {exc}") from exc
 
     name = data.get("name")
     if not isinstance(name, str) or not name:
         # Fall back to the file stem if `name` is absent.
+        log.debug("profile `name` is %r; falling back to file stem %r", name, path.stem)
         name = path.stem
 
     timing = _parse_timing(data.get("timing", {}))
     wake = _parse_wake(data.get("wake"))
     quirks = data.get("quirks", [])
     if not isinstance(quirks, list):
+        log.debug("`quirks` is %s, not a list; refusing", type(quirks).__name__)
         raise ProfileError("`quirks` must be an array of strings")
 
     return DriveProfile(

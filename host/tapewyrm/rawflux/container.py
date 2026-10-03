@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import struct
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -44,6 +45,8 @@ from typing import BinaryIO
 
 from tapewyrm.link import protocol
 from tapewyrm.types import CaptureHeader, Direction, Marker, MarkerKind, TapeFormat
+
+log = logging.getLogger(__name__)
 
 MAGIC = b"TWRF"
 # v2 (2026-10-01): the header gains the drive's raw QIC-117 report bytes
@@ -74,6 +77,7 @@ _KIND_TO_WIRE = {v: k for k, v in _WIRE_TO_KIND.items()}
 def frame_marker(kind: MarkerKind, payload: bytes = b"") -> bytes:
     """Encode one marker as an opcode-escape frame for embedding in a flux run."""
     if len(payload) > 0xFF:
+        log.debug("marker %s payload is %d bytes > 255; refusing", kind.name, len(payload))
         raise ValueError("marker payload too long for u8 length field")
     return bytes([ESC, int(_KIND_TO_WIRE[kind]), len(payload)]) + payload
 
@@ -109,6 +113,12 @@ def _decode_payload(kind: MarkerKind, payload: bytes) -> dict[str, int | str]:
             }
     except struct.error:
         pass
+    if kind is not MarkerKind.HEARTBEAT:  # HEARTBEAT is empty by design
+        log.debug(
+            "marker %s payload of %d bytes too short/unknown; keeping raw_len only",
+            kind.name,
+            len(payload),
+        )
     return {"raw_len": len(payload)}
 
 
@@ -116,11 +126,13 @@ def iter_markers(flux: bytes) -> Iterator[Marker]:
     """Walk a flux run, yielding each embedded marker (skipping flux/escaped bytes)."""
     i = 0
     n = len(flux)
+    unknown_escapes = 0  # counted, not logged per hit: this loop walks every byte
     while i < n:
         if flux[i] != ESC:
             i += 1
             continue
         if i + 1 >= n:
+            log.debug("flux ends on a bare ESC at offset %d; stopping marker walk", i)
             break
         nxt = flux[i + 1]
         if nxt == ESC:  # escaped literal 0xFF flux byte
@@ -129,6 +141,7 @@ def iter_markers(flux: bytes) -> Iterator[Marker]:
         if nxt in _WIRE_TO_KIND:
             kind = _WIRE_TO_KIND[protocol.Marker(nxt)]
             if i + 2 >= n:
+                log.debug("marker %s at offset %d truncated before length; stopping", kind.name, i)
                 break
             plen = flux[i + 2]
             payload = flux[i + 3 : i + 3 + plen]
@@ -136,7 +149,10 @@ def iter_markers(flux: bytes) -> Iterator[Marker]:
             i += 3 + plen
         else:
             # Malformed/unknown escape; be lenient and resync past the ESC.
+            unknown_escapes += 1
             i += 1
+    if unknown_escapes:
+        log.debug("skipped %d unknown/malformed escapes while walking markers", unknown_escapes)
 
 
 def flux_data_only(flux: bytes) -> bytes:
@@ -144,6 +160,7 @@ def flux_data_only(flux: bytes) -> bytes:
     out = bytearray()
     i = 0
     n = len(flux)
+    unknown_escapes = 0  # counted, not logged per hit: this loop walks every byte
     while i < n:
         if flux[i] != ESC:
             out.append(flux[i])
@@ -157,7 +174,10 @@ def flux_data_only(flux: bytes) -> bytes:
             plen = flux[i + 2] if i + 2 < n else 0
             i += 3 + plen
             continue
+        unknown_escapes += 1
         i += 1
+    if unknown_escapes:
+        log.debug("dropped %d unknown/malformed escapes from flux data", unknown_escapes)
     return bytes(out)
 
 
@@ -205,10 +225,19 @@ class RawFluxCapture:
         """Check the END accounting (byte count + checksum) against the data."""
         end = self.end_marker()
         if end is None:
+            log.debug("no END marker; capture is truncated, cannot verify")
             return False
         data = flux_data_only(self.flux)
         ok_bytes = end.fields.get("byte_count") == len(data)
         ok_sum = end.fields.get("checksum") == flux_checksum(data)
+        if not (ok_bytes and ok_sum):
+            log.debug(
+                "END accounting mismatch: byte_count %s vs %d, checksum %s vs %d",
+                end.fields.get("byte_count"),
+                len(data),
+                end.fields.get("checksum"),
+                flux_checksum(data),
+            )
         return bool(ok_bytes and ok_sum)
 
     # --- persistence ---
@@ -217,12 +246,14 @@ class RawFluxCapture:
         return header_to_dict(self.header)
 
     def save(self, path: str | Path) -> None:
+        log.debug("writing RawFluxCapture (%d flux bytes) to %s", len(self.flux), path)
         with Path(path).open("wb") as f:
             write_preamble(f, self.header)
             f.write(self.flux)
 
     @classmethod
     def load(cls, path: str | Path) -> RawFluxCapture:
+        log.debug("loading RawFluxCapture from %s", path)
         with Path(path).open("rb") as f:
             hdr, _ = _read_header(f, str(path))
             flux = f.read()
@@ -243,6 +274,7 @@ def write_preamble(f: BinaryIO, hdr: CaptureHeader) -> int:
     starts, then flux chunks are appended as the device sends them.
     """
     hdr_json = json.dumps(header_to_dict(hdr), separators=(",", ":")).encode("utf-8")
+    log.debug("writing TWRF v%d preamble, %d-byte header", FORMAT_VERSION, len(hdr_json))
     f.write(_PREAMBLE.pack(MAGIC, FORMAT_VERSION, len(hdr_json)))
     f.write(hdr_json)
     return _PREAMBLE.size + len(hdr_json)
@@ -251,18 +283,26 @@ def write_preamble(f: BinaryIO, hdr: CaptureHeader) -> int:
 def _read_header(f: BinaryIO, name: str) -> tuple[CaptureHeader, int]:
     pre = f.read(_PREAMBLE.size)
     if len(pre) < _PREAMBLE.size or pre[:4] != MAGIC:
+        log.debug(
+            "%s: preamble %r (%d bytes) lacks magic %r; refusing", name, pre[:4], len(pre), MAGIC
+        )
         raise ValueError(f"not a RawFluxCapture file (bad magic): {name}")
     _, version, hlen = _PREAMBLE.unpack(pre)
     if version not in READABLE_VERSIONS:
+        log.debug("%s: version %d not in %s; refusing", name, version, READABLE_VERSIONS)
         raise ValueError(f"unsupported RawFluxCapture version {version}: {name}")
     d = json.loads(f.read(hlen))
     d["direction"] = Direction(d["direction"])
     d["tape_format"] = TapeFormat(d["tape_format"])
     known = {fl.name for fl in dataclasses.fields(CaptureHeader)}
+    unknown = sorted(set(d) - known)
+    if unknown:
+        log.debug("%s: ignoring unknown header fields %s", name, unknown)
     return CaptureHeader(**{k: v for k, v in d.items() if k in known}), _PREAMBLE.size + hlen
 
 
 def read_header(path: str | Path) -> tuple[CaptureHeader, int]:
     """Just the header (and where the flux starts) -- cheap on a 60 MB capture."""
+    log.debug("reading TWRF header from %s", path)
     with Path(path).open("rb") as f:
         return _read_header(f, str(path))

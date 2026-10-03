@@ -135,6 +135,7 @@ def missing_segments(index_ticks: list[int]) -> int:
     """
     gaps = [b - a for a, b in zip(index_ticks, index_ticks[1:], strict=False)]
     if len(gaps) < 3:
+        log.debug("only %d INDEX gaps (< 3); no median, assuming 0 missed", len(gaps))
         return 0
     median = sorted(gaps)[len(gaps) // 2]
     return sum(round(g / median) - 1 for g in gaps if g > LONG_GAP_FACTOR * median)
@@ -147,23 +148,43 @@ def check_pass(res: TrackResult, best_index: int, flux_ack: int = 0) -> str | No
     dump (0 if this is the first).
     """
     if flux_ack != 0:
+        log.debug("track %d: flux status %d != 0; stopping", res.track, flux_ack)
         return f"GW flux status {flux_ack} (overflow?)"
     if res.end_reason != EndReason.EOT.name:
+        log.debug("track %d: end reason %s != EOT; stopping", res.track, res.end_reason)
         return f"pass ended with {res.end_reason}, not EOT"
     if not res.verified:
+        log.debug("track %d: stream failed END verification; stopping", res.track)
         return "stream did not verify against END marker"
     if best_index and res.index_pulses < MIN_INDEX_FRACTION * best_index:
+        log.debug(
+            "track %d: %d INDEX < %.2f x best %d; stopping",
+            res.track,
+            res.index_pulses,
+            MIN_INDEX_FRACTION,
+            best_index,
+        )
         return (
             f"drive found only {res.index_pulses} segments (best pass so far: "
             f"{best_index}); stopping to protect the tape"
         )
     if res.missing_est > MAX_MISSING_FRACTION * max(res.index_pulses, 1):
+        log.debug(
+            "track %d: %d missed > %.2f x %d found; stopping",
+            res.track,
+            res.missing_est,
+            MAX_MISSING_FRACTION,
+            res.index_pulses,
+        )
         return (
             f"~{res.missing_est} segments missed inside the pass "
             f"({res.index_pulses} found); stopping to protect the tape"
         )
     fraction = res.good_fraction
     if fraction is not None and fraction < MIN_GOOD_FRACTION:
+        log.debug(
+            "track %d: good fraction %.3f < %.2f; stopping", res.track, fraction, MIN_GOOD_FRACTION
+        )
         return (
             f"only {fraction:.0%} of sectors CRC-clean (< {MIN_GOOD_FRACTION:.0%}); "
             "stopping to protect the tape"
@@ -175,7 +196,8 @@ def _report(drive: Qic117Drive, name: str, bits: int) -> int | None:
     """One raw report byte/word, or None if this drive doesn't implement it."""
     try:
         return drive.report(commands.TABLE[name], bits)
-    except LinkError:
+    except LinkError as exc:
+        log.debug("%s unsupported (%s); clearing latched error, recording None", name, exc)
         drive.status()  # clear whatever the unsupported command latched
         return None
 
@@ -187,14 +209,22 @@ def drive_identity(drive: Qic117Drive) -> CaptureHeader:
     """
     from tapewyrm.buildinfo import host_build
 
+    log.debug("reading drive identity reports")
     status = drive.status().raw
     config = _report(drive, "REPORT_DRIVE_CONFIGURATION", 8)
     tape = _report(drive, "REPORT_TAPE_STATUS", 8)
+    if config is None:
+        log.debug("no drive configuration; assuming 500 kbps")
     rate = DriveConfig.decode(config).rate_kbps if config is not None else 500
     fmt = TapeStatus.decode(tape).format if tape is not None else TapeFormat.UNKNOWN
     if fmt is TapeFormat.UNKNOWN and config is not None and DriveConfig.decode(config).qic80_mode:
+        log.debug("tape format unknown but config 0x%02x says QIC-80 mode; assuming QIC-80", config)
         fmt = TapeFormat.QIC80  # Rev J Note 4
     info = drive.link.info
+    if info is not None and info.proto_ver:
+        log.debug("reading firmware build info")
+    else:
+        log.debug("no device INFO/proto_ver; firmware commit unknown")
     fw = drive.link.build_info() if info is not None and info.proto_ver else None
     return CaptureHeader(
         rate_kbps=rate,
@@ -233,10 +263,20 @@ def wind_to_track_start(drive: Qic117Drive, track: int) -> DriveStatus:
     """
     forward = Direction.for_track(track) is Direction.FORWARD
     cmd = commands.PHYSICAL_REVERSE if forward else commands.PHYSICAL_FORWARD
+    log.debug(
+        "track %d: winding with %s to physical %s", track, cmd.name, "BOT" if forward else "EOT"
+    )
     st = drive.command(cmd)
     assert st is not None  # non-streaming motion always returns a status
     at_start = st.at_bot if forward else st.at_eot
     if st.error or not at_start:
+        log.debug(
+            "track %d: after wind error=%s at_start=%s (%s); refusing",
+            track,
+            st.error,
+            at_start,
+            st,
+        )
         err = drive.last_error.code if (st.error and drive.last_error) else None
         raise DumpStopped(
             f"track {track}: {cmd.name} ended at {st} (error {err}), not at physical "
@@ -248,7 +288,9 @@ def wind_to_track_start(drive: Qic117Drive, track: int) -> DriveStatus:
 def summarize(path: Path) -> tuple[CaptureHeader, gwstream.ParsedStream, list]:
     """Decode a TWRF capture with its own rate and clock (no assumptions)."""
     hdr, flux_at = read_header(path)
+    log.debug("parsing flux stream of %s", path)
     ps = gwstream.parse(path.read_bytes()[flux_at:])
+    log.debug("decoding sectors at %d kbps", hdr.rate_kbps)
     return hdr, ps, mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, hdr.rate_kbps)
 
 
@@ -269,6 +311,7 @@ def dump_tracks(
     from tapewyrm.tape.geometry import coord_to_seg
 
     link = drive.link
+    log.debug("creating output directory %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     template = drive_identity(drive)
     log.info(
@@ -279,15 +322,25 @@ def dump_tracks(
     results: list[TrackResult] = []
     with progress.task("dumping tracks", total=len(tracks), unit="tracks") as overall:
         for track in tracks:
+            log.debug("track %d: checking drive is ready+referenced", track)
             st = drive.status()
             if not (st.ready and st.referenced) or st.error:
+                log.debug(
+                    "track %d: ready=%s referenced=%s error=%s; refusing",
+                    track,
+                    st.ready,
+                    st.referenced,
+                    st.error,
+                )
                 raise DumpStopped(
                     f"before track {track}: drive not ready+referenced ({st}); "
                     "Logical Forward would be refused (Rev J error 19)"
                 )
+            log.info(f"track {track:2d}: winding to its start...")
             t_wind = time.monotonic()
             wind_to_track_start(drive, track)
             log.info(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
+            log.debug("track %d: seeking head", track)
             drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
 
             path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
@@ -310,15 +363,18 @@ def dump_tracks(
             )
             nbytes = 0
             # Logical Forward ends at EOT, so the length is unknown: count bytes.
+            log.debug("track %d: streaming capture to %s", track, path)
             with path.open("wb") as f, progress.task(f"track {track:2d}", unit="bytes") as bar:
                 write_preamble(f, hdr)
                 for chunk in cap.chunks():
                     f.write(chunk)
                     nbytes += len(chunk)
                     bar.advance(len(chunk))
+            log.debug("track %d: capture done, %d bytes; reading flux status", track, nbytes)
             flux_ack = link.flux_status()
             wall = time.monotonic() - t0
 
+            log.debug("track %d: flux status %d; waiting for drive Ready", track, flux_ack)
             st = drive.wait_ready(30)
             err = drive.last_error.code if (st.error and drive.last_error) else None
 
@@ -351,6 +407,7 @@ def dump_tracks(
                 summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
             best_index = max((r.index_pulses for r in results), default=0)
             results.append(res)
+            log.debug("track %d: appending result to %s", track, out_dir / "dump.jsonl")
             with (out_dir / "dump.jsonl").open("a") as f:
                 f.write(json.dumps(asdict(res)) + "\n")
             log.info(

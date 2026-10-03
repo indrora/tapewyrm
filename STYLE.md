@@ -125,6 +125,18 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
   narrative a user follows ("track 3: capturing -> ..."), `log.debug(...)` for
   bench detail, `log.warning(...)` for things that need a human. No `print`,
   no `log=` callback parameters.
+- **Log before you act.** Each significant action (opening a device or file,
+  issuing a drive or link command, starting a decode, writing output, a retry)
+  gets a line saying what is *about* to happen, so a hang or crash shows what
+  was in flight. A result line after it is welcome too.
+- **Every guard logs at debug.** An `if` that raises, returns early,
+  `continue`s, `break`s or falls back to a default gets a `log.debug` naming
+  what was checked, the values seen, and what happens next.
+- Debug calls use lazy `%`-style args (`log.debug("seg %d: %s", n, why)`),
+  never f-strings, so disabled debug stays cheap.
+- Hot paths (per flux transition, bit, byte, USB packet) never log per
+  iteration on the success path. Frequent guards in them bump a counter and
+  log one summary after the loop.
 - Long loops take `progress: Progress = NULL_PROGRESS` (`tapewyrm.progress`)
   and wrap themselves in `with progress.task(desc, total=..., unit=...) as bar:`,
   calling `bar.advance()` / `bar.update()`. Advance at the *top* of a loop body

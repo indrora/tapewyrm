@@ -12,9 +12,12 @@ is a no-op.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Iterator
 
 from tapewyrm.types import RawSector
+
+log = logging.getLogger(__name__)
 
 
 def union(passes: Iterable[Iterable[RawSector]]) -> Iterator[RawSector]:
@@ -26,12 +29,28 @@ def union(passes: Iterable[Iterable[RawSector]]) -> Iterator[RawSector]:
     erasures rather than vanishing).
     """
     best: dict[tuple[int, int, int], RawSector] = {}
+    # Per-sector outcomes are tallied and logged once (per-sector logging would
+    # be thousands of lines per track).
+    n_passes = n_seen = n_upgraded = 0
+    log.debug("unioning sectors across capture passes")
     for sectors in passes:
+        n_passes += 1
         for sec in sectors:
+            n_seen += 1
             key = (sec.fsd, sec.ftk, sec.fsc)
             current = best.get(key)
             if current is None:
                 best[key] = sec
             elif not current.data_crc_ok and sec.data_crc_ok:
+                n_upgraded += 1
                 best[key] = sec
+    log.debug(
+        "union: %d passes, %d sectors seen -> %d unique coordinates "
+        "(%d CRC-bad copies replaced by a CRC-good one, %d duplicates dropped)",
+        n_passes,
+        n_seen,
+        len(best),
+        n_upgraded,
+        n_seen - len(best) - n_upgraded,
+    )
     yield from best.values()

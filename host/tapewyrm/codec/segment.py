@@ -14,8 +14,12 @@ UNCORRECTABLE (> 3), or MISSING (empty).
 
 from __future__ import annotations
 
+import logging
+
 from tapewyrm.codec import rs
 from tapewyrm.types import RawSector, Segment, SegmentResult, SegmentStatus
+
+log = logging.getLogger(__name__)
 
 SECTOR_SIZE = RawSector.SIZE  # 1024
 
@@ -30,6 +34,7 @@ def erasure_mask(seg: Segment) -> list[bool]:
     mask: list[bool] = []
     for i in range(Segment.SECTORS):
         if i in seg.excluded:
+            log.debug("segment %d slot %d is BSM-excluded; not an erasure", seg.seg, i)
             mask.append(False)
             continue
         sec = seg.sectors[i]
@@ -49,6 +54,7 @@ def correct_segment(seg: Segment) -> SegmentResult:
     The returned ``data`` is the 29 data sectors concatenated (29 * 1024 bytes
     for a whole segment), suitable to feed straight into volume reassembly.
     """
+    log.debug("RS-correcting segment %d (tpt %d tps %d)", seg.seg, seg.tpt, seg.tps)
     result = rs.correct(seg)
 
     # rs.correct already fills .data with the participating data rows in order
@@ -72,6 +78,7 @@ def segment_data(seg: Segment) -> bytes:
         if sec is not None and sec.data:
             out.extend(sec.data)
         else:
+            log.debug("segment %d slot %d has no data; zero-filling", seg.seg, slot)
             out.extend(bytes(SECTOR_SIZE))
     return bytes(out)
 
@@ -79,10 +86,18 @@ def segment_data(seg: Segment) -> bytes:
 def classify(seg: Segment) -> SegmentStatus:
     """Status of ``seg`` from its erasure count, without mutating it."""
     if all(seg.sectors[i] is None for i in range(Segment.SECTORS)):
+        log.debug("classify segment %d: no sectors; MISSING", seg.seg)
         return SegmentStatus.MISSING
     erased = sum(erasure_mask(seg))
     if erased == 0:
+        log.debug("classify segment %d: 0 erasures; CLEAN", seg.seg)
         return SegmentStatus.CLEAN
     if erased <= rs.REDUNDANCY:
+        log.debug(
+            "classify segment %d: %d erasures <= %d; CORRECTED", seg.seg, erased, rs.REDUNDANCY
+        )
         return SegmentStatus.CORRECTED
+    log.debug(
+        "classify segment %d: %d erasures > %d; UNCORRECTABLE", seg.seg, erased, rs.REDUNDANCY
+    )
     return SegmentStatus.UNCORRECTABLE
