@@ -14,12 +14,9 @@ from __future__ import annotations
 import logging
 
 # Re-export the decoders for convenience (they live in types.py — single source).
-from tapewyrm.types import (
-    DriveConfig,
-    DriveStatus,
-    ErrorCode,
-    TapeStatus,
-)
+from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
+
+from tapewyrm.types import ErrorCode
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +36,7 @@ __all__ = [
     "ERR_WAKEUP_RESET",
     "ERR_BROKEN_TAPE",
     "ERROR_NAMES",
-    "VENDOR_MAKES",
     "error_name",
-    "decode_vendor_id",
-    "TAPE_TYPES",
-    "LEGACY_VENDOR_IDS",
 ]
 
 # ---------------------------------------------------------------------------
@@ -130,69 +123,12 @@ ERROR_NAMES: dict[int, str] = {
     43: "Illegal Entry into Format Mode",
 }
 
-# QIC-117 Rev J "Assigned Vendor Make Codes (0-1023)" (p.24).
-VENDOR_MAKES: dict[int, str] = {
-    0: "Unassigned",
-    1: "Alloy Computer Products",
-    2: "3M",
-    3: "Tandberg Data",
-    4: "Colorado Memory Systems",
-    5: "Archive/Conner",
-    6: "Mountain/Summit Memory Systems",
-    7: "Wangtek/Rexon/Tecmar",
-    8: "Sony",
-    9: "Cipher Data Products",
-    10: "Irwin Magnetic Systems",
-    11: "Braemar",
-    12: "Verbatim",
-    13: "Core International (Shipped Unassigned)",
-    14: "Exabyte",
-    15: "Teac",
-    16: "Gigatek",
-    17: "ComByte",
-    18: "PERTEC Memories",
-    19: "Aiwa",
-    71: "Colorado Memory Systems",
-    546: "Iomega Inc.",
-}
-
 
 def error_name(code: int) -> str:
     """Rev J name for an error code ("no error" for 0)."""
     if code == ERR_NO_ERROR:
         return "no error"
     return ERROR_NAMES.get(code, f"unknown/vendor error {code}")
-
-
-# Vendor IDs that predate the make/model split and are reported as a bare word.
-# Rev J lists Colorado as make "4 & 71", but 71 as a 10-bit make would need a
-# word >= 71 << 6 = 4544; the bench Colorado Jumbo 350 reports exactly 0x0047.
-# So 71 is Colorado's legacy whole-word ID, not a make field.
-LEGACY_VENDOR_IDS: dict[int, str] = {71: "Colorado Memory Systems (legacy ID)"}
-
-
-def decode_vendor_id(value: int) -> tuple[int, int, str]:
-    """Split a Report Vendor ID word: bits 6-15 make, 0-5 model (Rev J p.15).
-
-    Legacy whole-word IDs (see ``LEGACY_VENDOR_IDS``) come back as
-    (value, 0, name) rather than being mis-split into a bogus make/model.
-    """
-    if value in LEGACY_VENDOR_IDS:
-        log.debug("vendor id 0x%04x is a legacy whole-word id; not splitting make/model", value)
-        return value, 0, LEGACY_VENDOR_IDS[value]
-    make, model = value >> 6, value & 0x3F
-    return make, model, VENDOR_MAKES.get(make, f"unknown make {make}")
-
-
-# Report Tape Status bits 4-6 (Rev J Table 2c).
-TAPE_TYPES: dict[int, str] = {
-    0: "unknown",
-    1: "205 ft or 425+ ft, 550 Oe",
-    2: "307.5 ft 550 Oe (XL)",
-    3: "variable length 550 Oe",
-    4: "1100 ft 550 Oe",
-    6: "variable length 900 Oe",
-}
 
 
 def classify_error(code: int) -> bool:

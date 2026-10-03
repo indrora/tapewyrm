@@ -18,18 +18,15 @@ from __future__ import annotations
 
 import logging
 
+from qiclib import merge, qic113
+from qiclib import segment as seg_mod
+from qiclib import volume as volume_mod
+from qiclib.geometry import Geometry, fallback_spt
+from qiclib.types import FileSet, RawSector, SegmentStatus
 from tapewyrm_archive.twrf import RawFluxCapture
 
-from tapewyrm.codec import flux, merge, mfm, qic113
-from tapewyrm.codec import segment as seg_mod
-from tapewyrm.codec import volume as volume_mod
-from tapewyrm.tape.geometry import Geometry, fallback_spt
-from tapewyrm.types import (
-    FileSet,
-    RawSector,
-    RecoveryReport,
-    SegmentStatus,
-)
+from tapewyrm.codec import flux, mfm
+from tapewyrm.types import RecoveryReport
 
 log = logging.getLogger(__name__)
 

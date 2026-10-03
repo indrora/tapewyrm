@@ -1,10 +1,10 @@
 """tw dump winds to each track's starting end before Logical Forward."""
 
 import pytest
+from tapewyrm_archive.qic117 import DriveStatus
 
 from tapewyrm.qic117 import commands
 from tapewyrm.tape.dump import DumpStopped, wind_to_track_start
-from tapewyrm.types import DriveStatus
 
 # Report Drive Status bits (Rev J Table 2c): 0 ready, 2 cartridge, 5 referenced,
 # 6 at BOT, 7 at EOT, 1 error.

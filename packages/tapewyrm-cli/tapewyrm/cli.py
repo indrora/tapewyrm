@@ -256,7 +256,7 @@ def _decode_error(w: int) -> str:
 
 
 def _decode_config(b: int) -> str:
-    from tapewyrm.types import DriveConfig
+    from tapewyrm_archive.qic117 import DriveConfig
 
     cfg = DriveConfig.decode(b)
     rate = f"{cfg.rate_kbps} kbps" + (" (or 4 Mbps)" if cfg.rate_ambiguous else "")
@@ -271,7 +271,7 @@ def _decode_rom(b: int) -> str:
 
 
 def _decode_vendor(w: int) -> str:
-    from tapewyrm.qic117.status import LEGACY_VENDOR_IDS, decode_vendor_id
+    from tapewyrm_archive.qic117 import LEGACY_VENDOR_IDS, decode_vendor_id
 
     make, model, name = decode_vendor_id(w)
     if w in LEGACY_VENDOR_IDS:
@@ -280,8 +280,7 @@ def _decode_vendor(w: int) -> str:
 
 
 def _decode_tape(b: int) -> str:
-    from tapewyrm.qic117.status import TAPE_TYPES
-    from tapewyrm.types import TapeStatus
+    from tapewyrm_archive.qic117 import TAPE_TYPES, TapeStatus
 
     ts = TapeStatus.decode(b)
     kind = TAPE_TYPES.get(ts.tape_type, f"reserved type {ts.tape_type}")
@@ -748,8 +747,8 @@ def extract(app: AppContext, image: Path, out: Path, tape_profile: str) -> None:
     recording the byte ranges that were lost. Turn a volume into a tar with
     contrib/qic2tar.py.
     """
-    from tapewyrm.codec.tape_profile import TapeProfileError
-    from tapewyrm.image.extract import extract as do_extract
+    from qiclib.extract import extract as do_extract
+    from qiclib.tape_profile import TapeProfileError
 
     log.debug("extracting %s to %s (tape profile %r)", image, out, tape_profile)
     try:
@@ -779,8 +778,10 @@ def identify(app: AppContext, source: Path, as_json: bool, tape_profile: str, ra
     """
     import json
 
-    from tapewyrm.codec.tape_profile import TapeProfileError
-    from tapewyrm.image.identify import format_info, identify, to_dict
+    from qiclib.identify import format_info, to_dict
+    from qiclib.tape_profile import TapeProfileError
+
+    from tapewyrm.image.identify import identify
 
     log.debug("identifying %s (tape profile %r)", source, tape_profile)
     try:

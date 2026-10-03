@@ -21,17 +21,13 @@ from __future__ import annotations
 
 import logging
 
+from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
+
 from tapewyrm.link.device import DeviceLink
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.commands import Cmd, Kind, encode_arg
 from tapewyrm.qic117.status import classify_error
-from tapewyrm.types import (
-    DriveConfig,
-    DriveProfile,
-    DriveStatus,
-    ErrorCode,
-    TapeStatus,
-)
+from tapewyrm.types import DriveProfile, ErrorCode
 
 log = logging.getLogger(__name__)
 

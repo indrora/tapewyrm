@@ -821,6 +821,7 @@ tapewyrm/
     vendor-seam/   # the few GW primitives kept pristine for cherry-picking upstream
   packages/tapewyrm-cli/            # the uv Python project (tapewyrm, `tw`)
   packages/tapewyrm-archive/        # TWRF/TWTI/TWVL formats (tapewyrm_archive), stdlib-only
+  packages/qiclib/                  # QIC layout + backup formats (qiclib), stdlib-only
   protocol/        # source-of-truth opcode/marker defs + generator
   docs/            # this document and design notes
   justfile         # task runner (below)

@@ -2,7 +2,9 @@
 
 This is the contract layer (DESIGN.md §6A.11, §13.4). The on-disk capture
 types (``Direction``, ``TapeFormat``, ``MarkerKind``, ``CaptureHeader``,
-``Marker``) live in :mod:`tapewyrm_archive.types` with the TWRF format. Nothing here imports from
+``Marker``) live in :mod:`tapewyrm_archive.types` with the TWRF format; the QIC-117 report
+decoders in :mod:`tapewyrm_archive.qic117`; the sector/segment/file types in
+:mod:`qiclib.types`. Nothing here imports from
 the rest of the package, so every layer can depend on it without cycles. The
 bit-level report decoders (``DriveStatus.decode`` etc.) are grounded in the
 QIC-117 report payload tables (DESIGN.md §13.1).
@@ -11,23 +13,13 @@ QIC-117 report payload tables (DESIGN.md §13.1).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 
-# TapeStatus decodes into TapeFormat, which the TWRF format owns.
-from tapewyrm_archive.types import TapeFormat
+# The recovery report (pipeline) is built from qiclib segment statuses and file sets.
+from qiclib.types import FileSet, SegmentStatus
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-
-
-class SegmentStatus(Enum):
-    """Outcome of RS erasure decode for one segment (DESIGN.md §6A.9)."""
-
-    CLEAN = "clean"  # every sector CRC-good, no correction needed
-    CORRECTED = "corrected"  # 1..3 sectors rebuilt by RS
-    UNCORRECTABLE = "uncorrectable"  # > 3 erasures, partial data kept
-    MISSING = "missing"  # segment never captured
 
 
 # ---------------------------------------------------------------------------
@@ -94,35 +86,6 @@ def _bit(value: int, n: int) -> bool:
 
 
 @dataclass(frozen=True)
-class DriveStatus:
-    """Report Drive Status (cmd 6), 8 bits. Bits 1,5,6,7 valid only when ready."""
-
-    ready: bool
-    error: bool
-    cartridge_present: bool
-    write_protect: bool
-    new_cartridge: bool
-    referenced: bool
-    at_bot: bool
-    at_eot: bool
-    raw: int = 0
-
-    @classmethod
-    def decode(cls, b: int) -> DriveStatus:
-        return cls(
-            ready=_bit(b, 0),
-            error=_bit(b, 1),
-            cartridge_present=_bit(b, 2),
-            write_protect=_bit(b, 3),
-            new_cartridge=_bit(b, 4),
-            referenced=_bit(b, 5),
-            at_bot=_bit(b, 6),
-            at_eot=_bit(b, 7),
-            raw=b,
-        )
-
-
-@dataclass(frozen=True)
 class ErrorCode:
     """Report Error Code (cmd 7), 16 bits: 0-7 code, 8-15 associated command.
 
@@ -138,61 +101,6 @@ class ErrorCode:
     @classmethod
     def decode(cls, w: int, fatal: bool = False) -> ErrorCode:
         return cls(code=w & 0xFF, associated_command=(w >> 8) & 0xFF, fatal=fatal, raw=w)
-
-
-@dataclass(frozen=True)
-class DriveConfig:
-    """Report Drive Configuration (cmd 8), 8 bits.
-
-    bits 3-4 rate (00=4M/250k, 01=2M, 10=500k, 11=1M); bit6 extra-length;
-    bit7 QIC-80-mode.
-    """
-
-    rate_code: int
-    extra_length: bool
-    qic80_mode: bool
-    raw: int = 0
-
-    # rate code -> kbps. 00 is ambiguous (4 Mbps OR 250 kbit/s by drive type);
-    # we surface 250 as the conservative default and flag the ambiguity.
-    _RATE_KBPS = {0b00: 250, 0b01: 2000, 0b10: 500, 0b11: 1000}
-
-    @classmethod
-    def decode(cls, b: int) -> DriveConfig:
-        return cls(
-            rate_code=(b >> 3) & 0b11,
-            extra_length=_bit(b, 6),
-            qic80_mode=_bit(b, 7),
-            raw=b,
-        )
-
-    @property
-    def rate_kbps(self) -> int:
-        return self._RATE_KBPS[self.rate_code]
-
-    @property
-    def rate_ambiguous(self) -> bool:
-        return self.rate_code == 0b00
-
-
-@dataclass(frozen=True)
-class TapeStatus:
-    """Report Tape Status (cmd 33), 8 bits: 0-3 format, 4-6 type, 7 wide."""
-
-    format: TapeFormat
-    tape_type: int
-    wide: bool
-    raw: int = 0
-
-    @classmethod
-    def decode(cls, b: int) -> TapeStatus:
-        fmt_bits = b & 0x0F
-        fmt = (
-            TapeFormat(fmt_bits)
-            if fmt_bits in TapeFormat._value2member_map_
-            else TapeFormat.UNKNOWN
-        )
-        return cls(format=fmt, tape_type=(b >> 4) & 0b111, wide=_bit(b, 7), raw=b)
 
 
 # ---------------------------------------------------------------------------
@@ -233,75 +141,9 @@ class FluxStream:
     sample_clock_hz: int
 
 
-@dataclass
-class RawSector:
-    """One recovered sector: its abused C/H/R is its tape coordinate.
-
-    On tape the ID field byte order is (FTK, FSD, FSC, 03) but we name the
-    fields by their QIC meaning (DESIGN.md §2.2, §7.3).
-    """
-
-    fsd: int  # head  -> floppy side
-    ftk: int  # cylinder -> floppy track
-    fsc: int  # record -> floppy sector (1-based)
-    data: bytes  # 1024 bytes (may be zero-filled if data field unreadable)
-    id_crc_ok: bool
-    data_crc_ok: bool
-    deleted: bool  # data address mark was F8 (format-time bad block)
-
-    SIZE = 1024
-
-
-@dataclass
-class Segment:
-    """A 32-slot bin keyed by tape (track, segment-relative-to-track).
-
-    ``sectors[i]`` is the sector with segment-relative index i, or None if not
-    yet recovered. Excluded (BSM) positions are tracked separately so the RS
-    decoder can repack to codeword length N = 31 - bad_blocks (DESIGN.md §2.3).
-    """
-
-    tpt: int  # tape track
-    tps: int  # segment relative to track
-    seg: int  # absolute logical segment
-    sectors: list[RawSector | None] = field(default_factory=lambda: [None] * 32)
-    excluded: set[int] = field(default_factory=set)  # BSM-excluded slot indices
-
-    SECTORS = 32
-    DATA_ROWS = 29
-    PARITY_ROWS = 3
-
-
-@dataclass
-class SegmentResult:
-    status: SegmentStatus
-    corrected_count: int = 0
-    erasure_count: int = 0
-    data: bytes = b""  # concatenated 29 data sectors (29 * 1024) after correction
-
-
 # ---------------------------------------------------------------------------
 # Volume / file-set outputs (DESIGN.md §7.3, §7.5)
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class FileEntry:
-    path: str  # full path within the file set
-    size: int
-    attrs: int
-    mtime: int | None  # epoch seconds, or None if undefined
-    data: bytes = b""
-    is_dir: bool = False
-    unreadable_at_backup: bool = False
-
-
-@dataclass
-class FileSet:
-    name: str  # source device / volume description (e.g. "C:")
-    files: list[FileEntry] = field(default_factory=list)
-    compressed: bool = False
-    extended_os: bool = False
 
 
 @dataclass

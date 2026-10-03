@@ -13,6 +13,7 @@ every decision). This README is the map; the design doc is the territory.
 |-------------|----------------------------------------------------------------------------|
 | `packages/tapewyrm-cli/`     | `tw`: device link, QIC-117 drive layer, tape transport, flux/MFM decode |
 | `packages/tapewyrm-archive/` | TWRF / TWTI / TWVL file formats (stdlib-only base of every package)    |
+| `packages/qiclib/`           | QIC layout + backup formats: segments/ECC, header/VTBL, QIC-113/122, profiles |
 | `firmware/` | C firmware skeleton (QIC verbs, bus arbiter, free-running flux capture)      |
 | `protocol/` | Single source of truth (`protocol.toml`) + generator for both ends          |
 | `docs/`     | DESIGN.md and design notes                                                  |

@@ -53,7 +53,7 @@ class _StatusDrive:
         self.status_reads = 0
 
     def status(self):
-        from tapewyrm.types import DriveStatus
+        from tapewyrm_archive.qic117 import DriveStatus
 
         self.status_reads += 1
         return DriveStatus.decode(0x65)

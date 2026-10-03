@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import struct
 
+from qiclib.geometry import coord_to_seg, seg_to_coord
+from qiclib.testing.builders import build_data_entry, build_dir_entry, build_vtbl_entry
+from qiclib.volume import FPR_SIGNATURE
 from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
 
 from tapewyrm.codec import mfm
 from tapewyrm.codec.pipeline import decode
-from tapewyrm.codec.volume import FPR_SIGNATURE
-from tapewyrm.tape.geometry import coord_to_seg, seg_to_coord
-from tests.fixtures.builders import build_data_entry, build_dir_entry, build_vtbl_entry
 
 SPT = 207  # segments per track for the synthetic tape
 

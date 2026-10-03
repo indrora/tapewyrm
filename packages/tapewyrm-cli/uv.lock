@@ -489,6 +489,24 @@ wheels = [
 ]
 
 [[package]]
+name = "qiclib"
+version = "0.1.0"
+source = { editable = "../qiclib" }
+dependencies = [
+    { name = "tapewyrm-archive" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "tapewyrm-archive", editable = "../tapewyrm-archive" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "rich"
 version = "15.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -547,6 +565,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "pyserial" },
+    { name = "qiclib" },
     { name = "rich" },
     { name = "rich-click" },
     { name = "tapewyrm-archive" },
@@ -571,6 +590,7 @@ requires-dist = [
     { name = "pyserial", specifier = ">=3.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "qiclib", editable = "../qiclib" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "rich-click", specifier = ">=1.9.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },

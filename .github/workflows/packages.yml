@@ -17,6 +17,7 @@ jobs:
       matrix:
         include:
           - { package: tapewyrm-archive, module: tapewyrm_archive }
+          - { package: qiclib, module: qiclib }
           - { package: tapewyrm-cli, module: tapewyrm }
     defaults:
       run:

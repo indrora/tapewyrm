@@ -49,6 +49,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
 from tapewyrm_archive.twrf import read_header, write_preamble
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
 
@@ -57,7 +58,7 @@ from tapewyrm.link.device import LinkError
 from tapewyrm.link.protocol import EndReason
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
-from tapewyrm.types import DriveConfig, DriveStatus, StopCond, TapeStatus
+from tapewyrm.types import StopCond
 
 log = logging.getLogger(__name__)
 
@@ -301,8 +302,9 @@ def dump_tracks(
     ``check`` also decodes every pass (~17 s each) and stops on a low
     CRC-clean fraction; see the module docstring.
     """
+    from qiclib.geometry import coord_to_seg
+
     from tapewyrm.qic117.status import error_name
-    from tapewyrm.tape.geometry import coord_to_seg
 
     link = drive.link
     log.debug("creating output directory %s", out_dir)

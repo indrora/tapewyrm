@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from tapewyrm.types import RecoveryReport, SegmentStatus
+from qiclib.types import SegmentStatus
+
+from tapewyrm.types import RecoveryReport
 
 log = logging.getLogger(__name__)
 

@@ -41,6 +41,12 @@ from rich.progress import Progress as RichLive
 from rich.text import Text
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress, ProgressTask
 
+# Every package whose library code this CLI runs. Each logs under its own
+# top-level name (logging.getLogger(__name__)), so each needs the handler: a
+# package left out here goes silent below WARNING. qicsilver's copy of this
+# module lists its own set.
+_OUR_LOGGERS = ("tapewyrm", "tapewyrm_archive", "qiclib")
+
 # -v/-q steps, centred on INFO (index 2): -qq ERROR ... -v DEBUG.
 _LEVELS = [logging.ERROR, logging.WARNING, logging.INFO, logging.DEBUG]
 
@@ -51,10 +57,10 @@ def make_console() -> Console:
 
 
 def setup_logging(console: Console, verbose: int, quiet: int) -> None:
-    """Route the ``tapewyrm`` logger to ``console`` at a level set by -v/-q.
+    """Route our packages' loggers (``_OUR_LOGGERS``) to ``console`` at a level set by -v/-q.
 
-    Only our own logger is configured (not the root), so importing tapewyrm
-    as a library never hijacks a host application's logging. At -v the
+    Only our own loggers are configured (not the root), so importing these
+    packages as libraries never hijacks a host application's logging. At -v the
     handler also shows the emitting module, which is what you want when
     chasing a bench problem.
     """
@@ -67,10 +73,11 @@ def setup_logging(console: Console, verbose: int, quiet: int) -> None:
         rich_tracebacks=True,
         log_time_format="[%X]",
     )
-    logger = logging.getLogger("tapewyrm")
-    logger.handlers[:] = [handler]
-    logger.setLevel(level)
-    logger.propagate = False
+    for name in _OUR_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.handlers[:] = [handler]
+        logger.setLevel(level)
+        logger.propagate = False
 
 
 class _AmountColumn(ProgressColumn):

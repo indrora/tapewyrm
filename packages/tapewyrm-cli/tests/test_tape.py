@@ -9,6 +9,8 @@ import struct
 from contextlib import AbstractContextManager
 
 import pytest
+from qiclib.geometry import Geometry
+from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
 from tapewyrm_archive.twrf import (
     RawFluxCapture,
     flux_checksum,
@@ -18,9 +20,8 @@ from tapewyrm_archive.twrf import (
 )
 from tapewyrm_archive.types import Direction, MarkerKind, TapeFormat
 
-from tapewyrm.tape.geometry import Geometry
 from tapewyrm.tape.transport import TapeError, TapeTransport
-from tapewyrm.types import DriveConfig, DriveStatus, ErrorCode, TapeStatus
+from tapewyrm.types import ErrorCode
 
 # ---------------------------------------------------------------------------
 # Synthesize a device flux stream the way the firmware would emit it

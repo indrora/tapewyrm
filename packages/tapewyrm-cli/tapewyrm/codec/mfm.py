@@ -28,7 +28,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from tapewyrm.types import FluxStream, RawSector
+from qiclib.types import RawSector
+
+from tapewyrm.types import FluxStream
 
 log = logging.getLogger(__name__)
 

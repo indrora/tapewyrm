@@ -17,11 +17,15 @@ dependencies = [
     "rich>=15.0.0",
     "rich-click>=1.9.9",
     "tapewyrm-archive",
+    # Only `tw convert` (sectors -> TWTI) and the identify/extract front ends
+    # (until they move to qicsilver) use it. STYLE.md §2.
+    "qiclib",
 ]
 
 # Sibling packages in this repository (packages/*), installed editable.
 [tool.uv.sources]
 tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }
+qiclib = { path = "../qiclib", editable = true }
 
 [project.optional-dependencies]
 # Optional vectorized GF(256) path; pure-Python fallback is always present.

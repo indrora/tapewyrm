@@ -20,6 +20,8 @@ import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
+from qiclib.geometry import Geometry
+from tapewyrm_archive.qic117 import DriveConfig, TapeStatus
 from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.types import CaptureHeader, TapeFormat
 
@@ -27,8 +29,7 @@ from tapewyrm.link.device import LinkError
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
 from tapewyrm.qic117.status import classify_error
-from tapewyrm.tape.geometry import Geometry
-from tapewyrm.types import DriveConfig, StopCond, TapeStatus
+from tapewyrm.types import StopCond
 
 log = logging.getLogger(__name__)
 
