@@ -39,7 +39,8 @@ The live-drive path (wind to BOT, capture a few seconds, identify) is built on
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import logging
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,10 +51,13 @@ from tapewyrm.codec import tape_profile as tp
 from tapewyrm.codec import volume as volume_mod
 from tapewyrm.codec.volume import BadSectorMap, VolumeInfo, VtblEntry
 from tapewyrm.image import twti
+from tapewyrm.progress import NULL_PROGRESS, Progress
 from tapewyrm.qic117.status import TAPE_TYPES, decode_vendor_id
 from tapewyrm.tape import cartridge
 from tapewyrm.tape.geometry import Geometry
 from tapewyrm.types import DriveConfig, RawSector, SegmentStatus, TapeStatus
+
+log = logging.getLogger(__name__)
 
 # The placement used before the header tells us the real geometry. Only the
 # header's own position has to come out right under it, and the header sits at
@@ -125,7 +129,7 @@ def identify(
     path: Path,
     *,
     tape_profile: str = tp.GUESS,
-    log: Callable[[str], None] | None = None,
+    progress: Progress = NULL_PROGRESS,
 ) -> TapeInfo:
     """Identify a tape from a TWTI image, TWRF/raw capture(s) or a dump directory.
 
@@ -137,14 +141,14 @@ def identify(
             magic = f.read(len(twti.MAGIC))
         if magic == twti.MAGIC:
             return from_image(twti.TapeImage.open(path), tape_profile=tape_profile)
-    return from_captures([path], tape_profile=tape_profile, log=log)
+    return from_captures([path], tape_profile=tape_profile, progress=progress)
 
 
 def from_captures(
     sources: Iterable[Path],
     *,
     tape_profile: str = tp.GUESS,
-    log: Callable[[str], None] | None = None,
+    progress: Progress = NULL_PROGRESS,
 ) -> TapeInfo:
     """Decode capture flux to sectors (merging passes), then :func:`from_sectors`."""
     files = twti.capture_files(sources)
@@ -152,15 +156,16 @@ def from_captures(
         raise ValueError("no track captures found")
     passes: list[list[RawSector]] = []
     drive: dict | None = None
-    for path in files:
-        sectors, meta = twti.decode_capture(path)
-        if log is not None:
-            log(f"{path.name}: {meta['sectors']} sectors")
-        passes.append(sectors)
-        # The first capture that recorded the drive's reports speaks for it
-        # (legacy .raw streams carry none).
-        if drive is None and "tape_status" in meta["twrf"]:
-            drive = meta["twrf"]
+    with progress.task("decoding captures", total=len(files), unit="captures") as bar:
+        for path in files:
+            sectors, meta = twti.decode_capture(path)
+            log.info(f"{path.name}: {meta['sectors']} sectors")
+            passes.append(sectors)
+            # The first capture that recorded the drive's reports speaks for it
+            # (legacy .raw streams carry none).
+            if drive is None and "tape_status" in meta["twrf"]:
+                drive = meta["twrf"]
+            bar.advance()
     return from_sectors(merge.union(passes), tape_profile=tape_profile, drive=drive)
 
 

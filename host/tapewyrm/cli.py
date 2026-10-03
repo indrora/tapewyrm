@@ -22,6 +22,13 @@ Codec imports happen inside the commands, so ``tw --help`` stays fast.
 
 Config precedence: CLI flags -> config file -> profile defaults, resolved once in
 ``AppContext.load`` and carried on ``ctx.obj``.
+
+Output channels (STYLE.md §2.5): command results -- status lines, summaries,
+``--json`` -- go to **stdout** via ``click.echo``. The library's narrative goes
+through :mod:`logging` and, like ``--progress`` bars, to **stderr** through one
+shared rich console (:mod:`tapewyrm.console`), so stdout stays pipeable.
+``click`` here is ``rich_click``: the same API, with rich-rendered help and
+errors.
 """
 
 from __future__ import annotations
@@ -33,8 +40,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import click
+import rich_click as click
+from rich.console import Console
 
+from tapewyrm.console import make_console, progress_display, setup_logging
+from tapewyrm.progress import Progress
 from tapewyrm.qic117.profile import load_profile
 from tapewyrm.types import DriveProfile
 
@@ -49,6 +59,15 @@ class AppContext:
     passes: int = 1
     out_dir: Path | None = None
     settings: dict[str, Any] = field(default_factory=dict)
+    # stderr console shared by logging and the progress bars (tapewyrm.console)
+    console: Console = field(default_factory=make_console)
+    show_progress: bool = False
+
+    @contextmanager
+    def progress(self) -> Iterator[Progress]:
+        """Live progress bars for one command if ``--progress``, else a no-op."""
+        with progress_display(self.console, self.show_progress) as prog:
+            yield prog
 
     @classmethod
     def load(
@@ -103,14 +122,28 @@ class AppContext:
 @click.option("--port", default=None, help="GW serial port (autodetect if unset)")
 @click.option("--profile", default=None, help="drive profile name or path")
 @click.option("--config", type=click.Path(), default=None, help="config TOML file")
+@click.option("--progress", "show_progress", is_flag=True, help="show progress bars (stderr)")
+@click.option("-v", "--verbose", count=True, help="more log output (-v for debug)")
+@click.option("-q", "--quiet", count=True, help="less log output (-q warnings, -qq errors)")
 @click.pass_context
-def cli(ctx: click.Context, port: str | None, profile: str | None, config: str | None) -> None:
+def cli(
+    ctx: click.Context,
+    port: str | None,
+    profile: str | None,
+    config: str | None,
+    show_progress: bool,
+    verbose: int,
+    quiet: int,
+) -> None:
     """tw — Tapewyrm: QIC-80 floppy-tape recovery over Greaseweazle v4.1.
 
     The single Tapewyrm tool: capture, decode, recover, and flash firmware.
     Does not require the ``gw`` executable.
     """
-    ctx.obj = AppContext.load(port, profile, config)
+    app = AppContext.load(port, profile, config)
+    app.show_progress = show_progress
+    setup_logging(app.console, verbose, quiet)
+    ctx.obj = app
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +472,8 @@ def drive_flux(app: AppContext, motion: str, seconds: float, out: Path) -> None:
     """
     from tapewyrm.tape.fluxprobe import format_report, probe
 
-    with _drive_session(app) as d:
-        report = probe(d, motion, seconds, out, log=click.echo)
+    with _drive_session(app) as d, app.progress() as prog:
+        report = probe(d, motion, seconds, out, progress=prog)
         click.echo(f"status    : {_fmt_status(d.status())}")
     for line in format_report(report):
         click.echo(line)
@@ -616,9 +649,9 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
 
     track_list = _parse_tracks(tracks)
-    with _drive_session(app) as d:
+    with _drive_session(app) as d, app.progress() as prog:
         try:
-            results = dump_tracks(d, track_list, Path(out), log=click.echo, check=check)
+            results = dump_tracks(d, track_list, Path(out), progress=prog, check=check)
         except DumpStopped as exc:
             raise click.ClickException(f"dump stopped: {exc}") from exc
     segments = sum(r.index_pulses for r in results)
@@ -641,7 +674,8 @@ def dump(app: AppContext, tracks: str, out: str, check: bool) -> None:
     "-o", "--out", "out", required=True, type=click.Path(dir_okay=False, path_type=Path),
     help="tape image to write (.twti)",
 )  # fmt: skip
-def convert(sources: tuple[Path, ...], out: Path) -> None:
+@click.pass_obj
+def convert(app: AppContext, sources: tuple[Path, ...], out: Path) -> None:
     """TWRF dump(s) -> TWTI logical tape image.
 
     SOURCES are dump directories (or individual track-NN.twrf files). Every
@@ -652,7 +686,8 @@ def convert(sources: tuple[Path, ...], out: Path) -> None:
     from tapewyrm.image.twti import convert as do_convert
 
     try:
-        do_convert(list(sources), out, log=click.echo)
+        with app.progress() as prog:
+            do_convert(list(sources), out, progress=prog)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -663,7 +698,8 @@ def convert(sources: tuple[Path, ...], out: Path) -> None:
     "-o", "--out", "out", required=True, type=click.Path(file_okay=False, path_type=Path),
     help="directory for the volume files (vol-NN.twvl)",
 )  # fmt: skip
-def extract(image: Path, out: Path) -> None:
+@click.pass_obj
+def extract(app: AppContext, image: Path, out: Path) -> None:
     """TWTI tape image -> one TWVL file per backup volume.
 
     Reads the volume table, decompresses QIC-122 data and lays each volume out
@@ -673,7 +709,8 @@ def extract(image: Path, out: Path) -> None:
     from tapewyrm.image.twvl import extract as do_extract
 
     try:
-        do_extract(image, out, log=click.echo)
+        with app.progress() as prog:
+            do_extract(image, out, progress=prog)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -685,8 +722,10 @@ def extract(image: Path, out: Path) -> None:
     "--tape-profile", default="guess", show_default=True,
     help="volume-table layout: a profile name or path, or 'guess' to try them all",
 )  # fmt: skip
-@click.option("-v", "--verbose", is_flag=True, help="also dump raw records and profile scoring")
-def identify(source: Path, as_json: bool, tape_profile: str, verbose: bool) -> None:
+# Not -v/--verbose: that is the global log-level flag on `tw` itself.
+@click.option("--raw", is_flag=True, help="also dump raw records and profile scoring")
+@click.pass_obj
+def identify(app: AppContext, source: Path, as_json: bool, tape_profile: str, raw: bool) -> None:
     """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
 
     SOURCE is a TWTI image, a TWRF (or legacy .raw) capture, or a dump
@@ -699,13 +738,14 @@ def identify(source: Path, as_json: bool, tape_profile: str, verbose: bool) -> N
     from tapewyrm.image.identify import format_info, identify, to_dict
 
     try:
-        info = identify(source, tape_profile=tape_profile, log=None if as_json else click.echo)
+        with app.progress() as prog:
+            info = identify(source, tape_profile=tape_profile, progress=prog)
     except (ValueError, TapeProfileError) as exc:
         raise click.ClickException(str(exc)) from exc
     if as_json:
         click.echo(json.dumps(to_dict(info), indent=1))
     else:
-        for line in format_info(info, verbose=verbose):
+        for line in format_info(info, verbose=raw):
             click.echo(line)
 
 

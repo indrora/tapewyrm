@@ -41,8 +41,9 @@ looks worse, rather than spending more passes on a tape that may be shedding.
 from __future__ import annotations
 
 import json
+import logging
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +51,7 @@ from pathlib import Path
 from tapewyrm.codec import gwstream, mfm
 from tapewyrm.link.device import LinkError
 from tapewyrm.link.protocol import EndReason
+from tapewyrm.progress import NULL_PROGRESS, Progress
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
 from tapewyrm.rawflux.container import read_header, write_preamble
@@ -62,6 +64,8 @@ from tapewyrm.types import (
     TapeFormat,
     TapeStatus,
 )
+
+log = logging.getLogger(__name__)
 
 # Stop rules (see check_pass). Each one means something on the tape or in the
 # drive has degraded and a human should look before the next pass.
@@ -253,7 +257,7 @@ def dump_tracks(
     tracks: Iterable[int],
     out_dir: Path,
     *,
-    log: Callable[[str], None] = print,
+    progress: Progress = NULL_PROGRESS,
     check: bool = False,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble.
@@ -267,89 +271,94 @@ def dump_tracks(
     link = drive.link
     out_dir.mkdir(parents=True, exist_ok=True)
     template = drive_identity(drive)
-    log(
+    log.info(
         f"drive: config 0x{template.drive_config or 0:02x} -> {template.rate_kbps} kbps, "
         f"tape {template.tape_format.name}; writing TWRF to {out_dir}"
     )
+    tracks = list(tracks)
     results: list[TrackResult] = []
-    for track in tracks:
-        st = drive.status()
-        if not (st.ready and st.referenced) or st.error:
-            raise DumpStopped(
-                f"before track {track}: drive not ready+referenced ({st}); "
-                "Logical Forward would be refused (Rev J error 19)"
+    with progress.task("dumping tracks", total=len(tracks), unit="tracks") as overall:
+        for track in tracks:
+            st = drive.status()
+            if not (st.ready and st.referenced) or st.error:
+                raise DumpStopped(
+                    f"before track {track}: drive not ready+referenced ({st}); "
+                    "Logical Forward would be refused (Rev J error 19)"
+                )
+            t_wind = time.monotonic()
+            wind_to_track_start(drive, track)
+            log.info(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
+            drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
+
+            path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
+            hdr = replace(
+                template,
+                track=track,
+                direction=Direction.for_track(track),
+                utc=datetime.now(UTC).isoformat(timespec="seconds"),
+                drive_status=st.raw,
             )
-        t_wind = time.monotonic()
-        wind_to_track_start(drive, track)
-        log(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
-        drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
-
-        path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
-        hdr = replace(
-            template,
-            track=track,
-            direction=Direction.for_track(track),
-            utc=datetime.now(UTC).isoformat(timespec="seconds"),
-            drive_status=st.raw,
-        )
-        log(f"track {track:2d}: capturing -> {path}")
-        t0 = time.monotonic()
-        cap = link.capture(
-            commands.LOGICAL_FORWARD.code,
-            StopCond(byte_budget=0),  # the tape ends the pass, not a budget
-            rate=hdr.rate_kbps,
-            tpt=track,
-            direction=track & 1,
-            pass_id=hdr.pass_id,
-        )
-        nbytes = 0
-        with path.open("wb") as f:
-            write_preamble(f, hdr)
-            for chunk in cap.chunks():
-                f.write(chunk)
-                nbytes += len(chunk)
-        flux_ack = link.flux_status()
-        wall = time.monotonic() - t0
-
-        st = drive.wait_ready(30)
-        err = drive.last_error.code if (st.error and drive.last_error) else None
-
-        log(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
-        hdr_read, flux_at = read_header(path)
-        ps = gwstream.parse(path.read_bytes()[flux_at:])
-        segments_at = segment_pulses(ps.index_ticks, ps.sample_clock_hz)
-        res = TrackResult(
-            track=track,
-            path=str(path),
-            bytes=nbytes,
-            seconds=round(wall, 1),
-            end_reason=EndReason(ps.end.reason).name if ps.end else "none",
-            verified=ps.verified,
-            tape_seconds=round(ps.duration_s, 1),
-            index_pulses=len(segments_at),
-            missing_est=missing_segments(segments_at),
-            status_after=st.raw,
-            error_after=err,
-        )
-        summary = f"{res.index_pulses} segments by INDEX, {res.missing_est} missed in gaps"
-        if check:
-            log(f"track {track:2d}: decoding (--check)...")
-            sectors = mfm.recover_sectors_from_flux(
-                ps.intervals, ps.sample_clock_hz, hdr_read.rate_kbps
+            log.info(f"track {track:2d}: capturing -> {path}")
+            t0 = time.monotonic()
+            cap = link.capture(
+                commands.LOGICAL_FORWARD.code,
+                StopCond(byte_budget=0),  # the tape ends the pass, not a budget
+                rate=hdr.rate_kbps,
+                tpt=track,
+                direction=track & 1,
+                pass_id=hdr.pass_id,
             )
-            res.sectors = len(sectors)
-            res.good = sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok)
-            res.segments = len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors})
-            summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
-        best_index = max((r.index_pulses for r in results), default=0)
-        results.append(res)
-        with (out_dir / "dump.jsonl").open("a") as f:
-            f.write(json.dumps(asdict(res)) + "\n")
-        log(
-            f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, {summary}"
-            + (f", error {err} {error_name(err)}" if err else "")
-        )
-        reason = check_pass(res, best_index, flux_ack)
-        if reason is not None:
-            raise DumpStopped(f"track {track}: {reason}")
+            nbytes = 0
+            # Logical Forward ends at EOT, so the length is unknown: count bytes.
+            with path.open("wb") as f, progress.task(f"track {track:2d}", unit="bytes") as bar:
+                write_preamble(f, hdr)
+                for chunk in cap.chunks():
+                    f.write(chunk)
+                    nbytes += len(chunk)
+                    bar.advance(len(chunk))
+            flux_ack = link.flux_status()
+            wall = time.monotonic() - t0
+
+            st = drive.wait_ready(30)
+            err = drive.last_error.code if (st.error and drive.last_error) else None
+
+            log.info(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
+            hdr_read, flux_at = read_header(path)
+            ps = gwstream.parse(path.read_bytes()[flux_at:])
+            segments_at = segment_pulses(ps.index_ticks, ps.sample_clock_hz)
+            res = TrackResult(
+                track=track,
+                path=str(path),
+                bytes=nbytes,
+                seconds=round(wall, 1),
+                end_reason=EndReason(ps.end.reason).name if ps.end else "none",
+                verified=ps.verified,
+                tape_seconds=round(ps.duration_s, 1),
+                index_pulses=len(segments_at),
+                missing_est=missing_segments(segments_at),
+                status_after=st.raw,
+                error_after=err,
+            )
+            summary = f"{res.index_pulses} segments by INDEX, {res.missing_est} missed in gaps"
+            if check:
+                log.info(f"track {track:2d}: decoding (--check)...")
+                sectors = mfm.recover_sectors_from_flux(
+                    ps.intervals, ps.sample_clock_hz, hdr_read.rate_kbps
+                )
+                res.sectors = len(sectors)
+                res.good = sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok)
+                res.segments = len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors})
+                summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
+            best_index = max((r.index_pulses for r in results), default=0)
+            results.append(res)
+            with (out_dir / "dump.jsonl").open("a") as f:
+                f.write(json.dumps(asdict(res)) + "\n")
+            log.info(
+                f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, {summary}"
+                + (f", error {err} {error_name(err)}" if err else "")
+            )
+            reason = check_pass(res, best_index, flux_ack)
+            if reason is not None:
+                raise DumpStopped(f"track {track}: {reason}")
+            overall.advance()
     return results

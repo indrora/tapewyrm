@@ -25,6 +25,7 @@ identity and the source TWRF headers, so provenance survives every step.
 from __future__ import annotations
 
 import json
+import logging
 import mmap
 import struct
 from collections.abc import Callable, Iterable
@@ -36,9 +37,12 @@ from pathlib import Path
 from tapewyrm.codec import gwstream, merge, mfm
 from tapewyrm.codec import segment as seg_mod
 from tapewyrm.codec import volume as volume_mod
+from tapewyrm.progress import NULL_PROGRESS, Progress
 from tapewyrm.rawflux.container import header_to_dict, read_header
 from tapewyrm.tape.geometry import Geometry
 from tapewyrm.types import RawSector, SegmentStatus
+
+log = logging.getLogger(__name__)
 
 MAGIC = b"TWTI"
 VERSION = 1
@@ -155,7 +159,7 @@ def decode_capture(path: Path) -> tuple[list[RawSector], dict]:
     }
 
 
-def convert(sources: Iterable[Path], out: Path, *, log: Callable[[str], None] = print) -> TapeImage:
+def convert(sources: Iterable[Path], out: Path, *, progress: Progress = NULL_PROGRESS) -> TapeImage:
     """Build a TWTI image from one or more dumps (passes are merged)."""
     from tapewyrm.buildinfo import host_build
 
@@ -163,11 +167,13 @@ def convert(sources: Iterable[Path], out: Path, *, log: Callable[[str], None] = 
     if not files:
         raise ValueError("no track captures found")
     passes, source_meta = [], []
-    for path in files:
-        sectors, meta = decode_capture(path)
-        log(f"{path.name}: {meta['sectors']} sectors at {meta['twrf']['rate_kbps']} kbps")
-        passes.append(sectors)
-        source_meta.append(meta)
+    with progress.task("decoding captures", total=len(files), unit="captures") as bar:
+        for path in files:
+            sectors, meta = decode_capture(path)
+            log.info(f"{path.name}: {meta['sectors']} sectors at {meta['twrf']['rate_kbps']} kbps")
+            passes.append(sectors)
+            source_meta.append(meta)
+            bar.advance()
     merged = list(merge.union(passes))
 
     # The header places right under any geometry; then the header's own
@@ -182,18 +188,22 @@ def convert(sources: Iterable[Path], out: Path, *, log: Callable[[str], None] = 
     total = geom.total_segments()
     entries: list[SegmentEntry] = []
     data: dict[int, bytes] = {}
-    for n in range(total):
-        if n in bsm.bad_segments:
-            entries.append(SegmentEntry(SegmentState.BAD))
-            continue
-        seg = by_seg.get(n)
-        if seg is None:
-            entries.append(SegmentEntry(SegmentState.MISSING))
-            continue
-        res = seg_mod.correct_segment(seg)
-        mask = sum(1 << k for k in seg.excluded)
-        data[n] = res.data
-        entries.append(SegmentEntry(_FROM_RS[res.status], res.erasure_count, len(res.data), mask))
+    with progress.task("correcting segments", total=total, unit="segments") as bar:
+        for n in range(total):
+            bar.advance()
+            if n in bsm.bad_segments:
+                entries.append(SegmentEntry(SegmentState.BAD))
+                continue
+            seg = by_seg.get(n)
+            if seg is None:
+                entries.append(SegmentEntry(SegmentState.MISSING))
+                continue
+            res = seg_mod.correct_segment(seg)
+            mask = sum(1 << k for k in seg.excluded)
+            data[n] = res.data
+            entries.append(
+                SegmentEntry(_FROM_RS[res.status], res.erasure_count, len(res.data), mask)
+            )
 
     first: dict = next((m["twrf"] for m in source_meta if "drive_config" in m["twrf"]), {})
     header = {
@@ -222,5 +232,5 @@ def convert(sources: Iterable[Path], out: Path, *, log: Callable[[str], None] = 
     }
     img = TapeImage(header=header, entries=entries)
     img.save(out, lambda n: data.get(n, b""))
-    log(f"wrote {out}: {total} segments {img.counts()}")
+    log.info(f"wrote {out}: {total} segments {img.counts()}")
     return TapeImage.open(out)

@@ -120,9 +120,25 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
 
 - Library code raises `ValueError` (or a module-specific exception) with a
   message that says *what* failed and *what to do*; it does not print.
-- Library functions that report progress take `log: Callable[[str], None] = print`.
-- The CLI (`click`) converts `ValueError` into `click.ClickException` and owns
-  all user-facing output.
+- Library modules log through the standard library: one
+  `log = logging.getLogger(__name__)` per module, `log.info(...)` for the
+  narrative a user follows ("track 3: capturing -> ..."), `log.debug(...)` for
+  bench detail, `log.warning(...)` for things that need a human. No `print`,
+  no `log=` callback parameters.
+- Long loops take `progress: Progress = NULL_PROGRESS` (`tapewyrm.progress`)
+  and wrap themselves in `with progress.task(desc, total=..., unit=...) as bar:`,
+  calling `bar.advance()` / `bar.update()`. Advance at the *top* of a loop body
+  that uses `continue`. `total=None` when the length is unknown (a capture).
+- Library code never imports `rich` or `click`. Presentation lives in
+  `tapewyrm/console.py` (rich log handler, progress bars) and `tapewyrm/cli.py`.
+- The CLI (`rich_click`, imported as `click`) converts `ValueError` into
+  `click.ClickException` and owns all user-facing output.
+- Output channels: command *results* (status lines, summaries, `--json`) go to
+  stdout via `click.echo`; logs and `--progress` bars go to stderr through the
+  one shared console on `AppContext.console`. Never print to stderr any other
+  way while bars may be live -- it tears the display.
+- Global flags on `tw`: `--progress`, `-v`/`-q` (log level around INFO).
+  Subcommands must not reuse `-v`/`-q`.
 
 ### 2.6 Tests
 

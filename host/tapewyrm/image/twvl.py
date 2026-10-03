@@ -21,14 +21,17 @@ from __future__ import annotations
 
 import bisect
 import json
+import logging
 import struct
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from tapewyrm.codec import qic122
 from tapewyrm.codec import volume as volume_mod
 from tapewyrm.image.twti import SegmentState, TapeImage
+from tapewyrm.progress import NULL_PROGRESS, Progress
+
+log = logging.getLogger(__name__)
 
 MAGIC = b"TWVL"
 VERSION = 1
@@ -112,7 +115,7 @@ def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
     return d
 
 
-def extract(image_path: Path, out_dir: Path, *, log: Callable[[str], None] = print) -> list[Path]:
+def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRESS) -> list[Path]:
     """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``."""
     img = TapeImage.open(image_path)
     q80 = img.header["qic80_header"]
@@ -122,54 +125,60 @@ def extract(image_path: Path, out_dir: Path, *, log: Callable[[str], None] = pri
     vtbl = volume_mod.parse_volume_table_data(img.segment(vt_seg))
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for k, e in enumerate(vtbl):
-        size = (e.data_section_size or 0) + (e.dir_section_size or 0)
-        stream = SparseVolume(size=size)
-        lost: list[int] = []
-        for n in range(e.start_seg, e.end_seg + 1):
-            st = img.entries[n].state
-            if st is SegmentState.BAD:
-                continue
-            if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
-                lost.append(n)
-                continue
-            data = img.segment(n)
-            if e.compressed is False:
-                # Uncompressed volume: segments are laid end to end.
-                stream.add((n - e.start_seg) * len(data), data)
-                continue
-            try:
-                ext = qic122.decode_extent(data)
-            except qic122.Qic122Error:
-                lost.append(n)
-                continue
-            stream.add(ext.uncompressed_offset, ext.data)
-        body, _ = stream.read(0, size)
-        holes = _holes(stream, size)
-        vol = Volume(
-            header={
-                "format": "TWVL",
-                "version": VERSION,
-                "volume_index": k,
-                "tape_name": q80["tape_name"],
-                "vtbl": _vtbl_dict(e),
-                "data_section_size": e.data_section_size,
-                "dir_section_size": e.dir_section_size,
-                "holes": holes,
-                "lost_segments": lost,
-                "source_image": str(image_path),
-                "drive": img.header.get("drive"),
-            },
-            data=body,
-        )
-        path = out_dir / f"vol-{k:02d}.twvl"
-        vol.save(path)
-        missing = sum(b - a for a, b in holes)
-        log(
-            f"{path}: {e.description!r}, {size:,} bytes, {missing:,} missing "
-            f"({len(lost)} segments lost)"
-        )
-        written.append(path)
+    with progress.task("extracting volumes", total=len(vtbl), unit="volumes") as overall:
+        for k, e in enumerate(vtbl):
+            size = (e.data_section_size or 0) + (e.dir_section_size or 0)
+            stream = SparseVolume(size=size)
+            lost: list[int] = []
+            with progress.task(
+                f"volume {k}", total=e.end_seg + 1 - e.start_seg, unit="segments"
+            ) as bar:
+                for n in range(e.start_seg, e.end_seg + 1):
+                    bar.advance()
+                    st = img.entries[n].state
+                    if st is SegmentState.BAD:
+                        continue
+                    if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
+                        lost.append(n)
+                        continue
+                    data = img.segment(n)
+                    if e.compressed is False:
+                        # Uncompressed volume: segments are laid end to end.
+                        stream.add((n - e.start_seg) * len(data), data)
+                        continue
+                    try:
+                        ext = qic122.decode_extent(data)
+                    except qic122.Qic122Error:
+                        lost.append(n)
+                        continue
+                    stream.add(ext.uncompressed_offset, ext.data)
+            body, _ = stream.read(0, size)
+            holes = _holes(stream, size)
+            vol = Volume(
+                header={
+                    "format": "TWVL",
+                    "version": VERSION,
+                    "volume_index": k,
+                    "tape_name": q80["tape_name"],
+                    "vtbl": _vtbl_dict(e),
+                    "data_section_size": e.data_section_size,
+                    "dir_section_size": e.dir_section_size,
+                    "holes": holes,
+                    "lost_segments": lost,
+                    "source_image": str(image_path),
+                    "drive": img.header.get("drive"),
+                },
+                data=body,
+            )
+            path = out_dir / f"vol-{k:02d}.twvl"
+            vol.save(path)
+            missing = sum(b - a for a, b in holes)
+            log.info(
+                f"{path}: {e.description!r}, {size:,} bytes, {missing:,} missing "
+                f"({len(lost)} segments lost)"
+            )
+            written.append(path)
+            overall.advance()
     return written
 
 

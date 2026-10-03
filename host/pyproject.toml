@@ -14,6 +14,8 @@ authors = [{ name = "Tapewyrm contributors" }]
 dependencies = [
     "click>=8.1",
     "pyserial>=3.5",
+    "rich>=15.0.0",
+    "rich-click>=1.9.9",
 ]
 
 [project.optional-dependencies]

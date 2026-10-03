@@ -27,20 +27,23 @@ capture on overflow and stops the tape; that is itself proof of signal.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from tapewyrm.codec import gwstream, mfm
 from tapewyrm.link.protocol import EndReason
+from tapewyrm.progress import NULL_PROGRESS, Progress
 from tapewyrm.qic117 import commands
 from tapewyrm.qic117.drive import Qic117Drive
 from tapewyrm.rawflux.container import read_header, write_preamble
 from tapewyrm.tape.dump import drive_identity
 from tapewyrm.types import Direction, StopCond
+
+log = logging.getLogger(__name__)
 
 MOTIONS = {
     "fwd": commands.PHYSICAL_FORWARD,
@@ -77,7 +80,7 @@ def probe(
     seconds: float,
     path: Path,
     *,
-    log: Callable[[str], None] = print,
+    progress: Progress = NULL_PROGRESS,
 ) -> FluxReport:
     """Run ``motion`` for ``seconds`` while capturing flux to ``path``; analyse it."""
     cmd = MOTIONS[motion]
@@ -89,7 +92,7 @@ def probe(
         pass_id=0,
         utc=datetime.now(UTC).isoformat(timespec="seconds"),
     )
-    log(f"{cmd.name} for {seconds:g} s -> {path}")
+    log.info(f"{cmd.name} for {seconds:g} s -> {path}")
     t0 = time.monotonic()
     cap = drive.link.capture(
         cmd.code,
@@ -98,11 +101,13 @@ def probe(
         direction=1 if motion == "rev" else 0,  # SESSION_START: 0 fwd, 1 rev
     )
     nbytes = 0
-    with path.open("wb") as f:
+    with path.open("wb") as f, progress.task(cmd.name, total=seconds, unit="s") as bar:
         write_preamble(f, hdr)
         for chunk in cap.chunks_for(seconds):
             f.write(chunk)
             nbytes += len(chunk)
+            # Wall time, not bytes, bounds a probe; clamp the read-timeout overshoot.
+            bar.update(min(time.monotonic() - t0, seconds))
     wall = time.monotonic() - t0
     drive.wait_ready(30)  # the abort issued Stop Tape; let the drive settle
     return analyse(path, wall_s=wall)
