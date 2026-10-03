@@ -72,7 +72,7 @@ pick it up as a prerequisite of `floppy.o`, so edits to it trigger a rebuild.
 The marker codes and payload layouts the firmware emits are the firmware↔host
 contract; they come from the generated `inc/protocol.h` and must stay
 byte-for-byte identical to what the host parses in
-`host/tapewyrm/rawflux/container.py` (little-endian; ESC = `0xFF`).
+`packages/tapewyrm-host/tapewyrm/rawflux/container.py` (little-endian; ESC = `0xFF`).
 
 ## Layout
 
@@ -191,7 +191,7 @@ descriptors / commands.** Details in `vendor-seam/README.md`.
 
 `inc/protocol.h` is **generated** from the single source of truth in `protocol/`
 (`protocol.toml` → `protocol/generate.py` → `firmware/inc/protocol.h` +
-`host/tapewyrm/link/protocol.py`), so the device and host opcode / marker tables
+`packages/tapewyrm-host/tapewyrm/link/protocol.py`), so the device and host opcode / marker tables
 **never drift** (§12.4). CI regenerates and fails on `git diff`. **Do not edit
 `protocol.h` by hand** — change `protocol.toml` and regenerate. The QIC graft
 `#include`s it and uses its symbols verbatim (`TW_MARK_*`, `TW_EVT_*`,
@@ -199,7 +199,7 @@ descriptors / commands.** Details in `vendor-seam/README.md`.
 
 The marker **payload layouts** the firmware emits (in `src/qic/qic.c`) are the
 other half of the contract; they must stay byte-for-byte identical to what the
-host parses in `host/tapewyrm/rawflux/container.py` (little-endian).
+host parses in `packages/tapewyrm-host/tapewyrm/rawflux/container.py` (little-endian).
 
 ## What is real vs `TODO(bench)`
 

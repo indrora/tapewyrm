@@ -7,7 +7,7 @@ from pathlib import Path
 
 from tapewyrm.link import protocol
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]  # tests -> tapewyrm-host -> packages -> repo
 
 
 def test_generator_check_passes():

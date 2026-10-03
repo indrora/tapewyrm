@@ -32,7 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FW = ROOT / "firmware"
-HOST = ROOT / "host"
+HOST = ROOT / "packages" / "tapewyrm-host"
 DIST = ROOT / "dist"
 
 sys.path.insert(0, str(ROOT / "tools"))

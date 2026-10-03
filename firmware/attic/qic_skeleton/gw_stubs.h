@@ -181,7 +181,7 @@ extern size_t gw_flux_encode_interval(uint32_t ticks, uint8_t *out, size_t cap);
  * in the flux stream (the channel markers ride on, §5.4/§7.2). markers.c uses
  * this so a marker can never be misread as flux.
  * TODO(bench) §13.6 item 1: must equal GW's real escape byte. The host mirror
- * (host/tapewyrm/rawflux/container.py) currently models this as 0xFF; keep the
+ * (packages/tapewyrm-host/tapewyrm/rawflux/container.py) currently models this as 0xFF; keep the
  * two in lockstep so fixtures round-trip. */
 extern uint8_t gw_flux_opcode_escape(void);
 

@@ -5,7 +5,7 @@ Two ways to know, in order of preference:
 1. **Running from a git checkout** (``uv run tw``, editable installs): ask git
    directly, so the answer is never stale. We first check that this package's
    own files are *tracked* in the repo -- a wheel installed into a virtualenv
-   that happens to live inside the repo (``host/.venv``) would otherwise report
+   that happens to live inside the repo (``packages/tapewyrm-host/.venv``) would otherwise report
    the repo's commit for code it does not contain.
 2. **An installed wheel**: ``hatch_build.py`` stamps ``tapewyrm/_build_stamp.py``
    into the wheel at build time with the commit and dirty flag.
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 class HostBuild:
     version: str
     commit: str | None  # 40-char hex SHA
-    dirty: bool  # host/ had uncommitted changes (checkout) / at build (wheel)
+    dirty: bool  # packages/tapewyrm-host/ had uncommitted changes (checkout) / at build (wheel)
     source: str  # "git checkout" | "build stamp" | "unknown"
 
 
@@ -57,7 +57,7 @@ def host_build() -> HostBuild:
     if _git(pkg, "ls-files", "--error-unmatch", "__init__.py") is not None:
         commit = _git(pkg, "rev-parse", "HEAD")
         if commit:
-            # Dirty = tracked changes anywhere in the host project (host/).
+            # Dirty = tracked changes anywhere in the host project (packages/tapewyrm-host/).
             status = _git(pkg, "status", "--porcelain", "--untracked-files=no", "--", "..")
             log.debug("host build from git checkout: %s%s", commit, " (dirty)" if status else "")
             return HostBuild(version, commit, bool(status), "git checkout")

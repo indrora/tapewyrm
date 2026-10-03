@@ -2,16 +2,16 @@ name: host
 
 on:
   push:
-    paths: ["host/**", ".github/workflows/host.yml"]
+    paths: ["packages/tapewyrm-host/**", ".github/workflows/host.yml"]
   pull_request:
-    paths: ["host/**", ".github/workflows/host.yml"]
+    paths: ["packages/tapewyrm-host/**", ".github/workflows/host.yml"]
 
 jobs:
   host:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: host
+        working-directory: packages/tapewyrm-host
     steps:
       - uses: actions/checkout@v4
       - name: Install uv

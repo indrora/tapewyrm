@@ -5,9 +5,9 @@ name: contract
 
 on:
   push:
-    paths: ["protocol/**", "firmware/protocol.h", "host/tapewyrm/link/protocol.py"]
+    paths: ["protocol/**", "firmware/protocol.h", "packages/tapewyrm-host/tapewyrm/link/protocol.py"]
   pull_request:
-    paths: ["protocol/**", "firmware/protocol.h", "host/tapewyrm/link/protocol.py"]
+    paths: ["protocol/**", "firmware/protocol.h", "packages/tapewyrm-host/tapewyrm/link/protocol.py"]
 
 jobs:
   contract:

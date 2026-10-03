@@ -293,7 +293,7 @@ static bool_t qic_wait_ready(uint32_t timeout_ms)
  *  Markers ride GW's opcode-escape channel: a 0xFF byte introduces an opcode in
  *  the flux stream (see rdata_encode_flux(): 0xFF FLUXOP_INDEX ..). GW's flux
  *  opcodes are 1..3; our marker codes are 0xF0..0xF4 (inc/protocol.h), so the
- *  two never collide. The host parser (host/tapewyrm/rawflux/container.py) reads
+ *  two never collide. The host parser (packages/tapewyrm-host/tapewyrm/rawflux/container.py) reads
  *
  *      0xFF  <marker_code>  <len:u8>  <payload...>      (ESC == 0xFF)
  *

@@ -329,7 +329,7 @@ class Cmd:
     code: int; kind: Kind; non_intr: bool; name: str
     takes_arg: bool = False
 
-# Sketch only -- the authoritative table is host/tapewyrm/qic117/commands.py,
+# Sketch only -- the authoritative table is packages/tapewyrm-host/tapewyrm/qic117/commands.py,
 # audited against Rev J Tables 2a-2d. non_intr is Rev J's "(n)" flag: exactly
 # 3, 4, 14, 16, 18, 25, 26, 34, 35, 36.
 TABLE: dict[str, Cmd] = {
@@ -808,7 +808,7 @@ The middle tier is the important one for this project: iterating on the arbiter 
 The design depends on "one opcode/command table, both ends, never drifts" (the USB transaction opcodes **and** the flux marker opcodes). Make that a build artifact:
 
 - **One source of truth** in `protocol/` (a small YAML/TOML, or a single annotated Python module) defining every opcode/marker, its fields, and the protocol version.
-- A **generator** emits both `firmware/.../protocol.h` (C) and `host/tapewyrm/link/protocol.py` (Python) from it.
+- A **generator** emits both `firmware/.../protocol.h` (C) and `packages/tapewyrm-host/tapewyrm/link/protocol.py` (Python) from it.
 - A **CI job** regenerates and fails on `git diff` — this *mechanically* enforces the no-drift invariant from §5.4 / §6A.2 rather than relying on a human to keep two files aligned.
 
 The protocol version generated here feeds the device capability gate in §6A.2.
@@ -819,7 +819,7 @@ The protocol version generated here feeds the device capability gate in §6A.2.
 tapewyrm/
   firmware/        # hard fork of GW firmware (vendored) + Tapewyrm QIC sources
     vendor-seam/   # the few GW primitives kept pristine for cherry-picking upstream
-  host/            # the uv Python project (tapewyrm)
+  packages/tapewyrm-host/            # the uv Python project (tapewyrm)
   protocol/        # source-of-truth opcode/marker defs + generator
   docs/            # this document and design notes
   justfile         # task runner (below)
@@ -861,11 +861,11 @@ fw-dist:
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
 flash image="firmware/out/at32f4/prod/tapewyrm/target.bin":
-    cd host && uv run tw flash ../{{image}}
+    cd packages/tapewyrm-host && uv run tw flash ../../{{image}}
 
 # recovery flash via the hardware DFU header + ROM bootloader (tw -> dfu-util)
 dfu bin="firmware/out/at32f4/prod/tapewyrm/target.bin":
-    cd host && uv run tw dfu ../{{bin}}
+    cd packages/tapewyrm-host && uv run tw dfu ../../{{bin}}
 
 # remove build, package, and cache artifacts (keeps the uv venv)
 clean:
@@ -873,9 +873,9 @@ clean:
 
 # host: sync, lint, typecheck, test (no hardware)
 host:
-    cd host && uv sync --extra dev
-    cd host && uv run ruff check . && uv run ruff format --check .
-    cd host && uv run mypy tapewyrm && uv run pytest
+    cd packages/tapewyrm-host && uv sync --extra dev
+    cd packages/tapewyrm-host && uv run ruff check . && uv run ruff format --check .
+    cd packages/tapewyrm-host && uv run mypy tapewyrm && uv run pytest
 
 # everything CI runs
 ci: gen host

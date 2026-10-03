@@ -26,28 +26,28 @@ fw-dist:
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
 flash image="firmware/.pio/build/tapewyrm/firmware.bin":
-    cd host && uv run tw flash ../{{image}}
+    cd packages/tapewyrm-host && uv run tw flash ../../{{image}}
 
 # recovery flash via the hardware DFU header + AT32 ROM bootloader (tw -> dfu-util)
 dfu bin="firmware/.pio/build/tapewyrm/firmware.bin":
-    cd host && uv run tw dfu ../{{bin}}
+    cd packages/tapewyrm-host && uv run tw dfu ../../{{bin}}
 
 # host: sync, lint, typecheck, test (no hardware)
 host:
-    cd host && uv sync --extra dev
-    cd host && uv run ruff check .
-    cd host && uv run ruff format --check .
-    cd host && uv run mypy tapewyrm
-    cd host && uv run pytest
+    cd packages/tapewyrm-host && uv sync --extra dev
+    cd packages/tapewyrm-host && uv run ruff check .
+    cd packages/tapewyrm-host && uv run ruff format --check .
+    cd packages/tapewyrm-host && uv run mypy tapewyrm
+    cd packages/tapewyrm-host && uv run pytest
 
 # just the host tests (fast loop)
 test:
-    cd host && uv run pytest
+    cd packages/tapewyrm-host && uv run pytest
 
 # lint + format + typecheck without tests
 lint:
-    cd host && uv run ruff check .
-    cd host && uv run mypy tapewyrm
+    cd packages/tapewyrm-host && uv run ruff check .
+    cd packages/tapewyrm-host && uv run mypy tapewyrm
 
 # remove build, package, and cache artifacts (keeps the uv venv)
 clean:
@@ -59,4 +59,4 @@ ci: gen host
 
 # turn an extracted volume (`tw extract` -> vol-NN.twvl) into a tar (contrib/qic2tar.py)
 qic2tar volume out:
-    uv run --project host python contrib/qic2tar.py {{volume}} -o {{out}}
+    uv run --project packages/tapewyrm-host python contrib/qic2tar.py {{volume}} -o {{out}}
