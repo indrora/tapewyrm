@@ -48,6 +48,7 @@ from typing import Any
 
 from tapewyrm_archive import twti
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
+from tapewyrm_archive.qic80date import format_short_date
 from tapewyrm_archive.qic117 import TAPE_TYPES, DriveConfig, TapeStatus, decode_vendor_id
 from tapewyrm_archive.types import TapeFormat
 
@@ -479,10 +480,7 @@ def _extension_notes(data: bytes) -> list[str]:
 
 
 def _date(packed: int) -> str:
-    when = volume_mod.decode_short_date(packed)
-    if when is None:
-        return "-"
-    return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(*when)
+    return format_short_date(packed) or "-"
 
 
 def _size(entry: VtblEntry) -> str:

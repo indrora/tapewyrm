@@ -266,6 +266,37 @@ INFO     converted 1 capture(s) in 148.0 s total
 `uncorrectable` segments had more bad sectors than the ECC can repair (3 per
 segment). Dump those tracks again and merge.
 
+### Look inside any file: `tw inspect`
+
+`tw inspect FILE` shows the header of a capture (`.twrf`), an image (`.twti`,
+`.twtz`) or a volume (`.twvl`). It recognises the file by its contents, not its
+name, and reads only the header (and an image's segment table), so it is
+instant even on a 1.75 GB image. The drive's report bytes are decoded. From the
+blank QIC-Extra tape's image (excerpt):
+
+```text
+$ tw inspect captures/NAME.twtz
+...
+Segments
+╭───────────────┬─────────────────╮
+│ missing       │ 57,431 (97.34%) │
+│ clean         │ 1,445 (2.45%)   │
+│ corrected     │ 12 (0.02%)      │
+│ uncorrectable │ 14 (0.02%)      │
+│ bad           │ 98 (0.17%)      │
+╰───────────────┴─────────────────╯
+...
+Drive
+╭─────────────────┬──────────────────────────────────────────────────────╮
+│ Drive config    │ 0xd8 -> 1,000 kbit/s, QIC-80 mode, extra-length tape │
+│ Vendor          │ 0x11c6 -> Colorado Memory Systems (make 71, model 6) │
+│ Tape status     │ 0x63 -> QIC3020, variable length 900 Oe              │
+╰─────────────────┴──────────────────────────────────────────────────────╯
+```
+
+`tw inspect --json FILE` prints the JSON header exactly as stored instead, for
+scripts (`tw inspect --json captures/NAME.twtz | jq .geometry`).
+
 ## 7. What is on it: `qicsilver identify`
 
 ```console

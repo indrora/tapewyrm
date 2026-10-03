@@ -301,7 +301,12 @@ class TapeImage:
 
     @classmethod
     def _parse(
-        cls, path: Path, buf: bytes | mmap.mmap, *, compressed: bool = False
+        cls,
+        path: Path,
+        buf: bytes | mmap.mmap,
+        *,
+        compressed: bool = False,
+        data_area: bool = True,
     ) -> TapeImage | None:
         """Preamble, header and segment table out of a mapped TWTI; None if not one.
 
@@ -321,6 +326,12 @@ class TapeImage:
         decompressed stream and the sizes in messages count decompressed
         bytes; a TWTZ whose stream is complete but holds a short TWTI is just
         as truncated as a short TWTI.
+
+        ``data_area=False`` is for a caller holding only a *prefix* of the
+        image (``tapewyrm_archive.inspect``, which decompresses no more of a
+        TWTZ than the preamble, header and table): everything up to the end
+        of the segment table is checked as usual, the data area's length is
+        not, and the image returned must not be asked for segment data.
         """
         kind = "TWTZ" if compressed else "TWTI"
         note = " (decompressed)" if compressed else ""
@@ -385,8 +396,10 @@ class TapeImage:
         if found < table_end:
             raise truncated("segment table", table_end)
         length = table_end + count * SEGMENT_STRIDE
-        if found < length:
+        if data_area and found < length:
             raise truncated("segment data area", length)
+        if not data_area:
+            log.debug("%s: prefix only; not checking the %d-byte data area", path, length)
         log.debug("%s: %d-byte header, %d segment entries, %d bytes", path, hlen, count, length)
 
         # --- segment table entries (reader rules 7 and 8) ---

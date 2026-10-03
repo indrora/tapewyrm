@@ -6,6 +6,9 @@ import pytest
 from click.testing import CliRunner
 
 import tapewyrm.cli as cli_mod
+from tapewyrm.cli import app as app_mod
+from tapewyrm.cli import drive as drive_mod
+from tapewyrm.cli import session as session_mod
 
 
 class _StubDrive:
@@ -25,7 +28,7 @@ def stub(monkeypatch):
     def fake_session(app):
         yield drive
 
-    monkeypatch.setattr(cli_mod, "_drive_session", fake_session)
+    monkeypatch.setattr(drive_mod, "_drive_session", fake_session)
     return drive
 
 
@@ -74,7 +77,7 @@ def test_status_shows_every_report_and_survives_unsupported(monkeypatch):
     def fake_session(app):
         yield drive
 
-    monkeypatch.setattr(cli_mod, "_drive_session", fake_session)
+    monkeypatch.setattr(drive_mod, "_drive_session", fake_session)
     res = CliRunner().invoke(cli_mod.cli, ["drive", "status"])
     assert res.exit_code == 0, res.output
     out = res.output
@@ -95,7 +98,7 @@ def test_status_shows_every_report_and_survives_unsupported(monkeypatch):
     ],
 )
 def test_error_associated_command_0_and_1_are_classes(word, text):
-    assert cli_mod._decode_error(word) == text
+    assert session_mod._decode_error(word) == text
 
 
 def test_track_argument_is_six_bit(stub):
@@ -109,21 +112,21 @@ def test_track_argument_is_six_bit(stub):
 
 
 def _user_config(text: str):
-    path = cli_mod.default_config_path()
+    path = app_mod.default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
 
 
 def test_no_profile_anywhere_means_auto():
-    app = cli_mod.AppContext.load(None, None, None)
+    app = app_mod.AppContext.load(None, None, None)
     assert app.profile_name == "auto"
     assert app.profile is None  # picked per session by probing
 
 
 def test_per_user_config_supplies_the_profile():
     _user_config('profile = "colorado.1400"\n')
-    app = cli_mod.AppContext.load(None, None, None)
+    app = app_mod.AppContext.load(None, None, None)
     assert app.profile is not None and app.profile.name == "colorado.1400"
 
 
@@ -131,7 +134,7 @@ def test_explicit_profile_beats_every_config(tmp_path):
     _user_config('profile = "conner"\n')
     explicit = tmp_path / "explicit.toml"
     explicit.write_text('profile = "iomega"\n')
-    app = cli_mod.AppContext.load(None, "colorado", str(explicit))
+    app = app_mod.AppContext.load(None, "colorado", str(explicit))
     assert app.profile is not None and app.profile.name == "colorado"
 
 
@@ -139,7 +142,7 @@ def test_explicit_config_replaces_the_per_user_one(tmp_path):
     _user_config('profile = "conner"\n')
     explicit = tmp_path / "explicit.toml"
     explicit.write_text('port = "/dev/ttyX"\n')  # names no profile
-    app = cli_mod.AppContext.load(None, None, str(explicit))
+    app = app_mod.AppContext.load(None, None, str(explicit))
     assert app.port == "/dev/ttyX"
     assert app.profile_name == "auto"  # the per-user file was not read
 
@@ -149,16 +152,16 @@ def test_broken_user_config_names_the_file():
 
     path = _user_config("profile = \n")
     with pytest.raises(click.ClickException, match=str(path)):
-        cli_mod.AppContext.load(None, None, None)
+        app_mod.AppContext.load(None, None, None)
 
 
 def test_relative_xdg_config_home_is_ignored(monkeypatch):
     from pathlib import Path
 
-    monkeypatch.setattr(cli_mod.os, "name", "posix")
+    monkeypatch.setattr(app_mod.os, "name", "posix")
     monkeypatch.setenv("XDG_CONFIG_HOME", "relative/dir")
     monkeypatch.setenv("HOME", "/home/someone")
-    assert cli_mod.default_config_path() == Path("/home/someone/.config/tapewyrm/config.toml")
+    assert app_mod.default_config_path() == Path("/home/someone/.config/tapewyrm/config.toml")
 
 
 # ---------------------------------------------------------------------------

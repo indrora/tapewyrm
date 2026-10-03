@@ -316,7 +316,7 @@ packages/
     profiles/volume/*.toml      # one volume-table layout per file (§7.8)
     testing/           # synthetic builders + real bench header bytes, for any package's tests
   tapewyrm-cli/tapewyrm/               # `tw`: hardware + physical decode; pyserial, rich, rich-click
-    cli.py, console.py # rich-click front end; rich logging + progress on stderr
+    cli/, console.py   # rich-click front end (one module per command group); rich logging + progress on stderr
     types.py           # DeviceInfo, TimingParams, SelectHint, StopCond, ErrorCode, DriveProfile, ...
     link/              # transport.py (serial + GW framing), device.py (DeviceLink),
                        #   protocol.py (GENERATED), update.py (tw flash / tw dfu)
@@ -624,6 +624,7 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 | `tw drive scope` | edge-log TRK0 / INDEX / WRPROT / pin 34 after optional STEP pulses (`SCOPE` verb) |
 | `tw dump DIR [TRACKS] [--check]` | one Logical Forward pass per track (TRACKS such as `0-27`; default: every track of the format the drive reports) → `DIR/track-NN.twrf` (+ `dump.jsonl`); health-checked (§6.3) |
 | `tw convert SOURCE… IMAGE` | TWRF dumps → TWTI image (`.twtz` suffix: zstd); several dumps of one tape merge (§6A.5) |
+| `tw inspect FILE [--json]` | header of any TWRF / TWTI / TWTZ / TWVL file, identified by magic: decoded summary, or the stored JSON verbatim (`--json`); reads only the header and an image's segment table (`tapewyrm_archive.inspect`) |
 | `tw flash IMAGE [--dfu]` | firmware via the GW-compatible application bootloader (or DFU) |
 | `tw dfu IMAGE` | recovery / first flash via the AT32 ROM bootloader (wraps `dfu-util`) |
 
@@ -1206,7 +1207,7 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 
 | File | Responsibility |
 |---|---|
-| `cli.py` | rich-click `tw`: `info`, `drive …`, `dump`, `convert`, `flash`, `dfu`; `AppContext`, global flags (§6A.7) |
+| `cli/` | rich-click `tw`, one module per command group: `app.py` (`AppContext`, config, global flags, §6A.7), `session.py` (drive session, report decoders), `drive.py` (`drive …`), `dump.py`, `convert.py`, `info.py`, `firmware.py` (`flash`, `dfu`) |
 | `console.py` | rich stderr console shared by logging and progress bars (copy kept in step with qicsilver's) |
 | `types.py` | `DeviceInfo`, `TimingParams`, `SelectHint`, `StopCond`, `ErrorCode`, `DriveProfile`, `FluxStream`, `LogicalVolume`, `RecoveryReport` |
 | `buildinfo.py` (+ `hatch_build.py`) | which commit this `tw` was built from |
@@ -1269,7 +1270,7 @@ The multi-pass union still sits before RS; the header is now located *before* pl
 
 **Generates directly from this document (no hardware):**
 - The **entire `codec/*` tree** — §7.3/§7.5/§13.2/§13.5 are complete; test against the §13.2 RS vector, synthesized `RawFluxCapture` fixtures, and ftape cross-checks. *(As built: split into `tapewyrm-cli`'s `codec/` and `qiclib`, §6A.1.)*
-- **Host control layers** (`link/`, `qic117/`, `tape/`, `report.py`, `cli.py`; `rawflux/` became `tapewyrm_archive.twrf`) — §6A + §13.1 + §13.3 + §13.4.
+- **Host control layers** (`link/`, `qic117/`, `tape/`, `report.py`, `cli/`; `rawflux/` became `tapewyrm_archive.twrf`) — §6A + §13.1 + §13.3 + §13.4.
 - **Firmware** — Greaseweazle v1.6 is **vendored complete in-tree** (`firmware/`, built with PlatformIO's pinned ARM GNU toolchain, §12.1) and the QIC layer is grafted onto GW's control loop: `src/qic/qic.c` is `#include`d into `src/floppy.c`, adding `CMD_QIC_*` (= the generated `TW_TXN_*`) cases to `process_command` and reusing GW's flux-read engine for free-running capture (§5, §13.3).
 - The **protocol codegen** and `justfile`/CI (§12).
 

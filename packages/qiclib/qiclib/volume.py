@@ -19,6 +19,10 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
+# The packed-date decoder lives in the archive (shared with `tw inspect`);
+# re-exported here under its old name for qiclib callers.
+from tapewyrm_archive.qic80date import decode_short_date  # noqa: F401
+
 from qiclib import place
 from qiclib import segment as seg_mod
 from qiclib.geometry import Geometry, coord_to_lsn
@@ -148,37 +152,6 @@ class VtblEntry:
     @property
     def directory_last(self) -> bool:
         return bool(self.flags & 0x20)  # byte 56 bit 5
-
-
-# ---------------------------------------------------------------------------
-# Short date (DESIGN.md §7.3 / §7.5)
-# ---------------------------------------------------------------------------
-
-
-def decode_short_date(packed: int) -> tuple[int, int, int, int, int, int] | None:
-    """Decode a packed short date/time into (year, month, day, hour, min, sec).
-
-    Encoding (QIC-80-MC Rev N §7.1): bits 31..25 = year - 1970;
-    bits 24..0 = ``sc + 60*(mn + 60*(hr + 24*(dy + 31*mo)))`` with MO 0-11 and
-    DY 0-30. We return a calendar month 1-12 and day 1-31 (this used to leak the
-    0-based values, so the bench tape read as "11/22" instead of 23 December).
-    ``0`` and all-ones are treated as undefined -> None.
-    """
-    if packed == 0 or packed == 0xFFFFFFFF:
-        log.debug("short date 0x%08x is undefined; returning None", packed)
-        return None
-    year = (packed >> 25) & 0x7F
-    rest = packed & 0x01FFFFFF
-    sc = rest % 60
-    rest //= 60
-    mn = rest % 60
-    rest //= 60
-    hr = rest % 24
-    rest //= 24
-    dy = rest % 31
-    rest //= 31
-    mo = rest
-    return (1970 + year, mo + 1, dy + 1, hr, mn, sc)
 
 
 # ---------------------------------------------------------------------------

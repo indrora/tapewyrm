@@ -115,6 +115,11 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
 - `from __future__ import annotations` comes right after the docstring.
 - Imports are ruff/isort ordered. Heavy or hardware imports inside CLI commands
   are done **lazily inside the command function** so `tw --help` stays fast.
+- `tw` commands live one module per command group under `tapewyrm/cli/`
+  (`drive.py`, `dump.py`, `convert.py`, `info.py`, `firmware.py`); the root
+  `cli` group and `AppContext` are in `app.py`, shared drive plumbing in
+  `session.py`. A new command group is a new module, imported by
+  `tapewyrm/cli/__init__.py` so it registers.
 - Larger modules are split into sections with banner comments:
 
   ```python
@@ -169,7 +174,7 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
   calling `bar.advance()` / `bar.update()`. Advance at the *top* of a loop body
   that uses `continue`. `total=None` when the length is unknown (a capture).
 - Library code never imports `rich` or `click`. Presentation lives in
-  `tapewyrm/console.py` (rich log handler, progress bars) and `tapewyrm/cli.py`.
+  `tapewyrm/console.py` (rich log handler, progress bars) and the `tapewyrm/cli/` package.
 - The CLI (`rich_click`, imported as `click`) converts `ValueError` into
   `click.ClickException` and owns all user-facing output.
 - Output channels: command *results* (status lines, summaries, `--json`) go to
