@@ -34,8 +34,9 @@ def test_volume_without_section_sizes_is_refused(tmp_path):
             "holes": [],
             "data_section_size": None,
             "dir_section_size": None,
+            "directory_offset": None,
             "volume_size": 0,
-            "vtbl": {"raw": _extended_vtbl_raw()},
+            "vtbl": {"raw": _extended_vtbl_raw(), "flags": 0x01, "compressed": None},
         },
         data=b"",
     ).save(vol)
@@ -68,8 +69,11 @@ def test_basic_dos_volume_tars_found_and_lost_files(tmp_path):
             "holes": [],
             "tape_name": "T",
             "lost_segments": [],
+            "data_section_size": None,
+            "dir_section_size": None,
+            "directory_offset": None,
             "volume_size": len(stream),
-            "vtbl": {"raw": vtbl.hex(), "description": ""},
+            "vtbl": {"raw": vtbl.hex(), "description": "", "flags": 0, "compressed": False},
         },
         data=stream,
     ).save(vol)
@@ -79,3 +83,90 @@ def test_basic_dos_volume_tars_found_and_lost_files(tmp_path):
         assert t.extractfile("a.txt").read() == data
     assert names["D"].isdir() and "gone.txt" in names
     assert [d[0] for d in res.damaged] == ["gone.txt"]
+
+
+def test_basic_dos_directory_located_from_header_sizes_not_raw_vtbl(tmp_path):
+    """TWS-3 6.2 rule 9: section sizes come from the header, not VTBL bytes 57+.
+
+    A compressed Directory-Last volume with no ``directory_offset``: the
+    directory sits at exactly ``data_section_size``. The last file's data entry
+    fell in a hole, so walking the data section stops short of it; only the
+    header's size finds the directory. The raw record's bytes 96-103 hold
+    nonsense, as they do when another program's layout put a label there.
+    """
+    import tarfile
+
+    from qiclib.testing.builders import build_data_entry, build_dir_entry
+
+    r, last, end = 0x03, 0x40, 0x80
+    data = b"hello"
+    present = build_data_entry(build_dir_entry("a.txt", attrs=r), "", data)
+    lost_len = 4 + 17 + 1 + 9  # b.txt's data entry, all in the hole
+    directory = build_dir_entry("a.txt", attrs=r, data_entry_size=len(present)) + build_dir_entry(
+        "b.txt", attrs=r | last | end, data_entry_size=lost_len
+    )
+    data_size = len(present) + lost_len
+    stream = present + bytes(lost_len) + directory
+    raw = bytearray(128)
+    raw[0:4] = b"VTBL"
+    raw[56] = 0x20  # Directory-Last, not vendor specific: Basic-DOS
+    raw[96:104] = b"\xff" * 8  # a size no reader may take from here
+    vol = tmp_path / "c.twvl"
+    Volume(
+        header={
+            "format": "TWVL",
+            "holes": [[len(present), data_size]],
+            "tape_name": "T",
+            "lost_segments": [5],
+            "data_section_size": data_size,
+            "dir_section_size": len(directory),
+            "directory_offset": None,
+            "volume_size": len(stream),
+            "vtbl": {
+                "raw": raw.hex(),
+                "description": "",
+                "flags": 0x20,
+                "compressed": True,
+                "data_section_size": data_size,
+                "dir_section_size": len(directory),
+            },
+        },
+        data=stream,
+    ).save(vol)
+    res = write_tar(vol, tmp_path / "c.tar")
+    with tarfile.open(tmp_path / "c.tar") as t:
+        assert sorted(t.getnames()) == ["a.txt", "b.txt"]
+        assert t.extractfile("a.txt").read() == data
+    assert [d[0] for d in res.damaged] == ["b.txt"]
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda h: h.pop("data_section_size"), "data_section_size"),
+        (lambda h: h.update(dir_section_size="12"), "dir_section_size"),
+        (lambda h: h.update(directory_offset=-1), "directory_offset"),
+        (lambda h: h["vtbl"].pop("flags"), "vtbl.flags"),
+        (lambda h: h["vtbl"].update(compressed=1), "vtbl.compressed"),
+        (lambda h: h["vtbl"].update(raw="00"), "vtbl.raw"),
+        (lambda h: h.update(vtbl=[]), "vtbl"),
+    ],
+)
+def test_malformed_volume_header_is_refused(tmp_path, change, problem):
+    """A header member tar sizes or places a section with must be there and well typed."""
+    from tapewyrm_archive.errors import MalformedFileError
+
+    header = {
+        "format": "TWVL",
+        "holes": [],
+        "data_section_size": 0,
+        "dir_section_size": 0,
+        "directory_offset": None,
+        "volume_size": 0,
+        "vtbl": {"raw": _extended_vtbl_raw(), "flags": 0x01, "compressed": None},
+    }
+    change(header)
+    vol = tmp_path / "m.twvl"
+    Volume(header=header, data=b"").save(vol)
+    with pytest.raises(MalformedFileError, match=problem):
+        write_tar(vol, tmp_path / "out.tar")

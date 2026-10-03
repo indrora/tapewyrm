@@ -178,6 +178,64 @@ def test_twtz_of_a_truncated_twti_is_refused(tmp_path):
         TapeImage.open(twtz)
 
 
+# --- qic80_header members, checked when a consumer asks for one (TWS-2 4.3, 11.2) ---
+
+_ABSENT = object()
+
+
+def _image_with_fpr(tmp_path: Path, qic80: object) -> TapeImage:
+    """Open a 3-segment TWTI whose header carries ``qic80`` as qic80_header."""
+    path = tmp_path / "t.twti"
+    header: dict = {"format": "TWTI", "segment_count": _COUNT, "segment_stride": SEGMENT_STRIDE}
+    if qic80 is not _ABSENT:
+        header["qic80_header"] = qic80
+    entries = [SegmentEntry(SegmentState.MISSING)] * _COUNT
+    TapeImage(header=header, entries=entries).save(path, lambda n: b"")
+    return TapeImage.open(path)
+
+
+def test_qic80_members_are_returned_when_well_formed(tmp_path):
+    img = _image_with_fpr(tmp_path, {"first_data_seg": 2, "tape_name": "T"})
+    assert img.qic80_segment("first_data_seg") == 2
+    assert img.qic80_str("tape_name") == "T"
+    # An optional member may be absent: None, not an error (TWS-2 4.3).
+    assert img.qic80_segment("dup_header_seg", required=False) is None
+
+
+def test_an_image_without_qic80_header_still_opens(tmp_path):
+    """Random access needs only segment_count (TWS-2 9.2 rule 5); the check is per use."""
+    img = _image_with_fpr(tmp_path, _ABSENT)
+    assert len(img.entries) == _COUNT
+    assert img.qic80_segment("header_seg", required=False) is None
+
+
+@pytest.mark.parametrize(
+    ("qic80", "problem"),
+    [
+        (_ABSENT, "qic80_header"),
+        ([2], "qic80_header"),
+        ({}, "qic80_header.first_data_seg"),
+        ({"first_data_seg": "2"}, "qic80_header.first_data_seg"),
+        ({"first_data_seg": True}, "qic80_header.first_data_seg"),
+        ({"first_data_seg": 2.0}, "qic80_header.first_data_seg"),
+        ({"first_data_seg": -1}, "qic80_header.first_data_seg"),
+        ({"first_data_seg": _COUNT}, "qic80_header.first_data_seg"),
+    ],
+)
+def test_bad_qic80_segment_members_are_refused(tmp_path, qic80, problem):
+    img = _image_with_fpr(tmp_path, qic80)
+    with pytest.raises(MalformedFileError, match=problem) as info:
+        img.qic80_segment("first_data_seg")
+    assert "t.twti" in str(info.value)
+
+
+@pytest.mark.parametrize("qic80", [{}, {"tape_name": 5}, {"tape_name": None}])
+def test_bad_qic80_text_members_are_refused(tmp_path, qic80):
+    img = _image_with_fpr(tmp_path, qic80)
+    with pytest.raises(MalformedFileError, match="qic80_header.tape_name"):
+        img.qic80_str("tape_name")
+
+
 # ---------------------------------------------------------------------------
 # TWVL
 # ---------------------------------------------------------------------------

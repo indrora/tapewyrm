@@ -33,6 +33,10 @@ from tapewyrm.types import DriveProfile
 
 log = logging.getLogger(__name__)
 
+# The keys the config file may set; AppContext.load warns about any other.
+# Each is the file-level default for the global CLI option of the same name.
+CONFIG_KEYS = frozenset({"port", "profile"})
+
 
 def default_config_path() -> Path:
     """The per-user config file read when ``--config`` is not given.
@@ -67,9 +71,6 @@ class AppContext:
     # None means ``--profile auto``: the profile is picked per drive session by
     # probing (``qic117.drive.auto_wake``), because it depends on the hardware.
     profile: DriveProfile | None
-    passes: int = 1
-    out_dir: Path | None = None
-    settings: dict[str, Any] = field(default_factory=dict)
     # stderr console shared by logging and the progress bars (tapewyrm.console)
     console: Console = field(default_factory=make_console)
     show_progress: bool = False
@@ -120,6 +121,17 @@ class AppContext:
         else:
             log.debug("config %s does not exist; using CLI/profile defaults", cfg_path)
 
+        # A typo'd key ("prfile = ...") would otherwise do nothing at all,
+        # silently: name every key tw does not read, so the user can fix it.
+        # A warning rather than an error, so one stray key does not stop a dump.
+        for key in sorted(set(file_settings) - CONFIG_KEYS):
+            log.warning(
+                "config %s: unknown key %r ignored (known keys: %s)",
+                cfg_path,
+                key,
+                ", ".join(sorted(CONFIG_KEYS)),
+            )
+
         # Precedence for each resolvable setting.
         resolved_port = port if port is not None else file_settings.get("port")
         resolved_profile_name = str(
@@ -139,15 +151,10 @@ class AppContext:
                 f"could not load profile {resolved_profile_name!r}: {exc}"
             ) from exc
 
-        passes = int(file_settings.get("passes", 1))
-        out_dir = file_settings.get("out_dir")
         return cls(
             port=resolved_port,
             profile_name=resolved_profile_name,
             profile=prof,
-            passes=passes,
-            out_dir=Path(out_dir) if out_dir else None,
-            settings=file_settings,
             console=console if console is not None else make_console(),
         )
 
@@ -198,11 +205,9 @@ def cli(
     app = AppContext.load(port, profile, config, console)
     app.show_progress = show_progress
     log.debug(
-        "context: port=%r profile=%r passes=%d out_dir=%s progress=%s",
+        "context: port=%r profile=%r progress=%s",
         app.port,
         app.profile_name,
-        app.passes,
-        app.out_dir,
         show_progress,
     )
     ctx.obj = app

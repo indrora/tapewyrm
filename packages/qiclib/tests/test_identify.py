@@ -212,7 +212,7 @@ def test_3m_tape_end_to_end():
     assert (len(info.bsm.bad_lsns), info.notes) == (2, [])
     text = "\n".join(ident.format_info(info))
     assert "factory pre-formatted" in text and "DC2120 class" in text
-    assert "QIC-122" in text and "164.2 MB" in text
+    assert "QIC-122" in text and "172.1 MB" in text
 
 
 def test_forced_profile_is_used_even_when_it_scores_badly():

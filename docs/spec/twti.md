@@ -638,6 +638,14 @@ TWTI byte stream is a TWTI file, and the reverse.
     size the gap that a MISSING or UNCORRECTABLE segment leaves in a stream of
     segment data.
 12. Readers MAY ignore bytes after offset `L`.
+13. A reader that uses a member of `qic80_header` (for example
+    `first_data_seg`, to find the volume table, or `tape_name`) MUST reject
+    the image when it needs that member and it is absent, when the member
+    has the wrong JSON type (Section 11.2), or when a segment number is not
+    in the range 0 to `segment_count - 1`. The error MUST name the file and
+    the member. The check is made where the member is used, not when the
+    image is opened: by rule 5 and Section 4.3, an image that lacks a member
+    remains readable by readers that do not use it.
 
 ## 10. Versioning and Extensibility
 
@@ -874,7 +882,7 @@ for byte.
 
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
-| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). Same date, before release: readers MUST reject truncated and malformed files (Section 9.2); `sources[].file` records only the directory name and file name; `sources[].twrf` is always a full TWRF version 2 header (the headerless-stream form `{"rate_kbps": 500}` is gone); decompression is unbounded by design (Section 11.3). |
+| 1              | 2026-10-03 | Initial specification of TWTI version 1, as written by the reference implementation: preamble, JSON header, 8-byte segment table entries, 29696-byte fixed stride, sparse writing, TWTZ. MISSING entries carry the bad-sector map's mask (images from earlier builds of version 1 record 0 there). Same date, before release: readers MUST reject truncated and malformed files (Section 9.2); `sources[].file` records only the directory name and file name; `sources[].twrf` is always a full TWRF version 2 header (the headerless-stream form `{"rate_kbps": 500}` is gone); decompression is unbounded by design (Section 11.3); a reader that uses a `qic80_header` member MUST reject one that is absent, mistyped or out of range (Section 9.2, rule 13). |
 
 ## Author's Address
 

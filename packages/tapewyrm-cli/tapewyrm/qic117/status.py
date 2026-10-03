@@ -32,7 +32,6 @@ __all__ = [
     "FATAL_ERRORS",
     "BENIGN_ERRORS",
     "ERR_NO_ERROR",
-    "ERR_RESET_OCCURRED",
     "ERR_POWER_ON_RESET",
     "ERR_SOFTWARE_RESET",
     "ERR_WAKEUP_RESET",
@@ -60,7 +59,6 @@ ERR_BROKEN_TAPE = 10  # FATAL: physical tape break — abort the sweep immediate
 ERR_POWER_ON_RESET = 26
 ERR_SOFTWARE_RESET = 27
 ERR_WAKEUP_RESET = 41
-ERR_RESET_OCCURRED = ERR_POWER_ON_RESET  # old name; nothing uses it any more
 
 # Codes that must abort the sweep. Broken-tape is the only one the design pins as
 # the canonical fatal; other genuinely-unrecoverable hardware faults can be added

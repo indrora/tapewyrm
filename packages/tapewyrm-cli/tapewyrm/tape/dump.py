@@ -280,15 +280,6 @@ def wind_to_track_start(drive: Qic117Drive, track: int) -> DriveStatus:
     return st
 
 
-def summarize(path: Path) -> tuple[CaptureHeader, gwstream.ParsedStream, list]:
-    """Decode a TWRF capture with its own rate and clock (no assumptions)."""
-    hdr, flux_at = read_header(path)
-    log.debug("parsing flux stream of %s", path)
-    ps = gwstream.parse(path.read_bytes()[flux_at:])
-    log.debug("decoding sectors at %d kbps", hdr.rate_kbps)
-    return hdr, ps, mfm.recover_sectors_from_flux(ps.intervals, ps.sample_clock_hz, hdr.rate_kbps)
-
-
 def tracks_for_tape(identity: CaptureHeader) -> list[int]:
     """Every track of the loaded cartridge, 0..N-1, from the drive's reports.
 

@@ -258,10 +258,18 @@ def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeIn
     too (the JSON only has ``qic80_header``), and it keeps working if
     :class:`VolumeInfo` gains fields that older images never stored.
     """
-    q80 = img.header.get("qic80_header", {})
+    # Both copies are optional here (the first defaults to segment 0, where a
+    # QIC-80 header normally sits), but one that is present must be a segment
+    # of this image: TapeImage.qic80_segment raises MalformedFileError naming
+    # the member otherwise (TWS-2 section 11.2).
+    first = img.qic80_segment("header_seg", required=False)
+    dup = img.qic80_segment("dup_header_seg", required=False)
+    if first is None:
+        log.debug("qic80_header.header_seg absent; trying segment 0")
+        first = 0
     notes: list[str] = []
     header_seg = None
-    for candidate in (q80.get("header_seg", 0), q80.get("dup_header_seg")):
+    for candidate in (first, dup):
         if candidate is None or candidate >= len(img.entries):
             log.debug(
                 "header candidate %r absent or past %d segments; skipping",
@@ -492,11 +500,13 @@ def _size(entry: VtblEntry) -> str:
 
 
 def _human(n: int) -> str:
+    """Decimal SI size (1 kB = 1000 B), the convention for every user-facing size
+    in the CLIs (STYLE.md §2) and the one cartridge covers print capacities in."""
     size = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
+    for unit in ("B", "kB", "MB", "GB", "TB"):
+        if size < 1000 or unit == "TB":
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
+        size /= 1000
     raise AssertionError("unreachable")
 
 

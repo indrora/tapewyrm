@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # RecoveryReport (built by the fixture codec.pipeline) uses qiclib's types.
-from qiclib.types import FileSet, SegmentStatus
+from qiclib.types import SegmentStatus
 
 # ---------------------------------------------------------------------------
 # Device / link layer (DESIGN.md §6A.2, §13.3)
@@ -129,16 +129,6 @@ class FluxStream:
 
     intervals: list[int]
     sample_clock_hz: int
-
-
-# ---------------------------------------------------------------------------
-# Volume / file-set outputs (DESIGN.md §7.3, §7.5)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class LogicalVolume:
-    file_sets: list[FileSet] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

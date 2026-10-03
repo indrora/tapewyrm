@@ -146,7 +146,8 @@ profile = "colorado.1400"
 ```
 
 `--profile` on the command line still wins over the file, and `--config FILE`
-reads that file instead of the per-user one.
+reads that file instead of the per-user one. `profile` and `port` are the
+only keys; `tw` warns about any other key (a typo) and ignores it.
 
 **Colorado drives are "phantom" drives.** They ignore the floppy drive-select
 lines and are selected by a QIC-117 command instead: Phantom Select (command

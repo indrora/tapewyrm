@@ -37,8 +37,13 @@ def _vtbl(*extra: bytes) -> Segment:
     return build_volume_table_segment(2, entries)
 
 
-def _write_image(path: Path, segs: dict[int, Segment | None], count: int = 4) -> Path:
-    """Save a small TWTI whose segment n holds ``segs[n]``'s data (None = missing)."""
+def _write_image(
+    path: Path, segs: dict[int, Segment | None], count: int = 4, qic80: dict | None = None
+) -> Path:
+    """Save a small TWTI whose segment n holds ``segs[n]``'s data (None = missing).
+
+    ``qic80`` replaces the header's qic80_header object.
+    """
     data: dict[int, bytes] = {}
     entries: list[SegmentEntry] = []
     for n in range(count):
@@ -52,7 +57,7 @@ def _write_image(path: Path, segs: dict[int, Segment | None], count: int = 4) ->
         "format": "TWTI",
         "segment_count": count,
         "segment_stride": SEGMENT_STRIDE,
-        "qic80_header": {"header_seg": 0, "dup_header_seg": 1},
+        "qic80_header": qic80 if qic80 is not None else {"header_seg": 0, "dup_header_seg": 1},
     }
     TapeImage(header=header, entries=entries).save(path, lambda n: data.get(n, b""))
     return path
@@ -142,6 +147,24 @@ def test_extract_truncated_twtz_is_a_clean_error(tmp_path):
     twtz.write_bytes(packed[: len(packed) // 2])
     result = CliRunner().invoke(cli, ["extract", str(twtz), str(tmp_path / "out")])
     _assert_clean_error(result, "t.twtz", "truncated")
+
+
+def test_identify_mistyped_header_seg_is_a_clean_error(tmp_path):
+    path = _write_image(
+        tmp_path / "m.twti", {0: _header(0), 1: _header(1), 2: _vtbl()}, qic80={"header_seg": "0"}
+    )
+    result = CliRunner().invoke(cli, ["identify", str(path)])
+    _assert_clean_error(result, "m.twti", "qic80_header.header_seg")
+
+
+def test_extract_header_without_first_data_seg_is_a_clean_error(tmp_path):
+    path = _write_image(
+        tmp_path / "m.twti",
+        {0: _header(0), 1: _header(1), 2: _vtbl()},
+        qic80={"header_seg": 0, "tape_name": "BACKUP"},
+    )
+    result = CliRunner().invoke(cli, ["extract", str(path), str(tmp_path / "out")])
+    _assert_clean_error(result, "m.twti", "qic80_header.first_data_seg")
 
 
 def test_tar_truncated_volume_is_a_clean_error(tmp_path):

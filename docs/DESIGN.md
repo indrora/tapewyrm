@@ -246,7 +246,7 @@ Typed RPC wrappers over the USB transaction protocol. **No arbitration, no bus a
 - Positioning: seek load point (14), seek-head-to-track (13, operand as **N+2 pulses** — §2.1). Skip-N/Pause (25/26/3) for targeted re-reads, reading sector IDs afterward to confirm the landed segment.
 - **Serpentine walk:** issue **logical forward** per track; the drive presents data in logical order regardless of physical direction, so no software reversal is needed (only a physical-reverse salvage pass would be time-reversed offline). **Do not** wait-ready/status between the forward and arming capture — a status report can swallow the first segment (§2.1, §5.2).
 - **Capture orchestration:** compose a motion command + `capture_session`; emit a `RawFluxCapture` per pass. Hazard rule: broken-tape → abort immediately.
-- **As built — `tw dump` (`tape/dump.py`).** One Logical Forward pass per track, streamed straight to `track-NN.twrf` with the drive's identity in the header (§7.1). Two bench lessons shaped it. (1) Logical Forward starts reading *wherever the tape is*, and where a pass stops is already past the next track's first few segments: the first bench dump lost ~5 segments at the start of every track after track 0. So each pass first **winds to the end where its track starts** (`wind_to_track_start`); in a sequential dump that is only the last few feet. (2) Old tape is fragile, so after every pass a **cheap, decode-free health check** (`check_pass`) asks: did the pass end at logical EOT, does the stream match the firmware's `END` accounting, did the drive find as many segments (INDEX pulses) as on earlier passes? The dump stops rather than spend passes on a tape that may be shedding. `--check` additionally decodes each pass and requires ≥ 80 % CRC-clean sectors. The `TapeTransport` class sketched in §6A.4 survives in `tape/transport.py` but only the tests drive it; `dump` is the real path.
+- **As built — `tw dump` (`tape/dump.py`).** One Logical Forward pass per track, streamed straight to `track-NN.twrf` with the drive's identity in the header (§7.1). Two bench lessons shaped it. (1) Logical Forward starts reading *wherever the tape is*, and where a pass stops is already past the next track's first few segments: the first bench dump lost ~5 segments at the start of every track after track 0. So each pass first **winds to the end where its track starts** (`wind_to_track_start`); in a sequential dump that is only the last few feet. (2) Old tape is fragile, so after every pass a **cheap, decode-free health check** (`check_pass`) asks: did the pass end at logical EOT, does the stream match the firmware's `END` accounting, did the drive find as many segments (INDEX pulses) as on earlier passes? The dump stops rather than spend passes on a tape that may be shedding. `--check` additionally decodes each pass and requires ≥ 80 % CRC-clean sectors. The `TapeTransport` class sketched in §6A.4 was never wired to a command and has been deleted; `dump` is the capture path.
 
 ### 6.4 Format codec — offline, pure, above the IO boundary
 Consumes `RawFluxCapture`; touches no hardware.
@@ -275,7 +275,7 @@ Consumes `RawFluxCapture`; touches no hardware.
 
 > **Escape hatch (recorded, not recommended for v1):** if a different host language is wanted later, the clean seam is the `codec` — keep it as a Python "decode service" consuming `RawFluxCapture` files and emitting a `LogicalVolume` + report, and reimplement only `link`/`qic117`/`tape` elsewhere. Because capture and decode are fully decoupled (the `RawFluxCapture` file is the entire contract), this split is cheap. Do not do it for v1. *(As built the seam is even cleaner: the TWRF and TWTI files are documented formats, `docs/spec/`, so any stage can be reimplemented against a file rather than an API.)*
 
-**Dependencies.** *Original plan (superseded):* `greaseweazle` (host package) for the flux primitives and USB device handling; `pyserial` only if not using GW's USB layer; `numpy` for the RS/GF(256) math; **`click`** for the CLI; `tomllib` (stdlib) for drive profiles. *As built:* the decode stack is **pure stdlib**. GW's PLL is **vendored** (`codec/gwpll.py`, credited, Unlicense) rather than depended on — GW's version needs `bitarray` and a compiled extension, its wheels lag new CPython releases, and the reuse turned out to be one function. The RS math is a few hundred lines of table lookups and needs no `numpy` (an `accel` extra is still declared but nothing imports it). Runtime third-party deps are `pyserial` (the link), `rich` + `rich-click` (the CLIs' presentation only) and `backports.zstd` below Python 3.14 (TWTZ; the stdlib `compression.zstd` from 3.14). `tomllib` reads drive, cartridge and volume profiles. No async framework (see §6A.8).
+**Dependencies.** *Original plan (superseded):* `greaseweazle` (host package) for the flux primitives and USB device handling; `pyserial` only if not using GW's USB layer; `numpy` for the RS/GF(256) math; **`click`** for the CLI; `tomllib` (stdlib) for drive profiles. *As built:* the decode stack is **pure stdlib**. GW's PLL is **vendored** (`codec/gwpll.py`, credited, Unlicense) rather than depended on — GW's version needs `bitarray` and a compiled extension, its wheels lag new CPython releases, and the reuse turned out to be one function. The RS math is a few hundred lines of table lookups and needs no `numpy`, so there is no `accel` extra. Runtime third-party deps are `pyserial` (the link), `rich` + `rich-click` (the CLIs' presentation only) and `backports.zstd` below Python 3.14 (TWTZ; the stdlib `compression.zstd` from 3.14). `tomllib` reads drive, cartridge and volume profiles. No async framework (see §6A.8).
 
 **Package layout (as built).** *Superseded:* a single `tapewyrm/` package holding link, drive, tape, codec, rawflux and profiles together. That one package was split along the file formats into **four packages** under `packages/`, each with its own `pyproject.toml`, tests and `uv.lock`, joined by editable path sources. The arrows mean "depends on"; nothing may point the other way (`STYLE.md` §2):
 
@@ -321,11 +321,10 @@ packages/
     link/              # transport.py (serial + GW framing), device.py (DeviceLink),
                        #   protocol.py (GENERATED), update.py (tw flash / tw dfu)
     qic117/            # commands.py (Rev J table), drive.py (Qic117Drive), status.py, profile.py
-    tape/              # dump.py (tw dump), fluxprobe.py (tw drive flux), transport.py (sketch, tests)
+    tape/              # dump.py (tw dump), fluxprobe.py (tw drive flux)
     codec/             # gwstream.py (device stream), gwpll.py (vendored GW PLL), mfm.py (framing+CRC),
                        #   flux.py + pipeline.py (the original synthetic-fixture pipeline, tests only)
     image/convert.py   # tw convert: TWRF -> sectors -> qiclib.build -> TWTI/TWTZ
-    report.py          # RecoveryReport formatting (pipeline tests)
     buildinfo.py       # git commit for tw info (+ hatch_build.py stamps wheels)
     profiles/drive/*.toml   # colorado, colorado.1400, conner, iomega
   qicsilver/qicsilver/                 # `qicsilver`: offline image -> files; rich, rich-click
@@ -508,7 +507,7 @@ class TapeTransport:
 
 Serpentine is handled by the drive (logical-forward presents data in order regardless of physical direction), so `tape` never reverses flux — it only records `direction` in the header for the codec.
 
-*As built:* `Geometry` moved to `qiclib.geometry` (the offline side needs it, the hardware side only reads it). `TapeTransport` exists as sketched in `tape/transport.py` and is exercised by tests, but the shipped capture path is `tw dump` (`tape/dump.py`, §6.3): one function per pass that winds to the track's start, arms `CAPTURE` with Logical Forward, streams to a TWRF file and checks the pass. `tw drive flux` (`tape/fluxprobe.py`) is a diagnostic sibling — a timed Physical Forward/Reverse (or Logical Forward when referenced) recorded to TWRF, for a drive that will not reference a tape.
+*As built:* `Geometry` moved to `qiclib.geometry` (the offline side needs it, the hardware side only reads it). `TapeTransport` was built as sketched but only tests ever drove it, so it is gone; the capture path is `tw dump` (`tape/dump.py`, §6.3): one function per pass that winds to the track's start, arms `CAPTURE` with Logical Forward, streams to a TWRF file and checks the pass. `tw drive flux` (`tape/fluxprobe.py`) is a diagnostic sibling — a timed Physical Forward/Reverse (or Logical Forward when referenced) recorded to TWRF, for a drive that will not reference a tape.
 
 ### 6A.5 `codec` — offline decode pipeline
 
@@ -638,7 +637,7 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 
 **Shared front end (`STYLE.md` §2.5).** Both CLIs take the same global flags — `--progress` (rich progress bars), `-v` (debug) and `-q` / `-qq` (warnings / errors only) — the log level moves around INFO — and subcommands may not reuse `-v`/`-q`. Command *results* (status lines, summaries, `--json`) go to **stdout** via `click.echo`, so they pipe; the library's narrative goes through `logging`, and both it and the progress bars go to **stderr** through **one shared rich console**, because rich's live display tears if anything else writes to the terminal while bars are up. Each CLI has its own `console.py` (the two are kept identical by hand) rather than a shared presentation package, so neither CLI depends on the other. The libraries never import rich or click: they log through `logging` (log before acting; every guard logs at debug, with lazy `%` arguments; hot paths log one summary, not per item) and report progress through the `tapewyrm_archive.progress.Progress` protocol, whose default `NULL_PROGRESS` costs nothing. `ValueError` from a library becomes a `click.ClickException` at the CLI edge. Heavy imports happen inside the command functions so `--help` stays fast.
 
-Config precedence (`tw`): CLI flags → config file (`--config`, TOML; without it the per-user `~/.config/tapewyrm/config.toml`, or `$XDG_CONFIG_HOME` / `%APPDATA%`, if present) → profile defaults, resolved once in `AppContext.load` and carried on `ctx.obj`; logging is set up *before* that load so `-v` shows which config and drive profile were picked up. *Superseded:* with no profile named the default was `default` (no wake sequence), which a phantom drive never answers. *Superseded:* `auto` tried only `colorado` and sent Phantom Deselect (47) after a try that got no answer. *As built:* the default is `auto`, which follows ftape's drive detection (Linux 2.6.19 `drivers/char/ftape/lowlevel/ftape-ctl.c` `ftape_activate_drive()`, `ftape-io.c` `ftape_wakeup_drive()` / `ftape_report_raw_drive_status()`, `include/linux/ftape-vendors.h` `WAKEUP_METHODS`); ftape's behaviour is the safety precedent. Each drive session tries the profiles in `qic117.profile.AUTO_ORDER` — `default` (ftape "None": no wake), `colorado` ("Colorado": Phantom Select 46 + unit 0; tw adds Enter Primary Mode), `mountain` ("Mountain": Soft Select 23 + 20 pulses), `insight` ("Motor-on": 100 ms, then IBM PC bus unit 0 select + motor-enable via GW SELECT/MOTOR) — in that order (`qic117.drive.auto_wake`), and keeps the first the drive answers by ftape's test (Report Drive Status within 4 tries, not 0xff). As in ftape, nothing is undone between tries except a Motor-on motor (motor off + deselect), which also goes off at session end; a try the link cannot do is skipped with an INFO line. The Soft-Reset placeholder wakes (`conner`, `iomega`) stay opt-in: ftape never wakes with a Soft Reset. Only the Colorado method is bench-verified; None, Mountain, Motor-on, the order and the motor undo have run only against fake boards.
+Config precedence (`tw`): CLI flags → config file (`--config`, TOML; without it the per-user `~/.config/tapewyrm/config.toml`, or `$XDG_CONFIG_HOME` / `%APPDATA%`, if present) → profile defaults, resolved once in `AppContext.load` and carried on `ctx.obj`; the file's keys are `port` and `profile` (`cli.app.CONFIG_KEYS`), and any other key is a WARNING naming it, so a typo is not silently ignored; logging is set up *before* that load so `-v` shows which config and drive profile were picked up. *Superseded:* with no profile named the default was `default` (no wake sequence), which a phantom drive never answers. *Superseded:* `auto` tried only `colorado` and sent Phantom Deselect (47) after a try that got no answer. *As built:* the default is `auto`, which follows ftape's drive detection (Linux 2.6.19 `drivers/char/ftape/lowlevel/ftape-ctl.c` `ftape_activate_drive()`, `ftape-io.c` `ftape_wakeup_drive()` / `ftape_report_raw_drive_status()`, `include/linux/ftape-vendors.h` `WAKEUP_METHODS`); ftape's behaviour is the safety precedent. Each drive session tries the profiles in `qic117.profile.AUTO_ORDER` — `default` (ftape "None": no wake), `colorado` ("Colorado": Phantom Select 46 + unit 0; tw adds Enter Primary Mode), `mountain` ("Mountain": Soft Select 23 + 20 pulses), `insight` ("Motor-on": 100 ms, then IBM PC bus unit 0 select + motor-enable via GW SELECT/MOTOR) — in that order (`qic117.drive.auto_wake`), and keeps the first the drive answers by ftape's test (Report Drive Status within 4 tries, not 0xff). As in ftape, nothing is undone between tries except a Motor-on motor (motor off + deselect), which also goes off at session end; a try the link cannot do is skipped with an INFO line. The Soft-Reset placeholder wakes (`conner`, `iomega`) stay opt-in: ftape never wakes with a Soft Reset. Only the Colorado method is bench-verified; None, Mountain, Motor-on, the order and the motor undo have run only against fake boards.
 
 ### 6A.8 Concurrency & data-flow model
 
@@ -659,7 +658,7 @@ Config precedence (`tw`): CLI flags → config file (`--config`, TOML; without i
 - **Truncation:** missing `END` → flagged, decoded anyway.
 - **Recovery report** is the user-facing quality signal: per-segment status (`clean` / `corrected(k)` / `uncorrectable`), per-track coverage %, BSM accounting (expected-bad vs unexpected-bad), and a list of segments worth re-capturing. `recover` uses this to decide which tracks to re-run.
 
-*As built*, quality travels **inside the files** rather than in a separate report: every TWTI segment carries its state (missing / clean / corrected / uncorrectable / bad) and erasure count (§7.6), every TWVL records the byte ranges it could not fill (§7.7), and `qicsilver tar` writes a damage report naming each file that touches a hole, separately from files the original backup software itself could not read. There is no `recover` verb; re-reading is "dump the weak tracks again, `convert` both dumps together" (the merge keeps any CRC-good copy). `RecoveryReport` (`tapewyrm/report.py`) survives for the synthetic pipeline only. Overflow and truncation behave as above: the firmware ends the run cleanly, `gwstream` reports whether the parse matched the `END` marker, and `convert` says so per capture.
+*As built*, quality travels **inside the files** rather than in a separate report: every TWTI segment carries its state (missing / clean / corrected / uncorrectable / bad) and erasure count (§7.6), every TWVL records the byte ranges it could not fill (§7.7), and `qicsilver tar` writes a damage report naming each file that touches a hole, separately from files the original backup software itself could not read. There is no `recover` verb; re-reading is "dump the weak tracks again, `convert` both dumps together" (the merge keeps any CRC-good copy). `RecoveryReport` (`tapewyrm.types`) survives as the synthetic pipeline's return value only; its formatter `report.py` is gone. Overflow and truncation behave as above: the firmware ends the run cleanly, `gwstream` reports whether the parse matched the `END` marker, and `convert` says so per capture.
 
 ### 6A.10 Testing strategy (hardware-free first)
 
@@ -689,7 +688,7 @@ The dataclasses that cross module boundaries. *As built* they live in three plac
 | `Direction`, `TapeFormat` | serpentine direction; standard + `rate_kbps` (§2.2) | `tapewyrm_archive.types` | — | everywhere |
 | `CaptureHeader` | rate, clock, track, direction, pass-id, utc, raw drive reports, commits | `tapewyrm_archive.types` | `dump` | TWRF, `convert` |
 | `Marker`, `MarkerKind` | session-start / segment / event / end / heartbeat | `tapewyrm_archive.types` | `twrf` (parse) | tests, synthetic pipeline |
-| `RawFluxCapture` | header + verbatim flux bytes | `tapewyrm_archive.twrf` | `tape.transport` | synthetic pipeline |
+| `RawFluxCapture` | header + verbatim flux bytes | `tapewyrm_archive.twrf` | `twrf` (parse), test fixtures | synthetic pipeline |
 | `FluxStream` | decoded intervals | `tapewyrm.types` | `codec.flux` | `codec.mfm` |
 | `RawSector` | (fsd,ftk,fsc), data[1024], crc flags, deleted | `qiclib.types` | `codec.mfm` | `qiclib.merge`, `.place` |
 | `Segment`, `SegmentResult`, `SegmentStatus` | 32 `RawSector` slots; RS outcome | `qiclib.types` | `qiclib.place` / `.rs` | `qiclib.build` |
@@ -699,7 +698,7 @@ The dataclasses that cross module boundaries. *As built* they live in three plac
 | `Volume`, `SparseVolume` | one TWVL volume; bytes + holes | `tapewyrm_archive.twvl` | `qiclib.extract` | `qicsilver tar` |
 | `FileEntry`, `FileSet` | a recovered Basic-DOS tree + file bytes | `qiclib.types` | `qic113.extract` | `qicsilver tar` |
 | `qic113ext.DirEntry`, `EntryLayout` | an Extended-OS entry and where its data lies | `qiclib.qic113ext` | `qic113ext.layout` | `qicsilver tar` |
-| `LogicalVolume`, `RecoveryReport` | the sketch's outputs | `tapewyrm.types` | `codec.pipeline` | tests only |
+| `RecoveryReport` | the sketch's output | `tapewyrm.types` | `codec.pipeline` | tests only |
 
 ---
 
@@ -867,7 +866,7 @@ The formulas stay in code, keyed by standard — they are spec arithmetic every 
 ## 8. End-to-end data flow
 
 **Trace A — command + status transaction (e.g., seek load point, then read status):**
-`TapeTransport` → `Qic117Drive` looks up command, knows follow-up → `DeviceLink.command_txn(14, report_bits=0)` then `wait_ready` (bytes over USB, no bus) → crosses real-time line → firmware decodes, arbiter grants lease to verbs engine → 14 STEP pulses (verbatim) → release. Then `command_txn(6, report_bits=8)`: emit 6 pulses, clock 8 report bits off TRK0 device-side, return byte → host parses `DriveStatus`; on ERROR, `command_txn(7,…)` to read+clear.
+`tape.dump` → `Qic117Drive` looks up command, knows follow-up → `DeviceLink.command_txn(14, report_bits=0)` then `wait_ready` (bytes over USB, no bus) → crosses real-time line → firmware decodes, arbiter grants lease to verbs engine → 14 STEP pulses (verbatim) → release. Then `command_txn(6, report_bits=8)`: emit 6 pulses, clock 8 report bits off TRK0 device-side, return byte → host parses `DriveStatus`; on ERROR, `command_txn(7,…)` to read+clear.
 *Representation:* `"seek load point"` → `(14, report=0)` → STEP edges (down); TRK0 samples → 8 bits → `DriveStatus` (up). Semantics exist only at the very top and the timing only at the very bottom.
 
 **Trace B — capture session (one track pass):**
@@ -960,7 +959,7 @@ The project is **two artifacts plus a generated contract between them** — firm
 
 ### 12.2 Host — modern Python, `uv`-centric
 
-PEP 621 `pyproject.toml`, with **uv** for environment, lockfile, and task running (fast, single tool, reproducible lock). Gate: **ruff** (lint + format in one), **mypy** (the design is heavily typed — this pays off), **pytest** + pytest-cov against the hardware-free fixtures (§6A.10). CLI entry via `[project.scripts] tw = "tapewyrm.cli:cli"` (plus a `tapewyrm` long alias). Core deps: `click`, `pyserial`. (`greaseweazle` for flux-primitive reuse and `numpy` for an optional accel path are *not* hard deps — the codec is pure stdlib so it stays installable and fixture-testable without them; install `greaseweazle` manually when wiring hardware. Poetry/PDM are acceptable alternatives; uv is the recommendation.)
+PEP 621 `pyproject.toml`, with **uv** for environment, lockfile, and task running (fast, single tool, reproducible lock). Gate: **ruff** (lint + format in one), **mypy** (the design is heavily typed — this pays off), **pytest** + pytest-cov against the hardware-free fixtures (§6A.10). CLI entry via `[project.scripts] tw = "tapewyrm.cli:cli"` (plus a `tapewyrm` long alias). Core deps: `click`, `pyserial`. (Neither `greaseweazle` nor `numpy` is a dependency, hard or optional: the codec is pure stdlib, with GW's PLL vendored (§6A.1). Poetry/PDM are acceptable alternatives; uv is the recommendation.)
 
 *As built:* **one `pyproject.toml` per package** (`packages/*`, hatchling), Python ≥ 3.11, ruff line length 100 with rules `E F I UP B W`, each package with its own `uv.lock` (kept LF by `.gitattributes`, since uv rewrites it). Siblings are editable path sources (`[tool.uv.sources] qiclib = { path = "../qiclib", editable = true }`). Entry points: `tw` / `tapewyrm` = `tapewyrm.cli:cli` (tapewyrm-cli) and `qicsilver` = `qicsilver.cli:cli`. The CLIs depend on `rich` + `rich-click` (and `tw` on `pyserial`); the libraries are stdlib-only apart from `backports.zstd` below 3.14 (§7.6). `greaseweazle` is not needed at all: its PLL is vendored (§6A.1). `hatch_build.py` stamps the git commit into `tw` wheels for `tw info`; editable installs ask git directly.
 
@@ -1209,7 +1208,7 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 |---|---|
 | `cli/` | rich-click `tw`, one module per command group: `app.py` (`AppContext`, config, global flags, §6A.7), `session.py` (drive session, report decoders), `drive.py` (`drive …`), `dump.py`, `convert.py`, `info.py`, `firmware.py` (`flash`, `dfu`) |
 | `console.py` | rich stderr console shared by logging and progress bars (copy kept in step with qicsilver's) |
-| `types.py` | `DeviceInfo`, `TimingParams`, `SelectHint`, `StopCond`, `ErrorCode`, `DriveProfile`, `FluxStream`, `LogicalVolume`, `RecoveryReport` |
+| `types.py` | `DeviceInfo`, `TimingParams`, `SelectHint`, `StopCond`, `ErrorCode`, `DriveProfile`, `FluxStream`, `RecoveryReport` |
 | `buildinfo.py` (+ `hatch_build.py`) | which commit this `tw` was built from |
 | `link/transport.py` | `SerialTransport` (pyserial) + `FakeTransport`; GW command-packet framing |
 | `link/protocol.py` | **generated**: opcode/marker enums, version |
@@ -1221,11 +1220,10 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 | `qic117/profile.py` | `DriveProfile` TOML loader |
 | `tape/dump.py` | `tw dump`: drive identity, wind to track start, pass capture, health check (§6.3) |
 | `tape/fluxprobe.py` | `tw drive flux` diagnostic |
-| `tape/transport.py` | `TapeTransport` (the §6A.4 sketch; tests) |
 | `codec/gwstream.py` | real device stream → intervals, INDEX times, markers; `END` verification |
 | `codec/gwpll.py` | vendored Greaseweazle PLL: intervals → bitcells |
 | `codec/mfm.py` | bitcells → bytes at sync marks; ID/data fields, CCITT CRC → `RawSector`; encoders for fixtures |
-| `codec/flux.py`, `codec/pipeline.py`, `report.py` | the original synthetic-fixture pipeline and its report (tests) |
+| `codec/flux.py`, `codec/pipeline.py` | the original synthetic-fixture pipeline (tests) |
 | `image/convert.py` | `tw convert`: per-capture decode with stage logging, then `qiclib.build` |
 | `profiles/drive/*.toml` | per-drive `DriveProfile` data |
 
@@ -1270,7 +1268,7 @@ The multi-pass union still sits before RS; the header is now located *before* pl
 
 **Generates directly from this document (no hardware):**
 - The **entire `codec/*` tree** — §7.3/§7.5/§13.2/§13.5 are complete; test against the §13.2 RS vector, synthesized `RawFluxCapture` fixtures, and ftape cross-checks. *(As built: split into `tapewyrm-cli`'s `codec/` and `qiclib`, §6A.1.)*
-- **Host control layers** (`link/`, `qic117/`, `tape/`, `report.py`, `cli/`; `rawflux/` became `tapewyrm_archive.twrf`) — §6A + §13.1 + §13.3 + §13.4.
+- **Host control layers** (`link/`, `qic117/`, `tape/`, `cli/`; `rawflux/` became `tapewyrm_archive.twrf`) — §6A + §13.1 + §13.3 + §13.4.
 - **Firmware** — Greaseweazle v1.6 is **vendored complete in-tree** (`firmware/`, built with PlatformIO's pinned ARM GNU toolchain, §12.1) and the QIC layer is grafted onto GW's control loop: `src/qic/qic.c` is `#include`d into `src/floppy.c`, adding `CMD_QIC_*` (= the generated `TW_TXN_*`) cases to `process_command` and reusing GW's flux-read engine for free-running capture (§5, §13.3).
 - The **protocol codegen** and `justfile`/CI (§12).
 

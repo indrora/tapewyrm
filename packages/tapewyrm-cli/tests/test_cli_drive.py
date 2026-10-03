@@ -155,6 +155,16 @@ def test_broken_user_config_names_the_file():
         app_mod.AppContext.load(None, None, None)
 
 
+def test_unknown_config_key_is_a_warning_naming_it(caplog):
+    # A typo'd key must not do nothing silently; the known keys still apply.
+    _user_config('profile = "colorado"\nprfile = "conner"\n')
+    with caplog.at_level("WARNING", logger=app_mod.__name__):
+        app = app_mod.AppContext.load(None, None, None)
+    assert app.profile is not None and app.profile.name == "colorado"
+    assert "'prfile'" in caplog.text
+    assert caplog.text.count("unknown key") == 1  # only the typo, not "profile"
+
+
 def test_relative_xdg_config_home_is_ignored(monkeypatch):
     from pathlib import Path
 

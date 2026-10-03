@@ -51,8 +51,12 @@ def _write_image(
     path: Path,
     segments: dict[int, bytes],
     overrides: dict[int, SegmentEntry] | None = None,
+    qic80: dict | None = None,
 ) -> Path:
-    """Save a TWTI; ``overrides`` replaces the default entry (CLEAN/MISSING) per segment."""
+    """Save a TWTI; ``overrides`` replaces the default entry (CLEAN/MISSING) per segment.
+
+    ``qic80`` replaces the header's qic80_header object (malformed-header tests).
+    """
     overrides = overrides or {}
     count = max([*segments, *overrides]) + 1
     entries = [
@@ -65,7 +69,9 @@ def _write_image(
         "format": "TWTI",
         "segment_count": count,
         "segment_stride": SEGMENT_STRIDE,
-        "qic80_header": {
+        "qic80_header": qic80
+        if qic80 is not None
+        else {
             "header_seg": 0,
             "dup_header_seg": 1,
             "first_data_seg": 2,
@@ -209,3 +215,27 @@ def test_volume_header_records_size_and_only_dir_and_name_of_the_image(tmp_path)
     vol = Volume.load(path)
     assert vol.header["source_image"] == f"{tmp_path.name}/mtn.twti"
     assert vol.header["volume_size"] == len(vol.data)
+
+
+@pytest.mark.parametrize(
+    ("qic80", "member"),
+    [
+        ({"header_seg": 0, "dup_header_seg": 1, "tape_name": "T"}, "first_data_seg"),
+        ({"header_seg": 0, "first_data_seg": "2", "tape_name": "T"}, "first_data_seg"),
+        ({"header_seg": 0, "first_data_seg": 99, "tape_name": "T"}, "first_data_seg"),
+        ({"header_seg": 0, "first_data_seg": 2}, "tape_name"),
+        ({"header_seg": 0, "first_data_seg": 2, "tape_name": 7}, "tape_name"),
+    ],
+)
+def test_malformed_qic80_header_is_a_clean_error(tmp_path, qic80, member):
+    """A header member extract needs that is absent, mistyped or out of range is refused
+    as a malformed file naming the member -- not a KeyError, TypeError or IndexError.
+    """
+    from tapewyrm_archive.errors import MalformedFileError
+
+    with TapeImage.open(_mtn_image(tmp_path)) as good:
+        segments = {n: good.segment(n) for n in range(len(good.entries))}
+    broken = _write_image(tmp_path / "broken.twti", segments, qic80=qic80)
+    with pytest.raises(MalformedFileError, match=f"qic80_header.{member}") as info:
+        extract(broken, tmp_path / "out")
+    assert "broken.twti" in str(info.value)

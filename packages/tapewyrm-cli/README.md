@@ -45,7 +45,8 @@ with `--profile NAME` or `--profile path/to/file.toml`, or set it once as
 given, else the per-user `~/.config/tapewyrm/config.toml`
 (`$XDG_CONFIG_HOME/tapewyrm/config.toml`; `%APPDATA%\tapewyrm\config.toml` on
 Windows) if it exists. Precedence: `--profile`, then the config file, then
-`auto`.
+`auto`. The config file's only keys are `profile` and `port` (as `--port`); any
+other key is ignored with a warning naming it.
 
 **`auto`** (the default) does what the Linux floppy-tape driver ftape does
 for an unknown drive (`ftape_activate_drive()` in

@@ -97,8 +97,12 @@ def extract(
     # A TWTZ image is decompressed to a temp file here; its finalizer deletes it
     # when img goes out of scope at return.
     img = TapeImage.open(image_path, progress=progress)
-    q80 = img.header["qic80_header"]
-    vt_seg = q80["first_data_seg"]
+    # The two FPR members extraction cannot do without, checked up front so a
+    # malformed header is a MalformedFileError naming the member, not a
+    # KeyError mid-way (TWS-2 sections 4.3 and 11.2; the checks live in
+    # TapeImage, see the note on qic80_segment there).
+    vt_seg = img.qic80_segment("first_data_seg")
+    tape_name = img.qic80_str("tape_name")
     vt_entry = img.entries[vt_seg]
     log.debug(
         "volume table at segment %d (first_data_seg): state %s, %d erasures, data_len %d",
@@ -319,7 +323,7 @@ def extract(
                     "format": "TWVL",
                     "version": VERSION,
                     "volume_index": k,
-                    "tape_name": q80["tape_name"],
+                    "tape_name": tape_name,
                     "vtbl": _vtbl_dict(e),
                     "data_section_size": e.data_section_size,
                     "dir_section_size": e.dir_section_size,

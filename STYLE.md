@@ -95,6 +95,8 @@ Package graph (arrows = "depends on"); nothing may point the other way:
   `[tool.uv.sources] tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }`.
 - On-disk constants shared with the firmware (TWRF marker opcodes) are copied
   into the archive package, and a test in tapewyrm-cli asserts the copies match.
+- User-facing sizes are decimal SI in every CLI (1 kB = 1000 B, MB = 10^6 B,
+  GB = 10^9 B), matching cartridge covers; never divide by 1024 for output.
 
 ### 2.1 Tooling
 

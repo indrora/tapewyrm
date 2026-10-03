@@ -74,7 +74,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal, overload
 
 from tapewyrm_archive.errors import MalformedFileError, TruncatedFileError
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
@@ -169,12 +169,99 @@ class TapeImage:
     _data_at: int = 0
     # Set by open(): releases the mapping (and a TWTZ temp file). Not data.
     _finalizer: weakref.finalize | None = field(default=None, repr=False, compare=False)
+    # Set by _parse(): the file the image came from and its kind, so a header
+    # member found wrong after opening (qic80_segment, qic80_str) is reported
+    # against the file like any other malformed-file error. An image built in
+    # memory (qiclib.build) has no file.
+    _path: Path | None = field(default=None, repr=False, compare=False)
+    _kind: str = field(default="TWTI", repr=False, compare=False)
 
     def segment(self, n: int) -> bytes:
         """Segment ``n``'s data (``data_len`` bytes; empty if missing)."""
         e = self.entries[n]
         start = self._data_at + n * SEGMENT_STRIDE
         return bytes(self._data[start : start + e.data_len])
+
+    # --- qic80_header members, checked at the point of use ---
+    #
+    # Why here and not in _parse: TWS-2 says qic80_header is REQUIRED of
+    # writers, but readers "MUST tolerate the absence of any member other than
+    # those they need" (section 4.3), and a reader that wants only segment data
+    # needs only segment_count (section 9.2, rule 5) -- tw inspect, for one,
+    # reports on an image whatever its FPR copy holds. So open() cannot refuse
+    # an image for lacking first_data_seg. What it can do is own the check, so
+    # every consumer that *does* need a member (qicsilver extract and identify)
+    # gets the same validation and the same error: the member's JSON type
+    # (section 11.2: check the type of each member used; true/false are not
+    # integers) and, for a segment number, its range against segment_count
+    # (section 11.2: check every segment number from the header before use).
+    # Section 9.2 rule 13 states the whole rule.
+
+    def _malformed(self, problem: str) -> MalformedFileError:
+        where = self._path if self._path is not None else "tape image"
+        log.debug("%s: %s; refusing", where, problem)
+        return MalformedFileError(where, self._kind, problem)
+
+    def _qic80_member(self, name: str, required: bool) -> Any:
+        """``qic80_header[name]`` as stored, or None when absent and not ``required``."""
+        fpr = self.header.get("qic80_header")
+        if fpr is None and not required:
+            log.debug("header has no qic80_header; %s treated as absent", name)
+            return None
+        if fpr is None:
+            raise self._malformed(
+                f"the header lacks the REQUIRED member qic80_header, so qic80_header.{name} "
+                "is missing"
+            )
+        if not isinstance(fpr, dict):
+            raise self._malformed(f"qic80_header is a JSON {type(fpr).__name__}, not an object")
+        if name not in fpr:
+            if not required:
+                log.debug("qic80_header has no %s; treated as absent", name)
+                return None
+            raise self._malformed(f"the header lacks qic80_header.{name}, which is needed here")
+        return fpr[name]
+
+    @overload
+    def qic80_segment(self, name: str, *, required: Literal[True] = ...) -> int: ...
+    @overload
+    def qic80_segment(self, name: str, *, required: bool) -> int | None: ...
+    def qic80_segment(self, name: str, *, required: bool = True) -> int | None:
+        """Segment number ``qic80_header[name]``, checked to be a segment of this image.
+
+        Raises :class:`MalformedFileError` naming the file and the member when
+        it is absent (and ``required``), not an integer, or outside
+        ``0 .. segment_count - 1``. Returns None for an absent optional member.
+        """
+        value = self._qic80_member(name, required)
+        if value is None and not required:
+            return None
+        # type() rather than isinstance: bool is an int subclass.
+        if type(value) is not int:
+            raise self._malformed(f"qic80_header.{name} is {value!r}; it must be an integer")
+        if not 0 <= value < len(self.entries):
+            raise self._malformed(
+                f"qic80_header.{name} is {value}, but the image holds segments "
+                f"0..{len(self.entries) - 1}"
+            )
+        return value
+
+    @overload
+    def qic80_str(self, name: str, *, required: Literal[True] = ...) -> str: ...
+    @overload
+    def qic80_str(self, name: str, *, required: bool) -> str | None: ...
+    def qic80_str(self, name: str, *, required: bool = True) -> str | None:
+        """String member ``qic80_header[name]`` (e.g. ``tape_name``), type-checked.
+
+        Raises :class:`MalformedFileError` naming the file and the member when
+        it is absent (and ``required``) or not a string.
+        """
+        value = self._qic80_member(name, required)
+        if value is None and not required:
+            return None
+        if not isinstance(value, str):
+            raise self._malformed(f"qic80_header.{name} is {value!r}; it must be a string")
+        return value
 
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -420,7 +507,14 @@ class TapeImage:
                     f"{SEGMENT_STRIDE:,}-byte slot"
                 )
             entries.append(SegmentEntry(SegmentState(state), erasures, data_len, mask))
-        return cls(header=header, entries=entries, _data=buf, _data_at=table_end)
+        return cls(
+            header=header,
+            entries=entries,
+            _data=buf,
+            _data_at=table_end,
+            _path=path,
+            _kind=kind,
+        )
 
 
 def _temp_image(path: Path) -> tuple[Any, str]:
