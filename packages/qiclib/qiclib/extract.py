@@ -37,14 +37,32 @@ def _expected_data_len(excluded_mask: int) -> int:
     independently of whether it was read, so it is what the writing software
     saw too: 32 sectors, minus the excluded ones, minus 3 for ECC.
 
-    Caveat: ``qiclib.build`` only knows the mask for segments it actually
-    read, so a MISSING segment it wrote carries mask 0 and gets a full 29 KB
-    hole. That is the best guess available (and what
-    ``volume.volume_streams`` zero-fills); a volume whose missing segment
-    really had excluded sectors will still drift by those sectors.
+    ``qiclib.build`` records the map's mask on MISSING entries too, so this is
+    exact for images it wrote. Images from before that (mask 0 on MISSING
+    entries) get a full 29 KB hole, which drifts by any excluded sectors.
     """
     excluded = bin(excluded_mask & ((1 << _SECTORS_PER_SEGMENT) - 1)).count("1")
     return max(0, _SECTORS_PER_SEGMENT - excluded - _ECC_SECTORS) * _SECTOR_BYTES
+
+
+def _segment_bounds(img: TapeImage, start: int, end: int) -> tuple[list[int], int]:
+    """Stream offsets where each non-BAD segment of an uncompressed volume starts, and the total.
+
+    Mirrors the layout loop in :func:`extract` exactly: BAD segments take no
+    room, MISSING/UNCORRECTABLE ones their expected size, read ones their data.
+    """
+    bounds: list[int] = []
+    pos = 0
+    for n in range(start, end + 1):
+        ent = img.entries[n]
+        if ent.state is SegmentState.BAD:
+            continue
+        bounds.append(pos)
+        if ent.state in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
+            pos += _expected_data_len(ent.excluded_mask)
+        else:
+            pos += ent.data_len
+    return bounds, pos
 
 
 def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
@@ -183,6 +201,34 @@ def extract(
                     f"segments hold at most {max_size:,}; the table is probably read with the "
                     "wrong layout -- try another --tape-profile"
                 )
+            # Uncompressed volumes are the segments' usable data laid end to
+            # end, so their real length -- and every segment boundary -- is
+            # known before reading a byte. The table's data + directory sizes
+            # undercount it: QIC-113 Rev G §7 puts a Segment Gap between the
+            # sections (§7.1: the directory starts on a segment boundary), so
+            # sizing from the table cut the end off a Directory-Last directory.
+            # The boundaries also pin that directory exactly: the first one at
+            # or after the data section's end. (Compressed volumes are laid out
+            # by their extents' offsets, where the gap takes no room.)
+            directory_offset = None
+            if e.compressed is False:
+                bounds, total = _segment_bounds(img, e.start_seg, e.end_seg)
+                log.debug(
+                    "volume %d: uncompressed; segments hold %d bytes (table says %d)",
+                    k,
+                    total,
+                    size,
+                )
+                size = total
+                if e.directory_last and e.data_section_size is not None:
+                    directory_offset = next((b for b in bounds if b >= e.data_section_size), None)
+                    log.debug(
+                        "volume %d: directory-last; directory at %r (first segment boundary "
+                        "at or after the %d-byte data section)",
+                        k,
+                        directory_offset,
+                        e.data_section_size,
+                    )
             stream = SparseVolume(size=size)
             lost: list[int] = []
             n_bad = 0
@@ -268,6 +314,10 @@ def extract(
                     "vtbl": _vtbl_dict(e),
                     "data_section_size": e.data_section_size,
                     "dir_section_size": e.dir_section_size,
+                    # Where the directory section starts in the volume bytes,
+                    # when that is known exactly (uncompressed Directory-Last);
+                    # None = consumers locate it (qiclib.qic113 does).
+                    "directory_offset": directory_offset,
                     "holes": holes,
                     "lost_segments": lost,
                     "source_image": str(image_path),

@@ -143,8 +143,14 @@ def _write_extended(
         raise ValueError(
             f"{vol_name}: the volume table entry has no QIC-113 section sizes; not supported yet"
         )
-    log.debug("reading the directory section: %d bytes at offset %d", dir_size, data_size)
-    dir_bytes, dir_missing = vol.read(data_size, dir_size)
+    # An uncompressed Directory-Last volume records the directory's exact
+    # start (after the Segment Gap); otherwise it sits right after the data
+    # (compressed volumes, whose layout has no gap: the bench "jc" tape).
+    dir_at = hdr.get("directory_offset")
+    if dir_at is None:
+        dir_at = data_size
+    log.debug("reading the directory section: %d bytes at offset %d", dir_size, dir_at)
+    dir_bytes, dir_missing = vol.read(dir_at, dir_size)
     if dir_missing:
         log.warning(
             "%s bytes of the directory are missing; the listing may be cut short",
@@ -223,7 +229,7 @@ def _write_basic(
     ``offset`` is into the same byte stream); a lost one is all missing.
     """
     log.debug("extracting the Basic-DOS file set (%d volume bytes)", len(vol.data))
-    fileset = qic113.extract(vol.data, vtbl)
+    fileset = qic113.extract(vol.data, vtbl, dir_offset=vol.header.get("directory_offset"))
     missing_total = sum(b - a for a, b in vol.holes)
     log.info(
         f"tape {vol.header['tape_name']!r}: {len(fileset.files)} entries "

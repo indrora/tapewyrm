@@ -96,6 +96,19 @@ class BadSectorMap:
     def is_sector_bad(self, lsn: int) -> bool:
         return lsn in self.bad_lsns
 
+    def excluded_slots(self) -> dict[int, set[int]]:
+        """Segment number -> the sector slots (0-31) the map excludes in it.
+
+        The one place LSNs become per-segment exclusions, so a segment that was
+        read (``apply_bsm``) and one that was not (``qiclib.build`` writing a
+        MISSING entry) get the same answer: the map describes the tape, not
+        what we managed to read of it.
+        """
+        by_seg: dict[int, set[int]] = {}
+        for lsn in self.bad_lsns:
+            by_seg.setdefault(lsn // Segment.SECTORS, set()).add(lsn % Segment.SECTORS)
+        return by_seg
+
 
 @dataclass
 class VtblEntry:
@@ -429,9 +442,7 @@ def apply_bsm(segs: dict[tuple[int, int], Segment], bsm: BadSectorMap) -> int:
     the codeword (QIC-80-MC Rev N 6.2.5), so correcting without this treats it
     as a damaged data sector and scrambles the segment.
     """
-    by_seg: dict[int, set[int]] = {}
-    for lsn in bsm.bad_lsns:
-        by_seg.setdefault(lsn // Segment.SECTORS, set()).add(lsn % Segment.SECTORS)
+    by_seg = bsm.excluded_slots()
     marked = 0
     for seg in segs.values():
         slots = by_seg.get(seg.seg)

@@ -78,6 +78,10 @@ def build_image(
     # BAD/MISSING are common (whole unread tracks), so they're counted here
     # and summarized after the loop rather than logged per segment.
     n_bad = n_missing = 0
+    # A MISSING segment still has a size: the sectors the map excludes are not
+    # data. Record its mask so readers (qiclib.extract) size its hole right
+    # instead of assuming a full 29 sectors.
+    excluded = bsm.excluded_slots()
     with progress.task("correcting segments", total=total, unit="segments") as bar:
         for n in range(total):
             bar.advance()
@@ -88,7 +92,8 @@ def build_image(
             seg = by_seg.get(n)
             if seg is None:
                 n_missing += 1
-                entries.append(SegmentEntry(SegmentState.MISSING))
+                mask = sum(1 << k for k in excluded.get(n, ()))
+                entries.append(SegmentEntry(SegmentState.MISSING, excluded_mask=mask))
                 continue
             res = seg_mod.correct_segment(seg)
             mask = sum(1 << k for k in seg.excluded)

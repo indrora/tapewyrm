@@ -159,3 +159,34 @@ def test_end_seg_past_image_is_a_value_error(tmp_path):
     """A volume running off the end of the image is refused, not an IndexError."""
     with pytest.raises(ValueError, match="past the end"):
         extract(_plain_image(tmp_path, end_seg=9), tmp_path / "out")
+
+
+def test_uncompressed_directory_last_keeps_the_gap_and_records_the_directory(tmp_path):
+    """QIC-113 Rev G §7: data, Segment Gap, then the directory on a segment boundary.
+
+    Sizing the volume from the table (data + directory = 150 bytes) used to cut
+    the directory off; the volume is every segment's bytes, and the directory's
+    exact start is the first segment boundary after the data section.
+    """
+    rec = bytearray(
+        build_vtbl_entry(
+            start_seg=3, end_seg=4, description="DIRLAST", flags=0x20, dir_section_size=50
+        )
+    )
+    struct.pack_into("<Q", rec, 96, 100)  # data_section_size (Rev N quadword)
+    vtbl = build_volume_table_segment(2, [bytes(rec)])
+    path = _write_image(
+        tmp_path / "dirlast.twti",
+        {
+            0: seg_mod.segment_data(build_header_segment(0)),
+            1: seg_mod.segment_data(build_header_segment(1)),
+            2: seg_mod.segment_data(vtbl),
+            3: (b"d" * 100).ljust(SEGMENT_BYTES, b"\x00"),  # data, then the gap
+            4: (b"D" * 50).ljust(SEGMENT_BYTES, b"\x00"),  # directory section
+        },
+    )
+    [out] = extract(path, tmp_path / "out", tape_profile="qic80-rev-n")
+    vol = Volume.load(out)
+    assert vol.header["directory_offset"] == SEGMENT_BYTES
+    assert vol.data[:100] == b"d" * 100
+    assert vol.data[SEGMENT_BYTES : SEGMENT_BYTES + 50] == b"D" * 50

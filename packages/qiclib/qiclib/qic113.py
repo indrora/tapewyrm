@@ -578,7 +578,7 @@ def _strip_link_subsection(stream: bytes) -> bytes:
     return stream
 
 
-def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
+def extract(stream: bytes, vtbl: VtblEntry, *, dir_offset: int | None = None) -> FileSet:
     """Extract a :class:`FileSet` from a Volume Data Area byte stream.
 
     Handles Directory-First vs Directory-Last layout (VTBL byte 56 bit 5),
@@ -598,7 +598,15 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
     if vtbl.directory_last:
         # Directory-Last: [Data Section][Segment Gap][Directory Section]
         # (QIC-113 Rev G §7); see _directory_last_offset for how it is found.
-        dir_start = _directory_last_offset(stream, vtbl)
+        # ``dir_offset`` is the exact start when the caller knows it (an
+        # uncompressed TWVL records it from the segment boundaries; see
+        # qiclib.extract); otherwise, or if it does not parse, locate it.
+        if dir_offset is not None and _plausible_dir_entry(stream, dir_offset):
+            dir_start = dir_offset
+        else:
+            if dir_offset is not None:
+                log.debug("extract: given directory offset %d does not parse; locating", dir_offset)
+            dir_start = _directory_last_offset(stream, vtbl)
         log.debug("extract: directory-last layout, directory at %d", dir_start)
         dir_entries, _ = _parse_directory_section(stream[dir_start:])
         data_section_start = 0
