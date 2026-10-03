@@ -34,3 +34,12 @@ dir_section_size = [92, 4]
 data_section_size = [96, 4]
 source_label = [102, 16]
 compression = [120, 1]
+
+# Data segments start with a 4-byte (doubleword) uncompressed offset, not
+# Rev G's quadword. Seen on captures/old-connor.twti (Medionix tape, written
+# 1998-02-25): segment 4 = 00000000 | f3fa (raw frame, 29,690 bytes), segment 5
+# = fa730000 (29,690) | dc06 (raw, 23,558), segment 6 = 00d00000 (53,248 = the
+# VTBL's directory section size, so the directory is stored raw and the data
+# section starts there). With 8 bytes, 1,659 of 1,668 readable segments fail.
+[extent]
+offset_bytes = 4

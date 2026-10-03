@@ -74,34 +74,52 @@ def decompress(data: bytes) -> bytes:
         if i + 2 > n:
             log.debug("qic122: string token at bit %d with only %d bits left; raising", i, n - i)
             raise Qic122Error("truncated string token")
-        if bits[i + 1] == "1":
-            offset = int(bits[i + 2 : i + 9], 2)
-            i += 9
-            if offset == 0:
-                # Once per frame, not per token: cheap enough to log.
-                log.debug("qic122: end marker at bit %d of %d; %d bytes out", i, n, len(out))
-                return bytes(out)  # end marker
-        else:
-            offset = int(bits[i + 2 : i + 13], 2)
-            i += 13
-        # length
-        code = bits[i : i + 2]
-        i += 2
-        if code != "11":
-            length = 2 + int(code, 2)
-        else:
+        # A token cut off by the end of the frame slices short: int('', 2)
+        # raises a bare ValueError, and a partial slice parses but leaves i
+        # past n. Both mean a truncated token and must surface as Qic122Error,
+        # the one exception callers (twvl.extract) treat as "segment lost".
+        # try costs nothing on the success path (zero-cost exceptions, 3.11+).
+        token_at = i
+        try:
+            if bits[i + 1] == "1":
+                offset = int(bits[i + 2 : i + 9], 2)
+                i += 9
+                if offset == 0:
+                    if i > n:
+                        log.debug("qic122: end marker at bit %d overruns %d bits; raising", i, n)
+                        raise Qic122Error("truncated end marker")
+                    # Once per frame, not per token: cheap enough to log.
+                    log.debug("qic122: end marker at bit %d of %d; %d bytes out", i, n, len(out))
+                    return bytes(out)  # end marker
+            else:
+                offset = int(bits[i + 2 : i + 13], 2)
+                i += 13
+            # length
             code = bits[i : i + 2]
             i += 2
             if code != "11":
-                length = 5 + int(code, 2)
+                length = 2 + int(code, 2)
             else:
-                length = 8
-                while True:
-                    nib = int(bits[i : i + 4], 2)
-                    i += 4
-                    length += nib
-                    if nib != 15:
-                        break
+                code = bits[i : i + 2]
+                i += 2
+                if code != "11":
+                    length = 5 + int(code, 2)
+                else:
+                    length = 8
+                    while True:
+                        nib = int(bits[i : i + 4], 2)
+                        i += 4
+                        length += nib
+                        if nib != 15:
+                            break
+        except ValueError:
+            log.debug("qic122: string token at bit %d runs off %d bits; raising", token_at, n)
+            raise Qic122Error(f"truncated string token at bit {token_at}") from None
+        if i > n:
+            log.debug(
+                "qic122: string token at bit %d ends at %d > %d bits; raising", token_at, i, n
+            )
+            raise Qic122Error(f"truncated string token at bit {token_at}")
         if offset > len(out) or offset > HISTORY:
             log.debug(
                 "qic122: offset %d > history (%d bytes out, max %d) at bit %d; raising",
@@ -126,14 +144,31 @@ class Extent:
     frames: int
 
 
-def decode_extent(segment_data: bytes) -> Extent:
-    """Decompress a non-spanning QIC-113 Compression Extent (one segment)."""
-    if len(segment_data) < 10:
-        log.debug("extent: segment data is %d bytes (< 10); raising", len(segment_data))
+def decode_extent(segment_data: bytes, *, offset_bytes: int = 8) -> Extent:
+    """Decompress a non-spanning QIC-113 Compression Extent (one segment).
+
+    ``offset_bytes`` is the width of the extent's leading uncompressed-offset
+    field. QIC-113 Rev G makes it a quadword (8); some older software wrote a
+    doubleword (4) -- the "MTN" tapes do, see profiles/tape/mtn.toml. Read with
+    the wrong width, the first frame size lands inside the offset and nearly
+    every segment fails to decode. The tape profile carries the width.
+    """
+    if offset_bytes not in (4, 8):
+        log.debug("extent: offset width %d not 4 or 8; raising", offset_bytes)
+        raise ValueError(f"extent offset width must be 4 or 8 bytes, not {offset_bytes}")
+    if len(segment_data) < offset_bytes + 2:
+        log.debug(
+            "extent: segment data is %d bytes (< %d); raising", len(segment_data), offset_bytes + 2
+        )
         raise Qic122Error("segment too short for an extent")
-    (uoff,) = struct.unpack_from("<Q", segment_data, 0)
-    log.debug("extent: decoding %d bytes at uncompressed offset %d", len(segment_data), uoff)
-    pos, end = 8, len(segment_data)
+    (uoff,) = struct.unpack_from("<Q" if offset_bytes == 8 else "<I", segment_data, 0)
+    log.debug(
+        "extent: decoding %d bytes at uncompressed offset %d (%d-byte offset field)",
+        len(segment_data),
+        uoff,
+        offset_bytes,
+    )
+    pos, end = offset_bytes, len(segment_data)
     out = bytearray()
     frames = 0
     while end - pos >= _TAIL_FILL:

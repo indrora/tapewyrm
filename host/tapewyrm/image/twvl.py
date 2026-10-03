@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from tapewyrm.codec import qic122
+from tapewyrm.codec import tape_profile as tp
 from tapewyrm.codec import volume as volume_mod
 from tapewyrm.image.twti import SegmentState, TapeImage
 from tapewyrm.progress import NULL_PROGRESS, Progress
@@ -127,8 +128,22 @@ def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
     return d
 
 
-def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRESS) -> list[Path]:
-    """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``."""
+def extract(
+    image_path: Path,
+    out_dir: Path,
+    *,
+    tape_profile: str = tp.GUESS,
+    progress: Progress = NULL_PROGRESS,
+) -> list[Path]:
+    """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``.
+
+    The volume table is read through a tape profile, exactly as ``tw identify``
+    reads it (``tape_profile`` is a name, a path, or ``"guess"``). Only bytes
+    0-56 of a VTBL entry are universal: section sizes, the compression flag and
+    the extent offset width differ by the software that wrote the tape, and the
+    plain Rev N layout misreads them on e.g. MTN tapes -- a size taken from the
+    middle of the label, compression read as off.
+    """
     log.info("extracting volumes from %s...", image_path.name)
     img = TapeImage.open(image_path)
     q80 = img.header["qic80_header"]
@@ -147,9 +162,28 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
     if vt_entry.state is SegmentState.UNCORRECTABLE:
         # Not refused (behaviour unchanged), but the table may be garbage.
         log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
-    log.debug("parsing volume table from segment %d", vt_seg)
-    vtbl = volume_mod.parse_volume_table_data(img.segment(vt_seg))
-    log.debug("volume table: %d entries", len(vtbl))
+    log.debug("reading volume table from segment %d with tape profile %r", vt_seg, tape_profile)
+    # Deferred: identify imports twti and the codec stack; keep this module light.
+    from tapewyrm.image.identify import from_image
+
+    verdicts = from_image(img, tape_profile=tape_profile).verdicts
+    if verdicts:
+        best = verdicts[0]
+        profile = best.profile
+        vtbl = best.entries
+        log.info("volume table read with tape profile %s (score %d)", profile.name, best.score)
+        if len(verdicts) > 1 and verdicts[1].score == best.score:
+            log.warning(
+                "tape profiles %s and %s fit equally well; using %s (pick one with --tape-profile)",
+                profile.name,
+                verdicts[1].profile.name,
+                profile.name,
+            )
+    else:
+        log.debug("no VTBL records in segment %d; no profile to apply", vt_seg)
+        profile, vtbl = None, []
+    offset_bytes = profile.extent_offset_bytes if profile is not None else 8
+    log.debug("volume table: %d entries; extent offsets are %d bytes", len(vtbl), offset_bytes)
     if not vtbl:
         log.debug("volume table segment %d parsed to no entries; nothing to extract", vt_seg)
     log.debug("creating output directory %s", out_dir)
@@ -195,6 +229,28 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
                 log.debug(
                     "volume %d: compressed flag is None; treating segments as QIC-122 extents", k
                 )
+            # The whole volume is allocated up front (SparseVolume.read), so a
+            # misread size is a MemoryError, not a bad file. Refuse anything
+            # the volume's segments could not hold even at the best plausible
+            # compression ratio -- the same bound tape_profile's size check uses.
+            span = max(0, e.end_seg - e.start_seg + 1)
+            ratio = 1 if e.compressed is False else tp.MAX_COMPRESSION_RATIO
+            max_size = span * tp.SEGMENT_DATA_BYTES * ratio
+            if size > max_size:
+                log.debug(
+                    "volume %d: %d bytes > %d (%d segments x %d x %d); refusing",
+                    k,
+                    size,
+                    max_size,
+                    span,
+                    tp.SEGMENT_DATA_BYTES,
+                    ratio,
+                )
+                raise ValueError(
+                    f"volume {k}: the volume table claims {size:,} bytes, but its {span} "
+                    f"segments hold at most {max_size:,}; the table is probably read with the "
+                    "wrong layout -- try another --tape-profile"
+                )
             stream = SparseVolume(size=size)
             lost: list[int] = []
             n_bad = 0
@@ -218,7 +274,7 @@ def extract(image_path: Path, out_dir: Path, *, progress: Progress = NULL_PROGRE
                         stream.add((n - e.start_seg) * len(data), data)
                         continue
                     try:
-                        ext = qic122.decode_extent(data)
+                        ext = qic122.decode_extent(data, offset_bytes=offset_bytes)
                     except qic122.Qic122Error as exc:
                         log.debug(
                             "segment %d (volume %d): QIC-122 decode failed (state %s, "

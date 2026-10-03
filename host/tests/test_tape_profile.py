@@ -116,6 +116,8 @@ def test_load_from_path(tmp_path):
         ('name = "x"\n[vtbl]\nsource_label = [40, 16]\n', "outside bytes 57-127"),
         ('name = "x"\n[vtbl]\nsource_label = [120, 16]\n', "outside bytes 57-127"),
         ("name = ", "mine.toml"),
+        ('name = "x"\n[extent]\noffset_bytes = 6\n', "must be 4 or 8"),
+        ('name = "x"\n[extent]\nwidth = 4\n', "unknown [extent] key"),
     ],
 )
 def test_malformed_profiles(tmp_path, body, message):
@@ -135,3 +137,8 @@ def test_synthetic_header_round_trip():
     vol, _ = volume_mod.parse_header_data(build_format_parameter_record())
     rec = build_vtbl_entry(start_seg=3, end_seg=40, description="C:", dir_section_size=4096)
     assert tp.guess([rec], vol, now=NOW)[0].profile.name == "qic80-rev-n"
+
+
+def test_extent_offset_width_defaults_to_rev_g_and_mtn_overrides_it():
+    assert tp.load("qic80-rev-n").extent_offset_bytes == 8
+    assert tp.load("mtn").extent_offset_bytes == 4

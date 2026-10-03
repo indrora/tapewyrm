@@ -43,3 +43,20 @@ def test_decode_extent_frames_raw_and_null_fill():
     assert ext.uncompressed_offset == 71_724
     assert ext.frames == 2
     assert ext.data == b"ABAAAAAACABABABA" + b"HELLO"
+
+
+def test_truncated_string_token_is_a_qic122_error_not_a_bare_valueerror():
+    # raw 'A', then an 11-bit-offset token cut off by the end of the frame:
+    # the length slice comes back empty and int('', 2) used to escape as a
+    # plain ValueError, which twvl.extract does not catch.
+    with pytest.raises(qic122.Qic122Error, match="truncated string token"):
+        qic122.decompress(_bits_to_bytes("0" + "01000001" + "10"))
+
+
+def test_decode_extent_four_byte_offset():
+    # MTN tapes: a doubleword offset (profiles/tape/mtn.toml [extent]).
+    seg = struct.pack("<I", 29_690) + struct.pack("<H", 0x8000 | 5) + b"HELLO"
+    ext = qic122.decode_extent(seg.ljust(29 * 1024, b"\x00"), offset_bytes=4)
+    assert (ext.uncompressed_offset, ext.data) == (29_690, b"HELLO")
+    with pytest.raises(ValueError, match="4 or 8"):
+        qic122.decode_extent(seg, offset_bytes=2)

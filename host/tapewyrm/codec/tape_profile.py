@@ -110,6 +110,9 @@ class TapeProfile:
     format_codes: frozenset[int] = frozenset()  # [match] hint; empty = no opinion
     fields: dict[str, FieldSpec] = field(default_factory=dict)
     path: str = ""
+    # [extent] offset_bytes: width of each data segment's QIC-113 extent
+    # offset field (qic122.decode_extent). 8 per Rev G; 4 on older software.
+    extent_offset_bytes: int = 8
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +176,17 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
     vtbl_bytes = tuple(
         (int(off), bytes.fromhex(hexstr)) for off, hexstr in match.get("vtbl_bytes", [])
     )
+    extent = data.get("extent", {})
+    unknown = sorted(set(extent) - {"offset_bytes"})
+    if unknown:
+        log.debug("tape profile %s: [extent] keys %s not known; raising", path, unknown)
+        raise TapeProfileError(f"{path}: unknown [extent] key(s) {', '.join(unknown)}")
+    offset_bytes = extent.get("offset_bytes", 8)
+    if offset_bytes not in (4, 8):
+        log.debug(
+            "tape profile %s: [extent] offset_bytes %r not 4 or 8; raising", path, offset_bytes
+        )
+        raise TapeProfileError(f"{path}: [extent] offset_bytes = {offset_bytes!r} must be 4 or 8")
     return TapeProfile(
         name=str(data["name"]),
         description=str(data.get("description", "")),
@@ -181,6 +195,7 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
         format_codes=frozenset(int(c) for c in match.get("format_codes", [])),
         fields=fields,
         path=str(path),
+        extent_offset_bytes=int(offset_bytes),
     )
 
 
