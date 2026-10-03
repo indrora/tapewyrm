@@ -6,6 +6,14 @@ extents decoded and placed at their uncompressed offsets, or, for an
 uncompressed volume, the segments' data laid end to end. Each volume is
 written with the TWVL format from ``tapewyrm_archive.twvl`` (TWS-3), holes
 and all; ``qicsilver tar`` reads it from there.
+
+Which volumes are written, and under what names, is decided here too, so the
+CLI only checks that its arguments make sense together: ``volumes`` picks
+volume-table indexes (parsed from ``--volumes`` by :func:`parse_volume_list`),
+each written as ``{out_dir}/{prefix}{NN}.twvl``, or ``outfile`` names the one
+selected volume's file. Every check that needs the volume table (does volume
+N exist? is exactly one selected for ``outfile``?) runs before anything is
+written, so a typo never leaves half an output directory behind.
 """
 
 from __future__ import annotations
@@ -77,14 +85,90 @@ def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
     return d
 
 
+# ---------------------------------------------------------------------------
+# Volume selection and output naming
+# ---------------------------------------------------------------------------
+
+#: Output file prefix when none is given: ``vol-00.twvl``, ``vol-01.twvl``...
+DEFAULT_PREFIX = "vol-"
+
+
+def parse_volume_list(spec: str) -> list[int]:
+    """'0', '0,2', '1-3' or '0,2-4' -> sorted, de-duplicated volume numbers.
+
+    The same syntax as ``tw dump``'s TRACKS (``tapewyrm.cli.dump._parse_tracks``),
+    minus its 0-63 bound: how many volumes there are is only known once the
+    volume table is read, so :func:`extract` checks the upper end. Anything
+    that is not a non-negative decimal number or an ascending ``a-b`` range is
+    a ``ValueError`` naming the offending part.
+    """
+    out: set[int] = set()
+    for part in spec.split(","):
+        low_text, dash, high_text = part.strip().partition("-")
+        if not dash:
+            high_text = low_text  # a single number N is the range N-N
+        # isdecimal, not a bare int(): int() also takes ' 1', '+1' and '1_0'.
+        # An empty side ('1-', '-1', '') is not decimal either, so it fails here.
+        if not (low_text.isdecimal() and high_text.isdecimal()):
+            log.debug("volume list %r: part %r is not N or N-M; refusing", spec, part)
+            raise ValueError(f"bad volume range {part!r}: use numbers and ranges like 0,2-4")
+        low, high = int(low_text), int(high_text)
+        if low > high:
+            log.debug("volume list %r: range %d-%d is reversed; refusing", spec, low, high)
+            raise ValueError(f"bad volume range {part!r}: the range is reversed")
+        out.update(range(low, high + 1))
+    return sorted(out)
+
+
+def _select_volumes(volumes: list[int] | None, count: int, outfile: Path | None) -> list[int]:
+    """The volume-table indexes to write, checked against the table's ``count``.
+
+    Runs before any output is written. ``None`` selects every volume; a number
+    the table does not have is a ``ValueError`` listing the valid range; and
+    ``outfile`` names one file, so it needs exactly one volume selected.
+    """
+    if volumes is None:
+        log.debug("no volume selection; taking all %d volumes", count)
+        selected = list(range(count))
+    else:
+        selected = sorted(set(volumes))
+        absent = [k for k in selected if not 0 <= k < count]
+        if absent:
+            have = "it has no volumes" if count == 0 else f"its volumes are 0-{count - 1}"
+            if count == 1:
+                have = "its only volume is 0"
+            log.debug("selected volumes %s not in a %d-volume table; refusing", absent, count)
+            raise ValueError(
+                f"no volume {', '.join(map(str, absent))} on this tape; {have} "
+                "(see `qicsilver identify`)"
+            )
+    if outfile is not None and len(selected) != 1:
+        log.debug("outfile %s with %d volumes selected; refusing", outfile, len(selected))
+        raise ValueError(
+            f"an output file names one volume, but {len(selected)} volumes are selected; "
+            "pick one with --volumes N, or give an output directory instead"
+        )
+    return selected
+
+
 def extract(
     image_path: Path,
     out_dir: Path,
     *,
+    volumes: list[int] | None = None,
+    prefix: str = DEFAULT_PREFIX,
+    outfile: Path | None = None,
     volume_profile: str = vp.GUESS,
     progress: Progress = NULL_PROGRESS,
 ) -> list[Path]:
-    """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``.
+    """Write the tape image's volumes as TWVL files; returns their paths in order.
+
+    ``volumes`` lists volume-table indexes (default: all). Each is written as
+    ``{out_dir}/{prefix}{NN}.twvl``, NN being its index in the volume table
+    (two digits), not its position in the selection. ``outfile`` instead names
+    the file for the one selected volume (``out_dir`` and ``prefix`` are then
+    unused); several volumes selected with it, or a volume the table does not
+    have, is a ``ValueError`` raised before anything is written.
 
     The volume table is read through a volume profile, exactly as ``qicsilver identify``
     reads it (``volume_profile`` is a name, a path, or ``"guess"``). Only bytes
@@ -144,11 +228,16 @@ def extract(
     log.debug("volume table: %d entries; extent offsets are %d bytes", len(vtbl), offset_bytes)
     if not vtbl:
         log.debug("volume table segment %d parsed to no entries; nothing to extract", vt_seg)
-    log.debug("creating output directory %s", out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    selected = _select_volumes(volumes, len(vtbl), outfile)
+    log.debug("writing volumes %s of %d", selected, len(vtbl))
+    # Create the one directory the output goes into: -o's parent, or out_dir.
+    target_dir = outfile.parent if outfile is not None else out_dir
+    log.debug("creating output directory %s", target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    with progress.task("extracting volumes", total=len(vtbl), unit="volumes") as overall:
-        for k, e in enumerate(vtbl):
+    with progress.task("extracting volumes", total=len(selected), unit="volumes") as overall:
+        for k in selected:
+            e = vtbl[k]
             size = (e.data_section_size or 0) + (e.dir_section_size or 0)
             log.debug(
                 "volume %d %r: segments %d..%d, compressed=%r, data_section_size=%r, "
@@ -344,7 +433,7 @@ def extract(
                 },
                 data=body,
             )
-            path = out_dir / f"vol-{k:02d}.twvl"
+            path = outfile if outfile is not None else out_dir / f"{prefix}{k:02d}.twvl"
             log.debug("volume %d: %d holes; saving to %s", k, len(holes), path)
             vol.save(path)
             missing = sum(b - a for a, b in holes)

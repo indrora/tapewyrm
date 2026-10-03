@@ -7,6 +7,7 @@ Colorado Jumbo 350 and Colorado 1400 are tested). See the
 
 ```
 tape --tw dump--> TWRF --tw convert--> TWTI/TWTZ --qicsilver extract--> TWVL --qicsilver tar--> .tar
+                                                                         (qicsilver inspect lists it)
 ```
 
 Hardware output below is marked **(example output)**: it shows the format
@@ -352,19 +353,61 @@ Options:
   `bad_sectors`, `volume_profile`, `volume_profile_scores`, `volumes`, ...),
   for scripts.
 
-## 8. Get the files: `qicsilver extract` and `qicsilver tar`
+## 8. Get the files: `qicsilver extract`, `inspect` and `tar`
 
 ```sh
 qicsilver --progress extract captures/NAME.twtz captures/NAME-vols
+qicsilver inspect captures/NAME-vols/vol-00.twvl
 qicsilver --progress tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 ```
 
-The synopses are `qicsilver extract IMAGE OUTDIR` and `qicsilver tar VOLUME
-OUTPUT`: input first, output last. `extract` writes one `vol-NN.twvl` per volume in the volume table and prints
-their paths. It decompresses QIC-122 data and lays each volume out by its
-QIC-113 offsets; bytes from segments that were not recovered become recorded
-holes, so nothing after a hole is shifted. It takes `--volume-profile` like
-`identify`.
+The synopses are `qicsilver extract IMAGE [OUTDIR]`, `qicsilver inspect
+VOLUME [PATH]...` and `qicsilver tar VOLUME OUTPUT`: input first, output last.
+`extract` writes one `OUTDIR/vol-NN.twvl` per volume in the volume table (NN
+is the volume's number there, as `identify` lists it) and prints their paths.
+It decompresses QIC-122 data and lays each volume out by its QIC-113 offsets;
+bytes from segments that were not recovered become recorded holes, so nothing
+after a hole is shifted. Its options:
+
+- `OUTDIR` defaults to the current directory.
+- `--volumes LIST` extracts only some volumes: `0`, `0,2`, `1-3`, `0,2-4`
+  (the same syntax as `tw dump`'s TRACKS). A number the tape does not have is
+  an error naming the valid range, before anything is written.
+- `--prefix PREFIX` changes the file names (default `vol-`): `--prefix jc-`
+  writes `jc-00.twvl`.
+- `-o FILE` writes the one selected volume to FILE (a plain path, like
+  `tar -f`): `qicsilver extract IMG --volumes 1 -o docs.twvl`. It needs
+  exactly one volume selected (by `--volumes N`, or because the tape has only
+  one) and does not combine with OUTDIR or `--prefix`.
+- `--volume-profile` as for `identify`.
+
+`inspect` lists a volume without extracting anything, like `tar tv`: a summary,
+then one line per entry with its type and mode, size in bytes, modification
+time (UTC), damage (`lost N` or `error`, as in the damage report below) and
+path:
+
+```console
+$ qicsilver inspect captures/NAME-vols/vol-00.twvl
+tape name     EXAMPLE TAPE
+volume        EXAMPLE BACKUP
+date          1998-12-23 05:13:20
+directory     QIC-113 Extended
+entries       3 files, 2 directories, 2 damaged
+missing       50 bytes missing of 1.4 kB; 1 lost segment
+
+drwxr-xr-x    0  1970-01-01 00:00:00           C:
+drwxr-xr-x    0  1998-12-23 05:13:20           C:/DOCS
+-r--r--r--   12  1998-12-23 05:13:20           C:/EXAMPLE.TXT
+-rw-r--r--  100  1998-12-23 05:13:20  lost 50  C:/BROKEN.DAT
+-rw-r--r--    4  1998-12-23 05:13:20  error    C:/DOCS/NOTES.TXT
+```
+(output from a synthetic volume built with `qiclib.testing.builders`)
+
+`PATH...` narrows the listing to entries matching any of the globs (matched
+against the whole path, so quote them: `'*.TXT'`, `'C:/WINDOWS/*'`);
+`--damaged` lists only damaged files; `--json` prints the summary and the
+entries as JSON. `inspect` reads the volume with the same code as `tar`, so
+its counts are the ones `tar` prints.
 
 `tar` turns one volume into a POSIX (pax) tar with the backup's own paths
 (including long Windows 95 names), modification times and DOS attributes:

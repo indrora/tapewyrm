@@ -7,7 +7,9 @@ exercise the parsers end-to-end with no hardware.
 from __future__ import annotations
 
 import struct
-from dataclasses import replace
+from dataclasses import dataclass, replace
+
+from tapewyrm_archive.twvl import Volume
 
 from qiclib import rs
 from qiclib.geometry import FTK_PER_SIDE, seg_to_coord
@@ -123,14 +125,16 @@ def build_vtbl_entry(
     os_type: int = 1,
     compressed: bool = False,
     dir_section_size: int = 0,
+    date: int = 0,
 ) -> bytes:
-    """Build one 128-byte VTBL entry."""
+    """Build one 128-byte VTBL entry (``date`` is a packed short date, bytes 52-55)."""
     rec = bytearray(VTBL_ENTRY_LEN)
     rec[0:4] = signature
     struct.pack_into("<H", rec, 4, start_seg)  # Rev N §8: words
     struct.pack_into("<H", rec, 6, end_seg)
     desc = description.encode("ascii")[:44]
     rec[8 : 8 + len(desc)] = desc
+    struct.pack_into("<I", rec, 52, date)
     rec[56] = flags
     struct.pack_into("<I", rec, 92, dir_section_size)
     if compressed:
@@ -230,3 +234,151 @@ def build_data_entry(dir_entry: bytes, path: str, data: bytes) -> bytes:
     copy = bytearray(dir_entry)
     struct.pack_into("<I", copy, 6, header_len + len(data))
     return sig + bytes(copy) + path_entry + data
+
+
+# ---------------------------------------------------------------------------
+# QIC-113 Extended-OS volume (Rev G section 8)
+# ---------------------------------------------------------------------------
+
+# Data Description IDs and signatures, copied from qiclib.qic113ext so a
+# builder bug cannot hide behind the parser's own constants.
+_DD_DOS, _DD_DATA, _DD_WIN95 = 2, 7, 10
+_EXT_DATA_ENTRY_SIG = b"\xcc\x33\xcc\x33"
+_EXT_DATA_AREA_SIG = b"\x99\x66\x99\x66"
+
+
+def _ext_description(ddid: int, area: int, struct_bytes: bytes = b"", name: str = "") -> bytes:
+    """One Data Description Entry: ID, Data Area size, struct, UTF-16LE name."""
+    raw_name = name.encode("utf-16-le")
+    return (
+        struct.pack("<HQH", ddid, area, len(struct_bytes))
+        + struct_bytes
+        + struct.pack("<H", len(raw_name))
+        + raw_name
+    )
+
+
+def build_ext_dir_entry(
+    name: str,
+    traversal: int,
+    *,
+    size: int = 0,
+    mtime: int = 0,
+    attrs: int = 0,
+    data_entry_size: int = 0,
+    path_entry_size: int = 0,
+) -> bytes:
+    """An Extended-OS Directory Entry with DATA, Windows 95 and DOS descriptions.
+
+    ``attrs`` is the DOS attribute byte (bit 0 read-only) kept in the Win95
+    struct, ``mtime`` its modify time in seconds since 1970 (struct offset
+    20), ``size`` the DATA area's size. This is the shape the bench "jc" tape
+    uses (QIC-113 Rev G 8.2.0.1).
+    """
+    win95 = struct.pack("<I", attrs) + b"\xff" * 16 + struct.pack("<II", mtime, 0)
+    descriptions = (
+        _ext_description(_DD_DATA, size)
+        + _ext_description(_DD_WIN95, 0, win95, name)
+        + _ext_description(_DD_DOS, 0, b"\x00" * 9, name)
+    )
+    body = (
+        struct.pack("<QHHB", data_entry_size, path_entry_size, _DD_WIN95, traversal) + descriptions
+    )
+    return struct.pack("<H", len(body)) + body
+
+
+@dataclass(frozen=True)
+class ExtItem:
+    """One entry of a synthetic Extended-OS volume, in directory order.
+
+    ``traversal`` uses the qiclib.qic113ext T_* bits; the caller orders the
+    items one directory level at a time, as QIC-113 Rev G 8.2.1 does.
+    """
+
+    name: str
+    traversal: int
+    data: bytes = b""
+    mtime: int = 0
+    attrs: int = 0
+
+
+def build_ext_volume(items: list[ExtItem]) -> tuple[bytes, bytes]:
+    """(File Set Data Section, Directory Section) for ``items``.
+
+    Every item, directories included, gets a Data Entry: signature, a copy of
+    its Directory Entry, an empty Path Entry, then a DATA area holding
+    ``data`` and an empty Windows 95 area (the DOS area is a Null type and
+    takes no space). Each Directory Entry records its Data Entry's size, so
+    ``qic113ext.layout`` places the file bytes from the directory alone.
+    """
+    data_section = b""
+    directory = b""
+    for item in items:
+        copy = build_ext_dir_entry(
+            item.name, item.traversal, size=len(item.data), mtime=item.mtime, attrs=item.attrs
+        )
+        data_entry = (
+            _EXT_DATA_ENTRY_SIG
+            + copy
+            + _EXT_DATA_AREA_SIG
+            + struct.pack("<H", _DD_DATA)
+            + item.data
+            + _EXT_DATA_AREA_SIG
+            + struct.pack("<H", _DD_WIN95)
+        )
+        data_section += data_entry
+        directory += build_ext_dir_entry(
+            item.name,
+            item.traversal,
+            size=len(item.data),
+            mtime=item.mtime,
+            attrs=item.attrs,
+            data_entry_size=len(data_entry),
+        )
+    return data_section, directory
+
+
+# ---------------------------------------------------------------------------
+# TWVL volume (TWS-3)
+# ---------------------------------------------------------------------------
+
+
+def build_twvl(
+    stream: bytes,
+    vtbl_record: bytes,
+    *,
+    tape_name: str = "EXAMPLE TAPE",
+    holes: list[list[int]] | None = None,
+    lost_segments: list[int] | None = None,
+    data_section_size: int | None = None,
+    dir_section_size: int | None = None,
+    directory_offset: int | None = None,
+    compressed: bool | None = False,
+) -> Volume:
+    """A TWVL :class:`~tapewyrm_archive.twvl.Volume` around ``stream``.
+
+    The header carries what ``qicsilver tar`` and ``qicsilver inspect`` read
+    (TWS-3 section 3.1): the raw VTBL record (``vtbl_record``, e.g. from
+    :func:`build_vtbl_entry`), its flag byte, the section sizes, holes and
+    lost segments. Save it with ``.save(path)``.
+    """
+    return Volume(
+        header={
+            "format": "TWVL",
+            "tape_name": tape_name,
+            "holes": holes or [],
+            "lost_segments": lost_segments or [],
+            "data_section_size": data_section_size,
+            "dir_section_size": dir_section_size,
+            "directory_offset": directory_offset,
+            "volume_size": len(stream),
+            "vtbl": {
+                "raw": vtbl_record.hex(),
+                "flags": vtbl_record[56],
+                "compressed": compressed,
+                "data_section_size": data_section_size,
+                "dir_section_size": dir_section_size,
+            },
+        },
+        data=stream,
+    )

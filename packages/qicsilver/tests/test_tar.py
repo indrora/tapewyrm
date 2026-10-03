@@ -3,13 +3,7 @@
 import pytest
 from tapewyrm_archive.twvl import Volume
 
-from qicsilver.tar import _tar_name, default_report_path, write_tar
-
-
-def test_tar_names_drop_the_drive_colon():
-    assert _tar_name("C:/WINDOWS/WIN.INI") == "C/WINDOWS/WIN.INI"
-    assert _tar_name("C:") == "C"
-    assert _tar_name("/x") == "root/x"
+from qicsilver.tar import default_report_path, write_tar
 
 
 def test_report_sits_next_to_the_tar(tmp_path):

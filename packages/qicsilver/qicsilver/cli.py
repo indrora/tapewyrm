@@ -6,6 +6,7 @@ Works on TWTI tape images (``tw convert`` output, or its zstd-compressed
     identify  TWTI image -> cartridge, header, dates, bad sectors, volumes
     extract   TWTI image -> one TWVL file per backup volume (QIC-122 decoded,
               holes recorded)
+    inspect   TWVL volume -> a tar-tv style listing: sizes, times, damage
     tar       TWVL volume -> pax tar of the backup's files + a damage report
 
 Output channels and flags follow ``tw`` exactly (STYLE.md §2, §2.5): results
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import rich_click as click
+from click.core import ParameterSource
+from qiclib.extract import DEFAULT_PREFIX
 from rich.console import Console
 from tapewyrm_archive.progress import Progress
 
@@ -98,28 +101,142 @@ def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, r
 @click.argument(
     "image", metavar="IMAGE", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
-@click.argument("outdir", metavar="OUTDIR", type=click.Path(file_okay=False, path_type=Path))
+# Optional, so it defaults in the body (None tells "not given" apart from ".").
+@click.argument(
+    "outdir", metavar="[OUTDIR]", required=False, type=click.Path(file_okay=False, path_type=Path)
+)
+@click.option(
+    "--volumes", "volume_spec", metavar="LIST", default=None,
+    help="volumes to extract, e.g. 0, 0,2, 1-3 or 0,2-4  [default: all]",
+)  # fmt: skip
+@click.option(
+    "--prefix", default=DEFAULT_PREFIX, show_default=True,
+    help="output file names: OUTDIR/PREFIXNN.twvl",
+)  # fmt: skip
+@click.option(
+    "-o", "--outfile", type=click.Path(dir_okay=False, path_type=Path), default=None,
+    help="write the one selected volume to this file instead (not with OUTDIR or --prefix)",
+)  # fmt: skip
 @click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
-@click.pass_obj
-def extract(app: AppContext, image: Path, outdir: Path, volume_profile: str) -> None:
+@click.pass_context
+def extract(
+    ctx: click.Context,
+    image: Path,
+    outdir: Path | None,
+    volume_spec: str | None,
+    prefix: str,
+    outfile: Path | None,
+    volume_profile: str,
+) -> None:
     """TWTI tape image -> one TWVL file per backup volume (OUTDIR/vol-NN.twvl).
+
+    OUTDIR defaults to the current directory. --volumes picks volumes by
+    their number in the volume table (`qicsilver identify` lists them); NN
+    in the file name is that number. -o names the output file when exactly
+    one volume is selected, by --volumes N or because the tape has only one.
 
     Reads the volume table through the volume profile `qicsilver identify` would
     pick, decompresses QIC-122 data and lays each volume out by its QIC-113
-    offsets, recording the byte ranges that were lost. Then `qicsilver tar`.
+    offsets, recording the byte ranges that were lost. Then `qicsilver
+    inspect` or `qicsilver tar`.
     """
     from qiclib.extract import extract as do_extract
+    from qiclib.extract import parse_volume_list
     from qiclib.volume_profile import VolumeProfileError
 
-    log.debug("extracting %s to %s (volume profile %r)", image, outdir, volume_profile)
+    app: AppContext = ctx.obj
+    # Argument combinations that need no volume table are refused here, before
+    # the image is opened; the ones that do (does volume N exist? does a
+    # one-volume tape make -o valid?) are qiclib.extract's.
+    volumes = None
+    if volume_spec is not None:
+        try:
+            volumes = parse_volume_list(volume_spec)
+        except ValueError as exc:
+            log.debug("--volumes %r: %s", volume_spec, exc)
+            raise click.BadParameter(str(exc), param_hint="--volumes") from exc
+    if outfile is not None:
+        if outdir is not None:
+            log.debug("both OUTDIR %s and -o %s given; refusing", outdir, outfile)
+            raise click.UsageError("give OUTDIR or -o/--outfile, not both")
+        if ctx.get_parameter_source("prefix") is not ParameterSource.DEFAULT:
+            log.debug("--prefix %r with -o %s; refusing", prefix, outfile)
+            raise click.UsageError("--prefix names files in OUTDIR; it does nothing with -o")
+        if volumes is not None and len(volumes) != 1:
+            log.debug("-o with volumes %s; refusing", volumes)
+            raise click.UsageError(
+                f"-o/--outfile names one volume, but --volumes selects {len(volumes)} volumes"
+            )
+    out_dir = outdir if outdir is not None else Path(".")
+    log.debug(
+        "extracting %s to %s (volumes %s, prefix %r, outfile %s, volume profile %r)",
+        image,
+        out_dir,
+        volumes or "all",
+        prefix,
+        outfile,
+        volume_profile,
+    )
     try:
         with app.progress() as prog:
-            written = do_extract(image, outdir, volume_profile=volume_profile, progress=prog)
+            written = do_extract(
+                image,
+                out_dir,
+                volumes=volumes,
+                prefix=prefix,
+                outfile=outfile,
+                volume_profile=volume_profile,
+                progress=prog,
+            )
     except (ValueError, VolumeProfileError) as exc:
         log.debug("extract failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     for path in written:
         click.echo(path)
+
+
+@cli.command()
+@click.argument(
+    "volume", metavar="VOLUME", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.argument("paths", metavar="[PATH]...", nargs=-1)
+@click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
+@click.option("--damaged", is_flag=True, help="list only damaged files")
+@click.pass_obj
+def inspect(
+    app: AppContext, volume: Path, paths: tuple[str, ...], as_json: bool, damaged: bool
+) -> None:
+    """List what is in a TWVL volume, like `tar tv`, without extracting it.
+
+    First a summary: tape name, volume label, backup date, the QIC-113
+    directory format (Extended or Basic-DOS), file, directory and damaged
+    counts, missing bytes and lost segments. Then one line per entry: type
+    and mode, size in bytes, modification time (UTC), damage (`lost N` = N
+    bytes fell in unrecovered tape; `error` = the backup software could not
+    read the file) and the path. Each PATH is a glob matched against the
+    whole path (quote it), e.g. '*.TXT' or 'C:/WINDOWS/*'. Reads the
+    volume exactly as `qicsilver tar` does, so the two always agree.
+    """
+    import json
+
+    from qicsilver.entries import read_volume
+    from qicsilver.inspect import format_entries, format_summary, select_entries, to_dict
+
+    log.debug("inspecting %s (paths %r, damaged only %s)", volume, paths, damaged)
+    try:
+        listing = read_volume(volume)
+    except ValueError as exc:
+        log.debug("inspect failed: %r", exc)
+        raise click.ClickException(str(exc)) from exc
+    entries = select_entries(listing.entries, paths, damaged)
+    if as_json:
+        click.echo(json.dumps(to_dict(listing, entries), indent=1))
+        return
+    for line in format_summary(listing):
+        click.echo(line)
+    click.echo()
+    for line in format_entries(entries):
+        click.echo(line)
 
 
 @cli.command()

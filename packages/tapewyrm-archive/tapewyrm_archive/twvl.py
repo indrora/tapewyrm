@@ -109,12 +109,19 @@ class Volume:
         return [(a, b) for a, b in self.header["holes"]]
 
     def read(self, offset: int, length: int) -> tuple[bytes, int]:
-        """Bytes and how many of them are missing (zero-filled).
+        """Bytes and how many of them are missing (zero-filled); see :meth:`missing`."""
+        end = offset + length
+        return self.data[offset:end].ljust(length, b"\x00"), self.missing(offset, length)
+
+    def missing(self, offset: int, length: int) -> int:
+        """How many bytes of [offset, offset+length) are missing, without copying them.
 
         Missing means in a hole (TWS-3 6.2 rule 5) or past the end of the
         volume bytes (rule 6). The ranges are merged before counting, so
         overlapping holes -- or a hole that runs past the end -- count each
         byte once (section 8.1: ``holes`` is not trusted to be well-formed).
+        Listing tools (``qicsilver inspect``) use this to report damage
+        without reading every file's bytes.
         """
         end = offset + length
         size = len(self.data)
@@ -126,7 +133,7 @@ class Volume:
             if a < b:
                 missing += b - a
                 counted_to = b
-        return self.data[offset:end].ljust(length, b"\x00"), missing
+        return missing
 
     def save(self, path: Path) -> None:
         hdr = json.dumps(self.header, indent=1).encode("utf-8")

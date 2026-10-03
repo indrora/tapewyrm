@@ -239,3 +239,87 @@ def test_malformed_qic80_header_is_a_clean_error(tmp_path, qic80, member):
     with pytest.raises(MalformedFileError, match=f"qic80_header.{member}") as info:
         extract(broken, tmp_path / "out")
     assert "broken.twti" in str(info.value)
+
+
+# ---------------------------------------------------------------------------
+# Volume selection and output naming (--volumes, --prefix, -o)
+# ---------------------------------------------------------------------------
+
+
+def _multi_image(tmp_path: Path, count: int = 3) -> Path:
+    """``count`` one-segment uncompressed volumes; volume k's bytes are all ``k``."""
+    entries = []
+    for k in range(count):
+        rec = bytearray(build_vtbl_entry(start_seg=3 + k, end_seg=3 + k, description=f"VOLUME {k}"))
+        struct.pack_into("<Q", rec, 96, 29 * K)
+        entries.append(bytes(rec))
+    segments = {
+        0: seg_mod.segment_data(build_header_segment(0)),
+        1: seg_mod.segment_data(build_header_segment(1)),
+        2: seg_mod.segment_data(build_volume_table_segment(2, entries)),
+    }
+    segments.update({3 + k: bytes([k]) * (29 * K) for k in range(count)})
+    return _write_image(tmp_path / "multi.twti", segments)
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [("0", [0]), ("0,2", [0, 2]), ("1-3", [1, 2, 3]), ("0,2-4", [0, 2, 3, 4]), ("3,1,3", [1, 3])],
+)
+def test_parse_volume_list(spec, expected):
+    """Single numbers, ranges and lists, sorted and de-duplicated (tw dump's TRACKS syntax)."""
+    from qiclib.extract import parse_volume_list
+
+    assert parse_volume_list(spec) == expected
+
+
+@pytest.mark.parametrize("spec", ["", "a", "3-1", "-1", "1-", "1,,2", "0x1"])
+def test_parse_volume_list_rejects_nonsense(spec):
+    from qiclib.extract import parse_volume_list
+
+    with pytest.raises(ValueError, match="bad volume"):
+        parse_volume_list(spec)
+
+
+def test_volumes_selects_only_those_volumes(tmp_path):
+    """Only the selected volumes are written, still named by their table index."""
+    written = extract(_multi_image(tmp_path), tmp_path / "out", volumes=[0, 2])
+    assert [p.name for p in written] == ["vol-00.twvl", "vol-02.twvl"]
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["vol-00.twvl", "vol-02.twvl"]
+    assert Volume.load(written[1]).data == bytes([2]) * (29 * K)
+
+
+def test_prefix_names_the_output_files(tmp_path):
+    written = extract(_multi_image(tmp_path), tmp_path / "out", prefix="jc-")
+    assert [p.name for p in written] == ["jc-00.twvl", "jc-01.twvl", "jc-02.twvl"]
+
+
+def test_outfile_names_the_single_selected_volume(tmp_path):
+    """-o: a plain path for the one selected volume; out_dir is not used."""
+    target = tmp_path / "sub" / "only.twvl"
+    written = extract(_multi_image(tmp_path), tmp_path / "unused", volumes=[1], outfile=target)
+    assert written == [target]
+    assert Volume.load(target).data == bytes([1]) * (29 * K)
+    assert not (tmp_path / "unused").exists()
+
+
+def test_outfile_with_a_one_volume_image_needs_no_selection(tmp_path):
+    target = tmp_path / "one.twvl"
+    assert extract(_multi_image(tmp_path, count=1), tmp_path, outfile=target) == [target]
+
+
+def test_outfile_with_several_volumes_is_refused_before_writing(tmp_path):
+    with pytest.raises(ValueError, match="3 volumes"):
+        extract(_multi_image(tmp_path), tmp_path / "out", outfile=tmp_path / "x.twvl")
+    with pytest.raises(ValueError, match="2 volumes"):
+        extract(
+            _multi_image(tmp_path), tmp_path / "out", volumes=[0, 1], outfile=tmp_path / "x.twvl"
+        )
+    assert not (tmp_path / "out").exists() and not (tmp_path / "x.twvl").exists()
+
+
+def test_volume_not_on_the_tape_is_refused_before_writing(tmp_path):
+    """The error names the valid range, and nothing is written, not even the good ones."""
+    with pytest.raises(ValueError, match=r"no volume 5.*0-2"):
+        extract(_multi_image(tmp_path), tmp_path / "out", volumes=[0, 5])
+    assert not (tmp_path / "out").exists()

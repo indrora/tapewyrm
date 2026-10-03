@@ -180,3 +180,100 @@ def test_tar_truncated_volume_is_a_clean_error(tmp_path):
     short.write_bytes(b"TWVL\x01")  # cut inside the preamble
     result = CliRunner().invoke(cli, ["tar", str(short), str(tmp_path / "y.tar")])
     _assert_clean_error(result, "short.twvl", "truncated")
+
+
+# ---------------------------------------------------------------------------
+# extract: OUTDIR default, --volumes, --prefix, -o
+# ---------------------------------------------------------------------------
+
+
+def _multi_volume_image(path: Path, count: int = 3) -> Path:
+    """``count`` one-segment uncompressed volumes (segments 3..), volume k all ``k``."""
+    import struct
+
+    records = []
+    for k in range(count):
+        rec = bytearray(build_vtbl_entry(start_seg=3 + k, end_seg=3 + k, description=f"V{k}"))
+        struct.pack_into("<Q", rec, 96, 29 * 1024)  # Rev N quadword data_section_size
+        records.append(bytes(rec))
+    data = {
+        0: seg_mod.segment_data(_header(0)),
+        1: seg_mod.segment_data(_header(1)),
+        2: seg_mod.segment_data(build_volume_table_segment(2, records)),
+        **{3 + k: bytes([k]) * (29 * 1024) for k in range(count)},
+    }
+    entries = [SegmentEntry(SegmentState.CLEAN, 0, len(data[n])) for n in range(3 + count)]
+    header = {
+        "format": "TWTI",
+        "segment_count": 3 + count,
+        "segment_stride": SEGMENT_STRIDE,
+        "qic80_header": {
+            "header_seg": 0,
+            "dup_header_seg": 1,
+            "first_data_seg": 2,
+            "tape_name": "BACKUP",
+        },
+    }
+    TapeImage(header=header, entries=entries).save(path, lambda n: data[n])
+    return path
+
+
+def test_extract_outdir_defaults_to_the_current_directory(tmp_path, monkeypatch):
+    image = _multi_volume_image(tmp_path / "m.twti")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["extract", str(image)])
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in tmp_path.glob("vol-*.twvl")) == [
+        "vol-00.twvl",
+        "vol-01.twvl",
+        "vol-02.twvl",
+    ]
+
+
+def test_extract_volumes_and_prefix(tmp_path):
+    image = _multi_volume_image(tmp_path / "m.twti")
+    out = tmp_path / "out"
+    result = CliRunner().invoke(
+        cli, ["extract", str(image), str(out), "--volumes", "0,2", "--prefix", "jc-"]
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in out.iterdir()) == ["jc-00.twvl", "jc-02.twvl"]
+    assert result.stdout.split() == [str(out / "jc-00.twvl"), str(out / "jc-02.twvl")]
+
+
+def test_extract_outfile_is_relative_to_the_cwd(tmp_path, monkeypatch):
+    from tapewyrm_archive.twvl import Volume
+
+    image = _multi_volume_image(tmp_path / "m.twti")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["extract", str(image), "--volumes", "1", "-o", "one.twvl"])
+    assert result.exit_code == 0, result.output
+    assert Volume.load(tmp_path / "one.twvl").data == bytes([1]) * (29 * 1024)
+    assert not list(tmp_path.glob("vol-*"))
+
+
+def test_extract_outfile_errors(tmp_path):
+    image = _multi_volume_image(tmp_path / "m.twti")
+    out = str(tmp_path / "x.twvl")
+    several = CliRunner().invoke(cli, ["extract", str(image), "-o", out])
+    _assert_clean_error(several, "3 volumes", "--volumes")
+    listed = CliRunner().invoke(cli, ["extract", str(image), "--volumes", "0-1", "-o", out])
+    assert listed.exit_code == 2 and "2 volumes" in listed.output
+    with_dir = CliRunner().invoke(
+        cli, ["extract", str(image), str(tmp_path / "d"), "--volumes", "0", "-o", out]
+    )
+    assert with_dir.exit_code == 2 and "OUTDIR" in with_dir.output
+    with_prefix = CliRunner().invoke(
+        cli, ["extract", str(image), "--volumes", "0", "-o", out, "--prefix", "p-"]
+    )
+    assert with_prefix.exit_code == 2 and "--prefix" in with_prefix.output
+    assert not (tmp_path / "x.twvl").exists() and not (tmp_path / "d").exists()
+
+
+def test_extract_bad_volume_numbers(tmp_path):
+    image = _multi_volume_image(tmp_path / "m.twti")
+    absent = CliRunner().invoke(cli, ["extract", str(image), str(tmp_path / "o"), "--volumes", "7"])
+    _assert_clean_error(absent, "no volume 7", "0-2")
+    assert not (tmp_path / "o").exists()
+    typo = CliRunner().invoke(cli, ["extract", str(image), "--volumes", "2-a"])
+    assert typo.exit_code == 2 and "bad volume range" in typo.output

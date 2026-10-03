@@ -65,7 +65,7 @@ clean:
 ci: gen host
     git diff --exit-code
 
-# run qicsilver (TWTI image -> identify / extract / tar), e.g. `just qicsilver identify captures/jc.twti`
+# run qicsilver (TWTI image -> identify / extract / inspect / tar), e.g. `just qicsilver identify captures/jc.twti`
 qicsilver *args:
     uv run --project packages/qicsilver qicsilver {{args}}
 tapewyrm *args:
