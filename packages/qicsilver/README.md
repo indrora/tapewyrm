@@ -27,10 +27,13 @@ everything here takes seconds.
   segments are recorded as holes, never silently shifted.
 - **tar**: a POSIX (pax) tar of the volume's files and directories, with
   original names (long Windows 95 names), modification times and DOS
-  attributes (`TAPEWYRM.dos_attributes` pax header). It also writes a damage
-  report next to the tar (`OUT.damaged.txt`):
-  - `lost`: some of the file's bytes were in tape segments that could not be
-    recovered; the tar holds them zero-filled (or use `--skip-damaged`).
+  attributes (`TAPEWYRM.dos_attributes` pax header). Both QIC-113 directory
+  formats work: **extended** (Colorado/HP backup software) and **Basic-DOS**
+  (e.g. the "MTN" tapes; QIC-113 attribute bits in `TAPEWYRM.qic113_attributes`).
+  It also writes a damage report next to the tar (`OUT.damaged.txt`):
+  - `lost`: some (or, for a Basic-DOS file whose data header was lost, all) of
+    the file's bytes were in tape segments that could not be recovered; the tar
+    holds them zero-filled (or use `--skip-damaged`).
   - `error`: the original backup software could not read the file at backup
     time (QIC-113 "file error" bit), so the tape never had its contents.
 

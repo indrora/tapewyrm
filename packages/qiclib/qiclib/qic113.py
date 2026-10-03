@@ -75,6 +75,7 @@ class DirEntry:
     last_in_dir: bool
     last_in_table: bool
     unreadable: bool
+    entry_len: int = 0  # bytes this entry occupies (size byte through name)
 
     @property
     def mtime_epoch(self) -> int | None:
@@ -99,8 +100,13 @@ def _parse_dir_entry(stream: bytes, off: int) -> tuple[DirEntry, int] | None:
     Fixed Portion: 1B fixed+vendor size, 1B attrs, 4B modify short-date,
     4B data-entry-size, 1B extra-info; optional vendor portion if size > 10;
     Name Portion: 1B name size + ASCII name.
+
+    The size byte is what places the Name Portion: it always starts at
+    ``off + 1 + size``. A size of **9** means a fixed portion without the
+    extra-info byte: the "MTN" tapes write that (QIC-113 Basic-DOS otherwise;
+    captures/old-connor.twti, 1998). Their extra-info reads as 0 (readable).
     """
-    if off + 11 > len(stream):
+    if off + 10 > len(stream):
         log.debug(
             "dir entry at %d: fixed portion runs past %d-byte stream; stopping", off, len(stream)
         )
@@ -109,15 +115,21 @@ def _parse_dir_entry(stream: bytes, off: int) -> tuple[DirEntry, int] | None:
     attrs = stream[off + 1]
     modify_date = int.from_bytes(stream[off + 2 : off + 6], "little")
     data_entry_size = int.from_bytes(stream[off + 6 : off + 10], "little")
-    extra_info = stream[off + 10]
+    if fixed_vendor_size < 10:
+        # No extra-info byte (size 9): byte off+10 is already the name size.
+        log.debug(
+            "dir entry at %d: fixed size %d < 10; no extra-info byte (MTN-style), reading 0",
+            off,
+            fixed_vendor_size,
+        )
+        extra_info = 0
+    else:
+        extra_info = stream[off + 10]
 
-    # Fixed portion is 11 bytes; if fixed+vendor size > 10 there is a vendor blob
-    # following the fixed portion. The size counts from the start of the entry,
-    # excluding the size byte itself, so vendor bytes = (fixed_vendor_size - 10).
-    cursor = off + 11
-    if fixed_vendor_size > 10:
-        vendor_len = fixed_vendor_size - 10
-        cursor += vendor_len
+    # The size counts the fixed portion (and any vendor blob after it) excluding
+    # the size byte itself: 10 for the spec's fixed portion, more with a vendor
+    # blob, 9 without extra-info. The Name Portion follows all of it.
+    cursor = off + 1 + fixed_vendor_size
 
     if cursor >= len(stream):
         log.debug(
@@ -143,6 +155,7 @@ def _parse_dir_entry(stream: bytes, off: int) -> tuple[DirEntry, int] | None:
         last_in_dir=bool(attrs & ATTR_LAST_IN_DIR),
         last_in_table=bool(attrs & ATTR_LAST_IN_TABLE),
         unreadable=(extra_info & 0x3F) == EXTRA_UNREADABLE,
+        entry_len=cursor - off,
     )
     return entry, cursor
 
@@ -170,6 +183,16 @@ def _parse_directory_section(stream: bytes) -> tuple[list[DirEntry], int]:
     off = 0
     log.debug("directory: parsing section from %d-byte stream", len(stream))
     while off < len(stream):
+        if stream[off] == 0:
+            # A size byte of 0 is no entry at all: zero padding after the last
+            # one. MTN tapes end their directory that way, without setting
+            # last-in-table, and pad the section to a whole number of segments.
+            log.debug(
+                "directory: zero size byte at %d (padding); section ends with %d entries",
+                off,
+                len(entries),
+            )
+            break
         parsed = _parse_dir_entry(stream, off)
         if parsed is None:
             log.debug(
@@ -186,13 +209,20 @@ def _parse_directory_section(stream: bytes) -> tuple[list[DirEntry], int]:
 
 
 def _build_tree(entries: list[DirEntry]) -> list[_TreeNode]:
-    """Reconstruct the directory tree from breadth-first-preorder dir entries.
+    """Reconstruct the directory tree from the directory table's entry order.
 
-    The QIC-113 ordering is: the entries of one directory level appear
-    consecutively, terminated by ``last_in_dir``; subdirectories are then
-    expanded left->right in the same order. We process levels as a queue: each
-    subdirectory node, when dequeued, consumes the next run of entries (up to and
-    including the next ``last_in_dir``) as its children, building full paths.
+    QIC-113 Rev G §7.1.4: each directory *level* (all of its entries) appears
+    as one run ending in ``last_in_dir``; after a level come its subdirectories'
+    levels, **each fully expanded, left to right, before the next sibling**.
+    The spec calls this "breadth-first, preorder", but its worked example
+    (ROOT, COMEXE, STUFF, LANGUAGE, APL, C, BASIC, TEXT) is depth-first over
+    levels, and so are real tapes (old-connor's data section follows the same
+    order). This used to expand levels with a queue, which mis-parents every
+    entry below the first two levels.
+
+    An **empty directory has no level** at all: its entry's Data Entry size is
+    non-zero (the size of a data header) where a non-empty one's is 0 (§7.1.3),
+    so it consumes no run. Missing that shifts every later level by one.
     """
     pos = 0
 
@@ -208,14 +238,29 @@ def _build_tree(entries: list[DirEntry]) -> list[_TreeNode]:
                 break
         return nodes
 
-    # Root level first.
+    n_empty = 0
+
+    def expand(nodes: list[_TreeNode]) -> None:
+        nonlocal n_empty
+        for node in nodes:
+            if not node.entry.is_subdir:
+                continue
+            if node.entry.data_entry_size != 0:
+                n_empty += 1  # an empty directory: no level follows for it
+                continue
+            if pos >= len(entries):
+                log.debug("tree: directory %r has no level left in the table", node.path)
+                continue
+            node.children = consume_run(node.path)
+            expand(node.children)
+
     roots = consume_run("")
-    # Breadth-first expansion of subdirectories.
-    queue = [n for n in roots if n.entry.is_subdir]
-    while queue:
-        node = queue.pop(0)
-        node.children = consume_run(node.path)
-        queue.extend(c for c in node.children if c.entry.is_subdir)
+    expand(roots)
+    if pos < len(entries):
+        log.debug(
+            "tree: %d of %d entries left after the last level", len(entries) - pos, len(entries)
+        )
+    log.debug("tree: %d entries, %d empty directories", pos, n_empty)
     return roots
 
 
@@ -237,6 +282,9 @@ class DataEntry:
     path: str
     data: bytes
     dir_entry: DirEntry
+    # Where ``data`` starts in the stream that was walked, so a caller holding
+    # the volume's hole map can tell which files lost bytes. None = unknown.
+    offset: int | None = None
 
 
 def _parse_path_entry(stream: bytes, off: int) -> tuple[str, int] | None:
@@ -252,11 +300,50 @@ def _parse_path_entry(stream: bytes, off: int) -> tuple[str, int] | None:
     return "/".join(parts), off
 
 
+# QIC-113 Rev G §2.5: a Data Entry size that was not known when the entry was
+# written (the copy in the data section can precede the end of the file).
+_SIZE_UNKNOWN = 0xFFFFFFFF
+
+
+def _plausible_entry(stream: bytes, sig_at: int, entry: DirEntry, data_len: int | None) -> bool:
+    """Is the Data Entry at ``sig_at`` real, or the signature bytes inside file data?
+
+    The 4-byte signature can occur in file contents (old-connor's has one in a
+    bitmap); trusting it there reads a binary "name" and a multi-GB size, and
+    the walk jumps past every real entry behind it. A real entry has a sane
+    size byte (9 = MTN, 10 = spec, more = vendor blob), a printable name, and
+    a data length that is not negative (``None`` = unknown, checked later).
+    """
+    size_byte = stream[sig_at + 4]
+    return (
+        9 <= size_byte <= 64
+        and 0 < len(entry.name)
+        and all(0x20 <= ord(c) < 0x7F for c in entry.name)
+        and (data_len is None or data_len >= 0)
+    )
+
+
 def _parse_basic_data_section(stream: bytes, start: int) -> list[DataEntry]:
-    """Walk ``0x33CC33CC``-anchored Data Entries from ``start`` (Basic-DOS)."""
+    """Walk ``0x33CC33CC``-anchored Data Entries from ``start`` (Basic-DOS).
+
+    Per QIC-113 Rev G §7.1.3 / §7.2 (the "MTN" tapes are the first real
+    Basic-DOS volumes this has met, and they follow the spec):
+
+    * the Data Entry **size counts the data header too** -- signature,
+      directory-entry copy and path entry -- plus the file's bytes; a size of
+      0xFFFFFFFF means unknown, and the data then runs to the next signature;
+    * the **Path Entry is the directory** the item is in (empty for the root);
+      the item's own name comes from the directory-entry copy;
+    * **empty directories** appear here as a header with no data.
+
+    Implausible signature hits (see :func:`_plausible_entry`) are skipped and
+    the search resumes one byte later, so a false match costs nothing.
+    Returned paths are full paths (directory + name).
+    """
     entries: list[DataEntry] = []
     off = start
     n = len(stream)
+    n_false = 0  # false signature hits: counted, logged once after the walk
     log.debug("basic data: walking data entries from %d of %d bytes", start, n)
     while off < n:
         sig_at = stream.find(SIG_DATA_ENTRY, off)
@@ -273,13 +360,43 @@ def _parse_basic_data_section(stream: bytes, start: int) -> list[DataEntry]:
         if path_parsed is None:
             log.debug("basic data: no path entry for %r at %d; stopping", dir_entry.name, cursor)
             break
-        path, cursor = path_parsed
-        size = dir_entry.data_entry_size
-        data = stream[cursor : cursor + size]
-        cursor += size
-        entries.append(DataEntry(path=path, data=data, dir_entry=dir_entry))
-        off = cursor
-    log.debug("basic data: %d data entries", len(entries))
+        dir_path, cursor = path_parsed
+        header_len = cursor - sig_at
+        if dir_entry.data_entry_size == _SIZE_UNKNOWN:
+            data_len = None
+        elif dir_entry.is_subdir:
+            data_len = 0  # an empty directory: data header only
+        else:
+            data_len = dir_entry.data_entry_size - header_len
+        if not _plausible_entry(stream, sig_at, dir_entry, data_len):
+            n_false += 1
+            off = sig_at + 1
+            continue
+        if data_len is None:
+            nxt = stream.find(SIG_DATA_ENTRY, cursor)
+            data_len = (nxt if nxt >= 0 else n) - cursor
+            log.debug(
+                "basic data: %r size unknown (0xFFFFFFFF); taking %d bytes to the next signature",
+                dir_entry.name,
+                data_len,
+            )
+        if cursor + data_len > n:
+            log.debug(
+                "basic data: %r wants %d bytes at %d, stream has %d; truncating",
+                dir_entry.name,
+                data_len,
+                cursor,
+                n,
+            )
+            data_len = n - cursor
+        path = f"{dir_path}/{dir_entry.name}" if dir_path else dir_entry.name
+        if dir_entry.is_subdir:
+            log.debug("basic data: empty directory %r (header only)", path)
+        else:
+            data = stream[cursor : cursor + data_len]
+            entries.append(DataEntry(path=path, data=data, dir_entry=dir_entry, offset=cursor))
+        off = cursor + data_len
+    log.debug("basic data: %d data entries, %d false signature hits skipped", len(entries), n_false)
     return entries
 
 
@@ -428,12 +545,27 @@ def maybe_decompress(stream: bytes, vtbl: VtblEntry) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+# A Link Section is 'LTLT', a media sequence number and the media ending
+# offsets (QIC-113 Rev G §7, layout summary): a few dozen bytes. Anything
+# further from the end than this is the four letters inside a file.
+_LINK_SECTION_MAX = 1024
+
+
 def _strip_link_subsection(stream: bytes) -> bytes:
-    """Recognize and drop a trailing multi-cartridge ``LTLT`` sub-section."""
-    idx = stream.find(SIG_LTLT)
+    """Recognize and drop a trailing multi-cartridge ``LTLT`` sub-section.
+
+    Only an ``LTLT`` near the end of the volume (ignoring zero padding) counts.
+    This used to cut at the *first* ``LTLT`` anywhere, and old-connor's volume
+    has those bytes in a file 46 MB in: a third of the volume vanished.
+    """
+    end = len(stream.rstrip(b"\x00"))
+    idx = stream.rfind(SIG_LTLT, max(0, end - _LINK_SECTION_MAX), end)
     if idx >= 0:
         log.debug("LTLT link sub-section at %d of %d; truncating", idx, len(stream))
         return stream[:idx]
+    log.debug(
+        "no LTLT link sub-section in the last %d bytes; keeping the stream", _LINK_SECTION_MAX
+    )
     return stream
 
 
@@ -509,10 +641,50 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
                 data=de.data,
                 is_dir=False,
                 unreadable_at_backup=meta.unreadable,
+                offset=de.offset,
             )
         )
 
+    # Files the directory lists but whose data entry was never found -- its
+    # header fell in a lost segment. Keep them, marked lost, so a listing or a
+    # tar still shows every file the backup had (Basic-DOS only: the extended
+    # walk here is framing-level, see _parse_extended_data_section).
+    if not extended:
+        found = {de.path for de in data_entries}
+        n_lost = 0
+        for node in flat:
+            if node.entry.is_subdir or node.path in found:
+                continue
+            n_lost += 1
+            fileset.files.append(
+                FileEntry(
+                    path=node.path,
+                    size=_file_bytes(node.entry, node.path),
+                    attrs=node.entry.attrs,
+                    mtime=node.entry.mtime_epoch,
+                    is_dir=False,
+                    unreadable_at_backup=node.entry.unreadable,
+                    lost=True,
+                )
+            )
+        log.debug("extract: %d directory files have no data entry; listed as lost", n_lost)
+
     return fileset
+
+
+def _file_bytes(entry: DirEntry, path: str) -> int:
+    """A file's byte count from its directory entry, whose size includes the data header.
+
+    QIC-113 Rev G §7.1.3: header = signature (4) + the directory entry copy
+    (size byte + fixed/vendor + name size byte + name) + the path entry (size
+    byte + directory path, separators as NULs: same length as with '/').
+    """
+    if entry.data_entry_size == _SIZE_UNKNOWN:
+        log.debug("%r: size unknown (0xFFFFFFFF); reporting 0 bytes", path)
+        return 0
+    directory = path.rpartition("/")[0]
+    header = 4 + entry.entry_len + 1 + len(directory)
+    return max(0, entry.data_entry_size - header)
 
 
 def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:

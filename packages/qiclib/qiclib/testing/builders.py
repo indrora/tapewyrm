@@ -217,8 +217,16 @@ def build_dir_entry(
 
 
 def build_data_entry(dir_entry: bytes, path: str, data: bytes) -> bytes:
-    """Build a Basic-DOS Data Entry: signature + dir entry + path entry + data."""
+    """Build a Basic-DOS Data Entry: signature + dir entry + path entry + data.
+
+    QIC-113 Rev G §7.2: ``path`` is the **directory** the item is in ("" for
+    the root, "a/b" for nested; written null-separated), and the copy's Data
+    Entry size is rewritten to header + data, as the spec defines it.
+    """
     sig = b"\xcc\x33\xcc\x33"
-    path_b = path.encode("ascii")
+    path_b = path.replace("/", "\x00").encode("ascii")
     path_entry = bytes([len(path_b)]) + path_b
-    return sig + dir_entry + path_entry + data
+    header_len = len(sig) + len(dir_entry) + len(path_entry)
+    copy = bytearray(dir_entry)
+    struct.pack_into("<I", copy, 6, header_len + len(data))
+    return sig + bytes(copy) + path_entry + data

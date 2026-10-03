@@ -40,8 +40,9 @@ def test_basic_dos_directory_tree_and_files():
     # file1.txt (root) and file2.txt (subdir).
     de_file1_copy = build_dir_entry("file1.txt", attrs=ATTR_READ, data_entry_size=len(file1_data))
     de_file2_copy = build_dir_entry("file2.txt", attrs=ATTR_READ, data_entry_size=len(file2_data))
-    data_section = build_data_entry(de_file1_copy, "file1.txt", file1_data) + build_data_entry(
-        de_file2_copy, "subdir/file2.txt", file2_data
+    # Path Entries name the directory (QIC-113 §7.2.2): root = "".
+    data_section = build_data_entry(de_file1_copy, "", file1_data) + build_data_entry(
+        de_file2_copy, "subdir", file2_data
     )
 
     stream = directory_section + data_section
@@ -67,7 +68,7 @@ def test_data_entry_signature_resync():
     )
     directory_section = de
     de_copy = build_dir_entry("a.txt", attrs=ATTR_READ, data_entry_size=len(fdata))
-    data_section = b"\x99\x88\x77garbage" + build_data_entry(de_copy, "a.txt", fdata)
+    data_section = b"\x99\x88\x77garbage" + build_data_entry(de_copy, "", fdata)
 
     stream = directory_section + data_section
     vtbl = _vtbl(description="C:")
@@ -85,7 +86,7 @@ def test_unreadable_at_backup_flag():
         extra_info=2,  # bits 0..5 == 2 => unreadable-at-backup
     )
     de_copy = build_dir_entry("bad.txt", attrs=ATTR_READ, data_entry_size=len(fdata), extra_info=2)
-    stream = de + build_data_entry(de_copy, "bad.txt", fdata)
+    stream = de + build_data_entry(de_copy, "", fdata)
     fileset = extract(stream, _vtbl())
     f = next(f for f in fileset.files if f.path == "bad.txt")
     assert f.unreadable_at_backup is True
@@ -99,13 +100,68 @@ def test_ltlt_subsection_skipped():
     de_copy = build_dir_entry("f.txt", attrs=ATTR_READ, data_entry_size=len(fdata))
     stream = (
         de
-        + build_data_entry(de_copy, "f.txt", fdata)
+        + build_data_entry(de_copy, "", fdata)
         + b"LTLT"
         + b"\x01\x00\x00\x00multi-cartridge-junk"
     )
     fileset = extract(stream, _vtbl())
     by_path = {f.path: f for f in fileset.files}
     assert by_path["f.txt"].data == fdata
+
+
+def test_ltlt_inside_file_data_is_not_a_link_section():
+    """Only an LTLT near the end is the Link Section; one inside a file is data."""
+    fdata = b"before LTLT after" + b"x" * 2000
+    de = build_dir_entry(
+        "f.txt", attrs=ATTR_READ | ATTR_LAST_IN_DIR | ATTR_LAST_IN_TABLE, data_entry_size=len(fdata)
+    )
+    de_copy = build_dir_entry("f.txt", attrs=ATTR_READ, data_entry_size=len(fdata))
+    stream = de + build_data_entry(de_copy, "", fdata)
+    by_path = {f.path: f for f in extract(stream, _vtbl()).files}
+    assert by_path["f.txt"].data == fdata
+
+
+def test_directory_order_follows_the_spec_example_and_skips_empty_dirs():
+    """QIC-113 Rev G §7.1.4's example tree, plus an empty directory.
+
+    ROOT: COMEXE, EMPTY (empty), TEXT; COMEXE: STUFF, LANGUAGE;
+    LANGUAGE: APL, C, BASIC. Levels are written ROOT, COMEXE, STUFF, LANGUAGE,
+    APL, C, BASIC, TEXT; EMPTY has no level (its size is a data header's, not 0).
+    """
+    from qiclib.qic113 import _build_tree, _flatten, _parse_directory_section
+
+    sub, last = ATTR_READ | ATTR_SUBDIR, ATTR_LAST_IN_DIR
+
+    def level(*names: str, end: bool = False) -> bytes:
+        out = b""
+        for k, name in enumerate(names):
+            is_dir = name.isupper()
+            attrs = sub if is_dir else ATTR_READ
+            if k == len(names) - 1:
+                attrs |= last | (ATTR_LAST_IN_TABLE if end else 0)
+            out += build_dir_entry(name, attrs=attrs, data_entry_size=30 if name == "EMPTY" else 0)
+        return out
+
+    table = (
+        level("COMEXE", "EMPTY", "TEXT", "root.txt")
+        + level("STUFF", "LANGUAGE", "make.exe")
+        + level("s.dat")
+        + level("APL", "C", "BASIC")
+        + level("a.apl")
+        + level("c.c")
+        + level("b.bas")
+        + level("t.txt", end=True)
+    )
+    entries, _ = _parse_directory_section(table)
+    paths = {n.path for n in _flatten(_build_tree(entries))}
+    assert {
+        "COMEXE/STUFF/s.dat",
+        "COMEXE/LANGUAGE/APL/a.apl",
+        "COMEXE/LANGUAGE/C/c.c",
+        "COMEXE/LANGUAGE/BASIC/b.bas",
+        "TEXT/t.txt",
+        "EMPTY",
+    } <= paths
 
 
 def test_extended_os_detection():
@@ -129,7 +185,7 @@ def test_compression_hook_passthrough_flag():
         "c.txt", attrs=ATTR_READ | ATTR_LAST_IN_DIR | ATTR_LAST_IN_TABLE, data_entry_size=len(fdata)
     )
     de_copy = build_dir_entry("c.txt", attrs=ATTR_READ, data_entry_size=len(fdata))
-    stream = de + build_data_entry(de_copy, "c.txt", fdata)
+    stream = de + build_data_entry(de_copy, "", fdata)
     vtbl = _vtbl(compressed=True)
     fileset = extract(stream, vtbl)
     assert fileset.compressed is True

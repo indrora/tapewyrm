@@ -46,7 +46,7 @@ def _qic113_volume_bytes() -> bytes:
         data_entry_size=len(fdata),
     )
     de_copy = build_dir_entry("readme.txt", attrs=ATTR_READ, data_entry_size=len(fdata))
-    return de + build_data_entry(de_copy, "readme.txt", fdata)
+    return de + build_data_entry(de_copy, "", fdata)  # path = directory (root)
 
 
 def _segment_mfm_bytes(seg_abs: int, sector_payloads: list[bytes]) -> bytes:

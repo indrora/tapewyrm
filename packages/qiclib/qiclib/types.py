@@ -76,6 +76,12 @@ class FileEntry:
     data: bytes = b""
     is_dir: bool = False
     unreadable_at_backup: bool = False
+    # Where ``data`` starts in the volume stream it came from (None = not known),
+    # so a caller with the volume's hole map can count a file's missing bytes.
+    offset: int | None = None
+    # Listed in the directory, but its data entry was never found (it fell in
+    # unrecovered tape): ``data`` is empty and ``size`` is what it should be.
+    lost: bool = False
 
 
 @dataclass

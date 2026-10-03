@@ -19,8 +19,16 @@ recovered) are still written, zero-filled, unless ``--skip-damaged`` is given.
 Either way they are listed in the damage report (``OUT.damaged.txt`` by
 default), separately from files the original backup software could not read.
 
-Supports QIC-113 extended-format volumes (as written by Colorado/HP backup
-software).
+Both QIC-113 directory formats are supported, chosen from the volume table
+entry (VTBL byte 56 and the QIC-113 signature at 58-61, which every tape
+profile reads the same way):
+
+* **Extended** (Colorado/HP backup software): ``qiclib.qic113ext``; DOS
+  attributes kept as pax ``TAPEWYRM.dos_attributes``.
+* **Basic-DOS** (e.g. the "MTN" tapes): ``qiclib.qic113``; QIC-113 attribute
+  bits kept as pax ``TAPEWYRM.qic113_attributes``. Files the directory lists
+  whose data never made it off the tape are written zero-filled (or skipped)
+  and reported as lost.
 """
 
 from __future__ import annotations
@@ -31,7 +39,9 @@ import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from qiclib import qic113
 from qiclib import qic113ext as q
+from qiclib.volume import VtblEntry, parse_vtbl_base
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twvl import Volume
 
@@ -80,16 +90,58 @@ def write_tar(
     log.info("reading volume %s...", volume_path)
     vol = Volume.load(volume_path)
     hdr = vol.header
+    result = TarResult(out=out, report=report_path)
+    vtbl = parse_vtbl_base(bytes.fromhex(hdr["vtbl"]["raw"]))
+    if qic113.is_extended_os(vtbl):
+        log.info("QIC-113 extended directory format")
+        _write_extended(vol, str(volume_path), out, result, skip_damaged, progress)
+    else:
+        log.info("QIC-113 Basic-DOS directory format")
+        _write_basic(vol, vtbl, out, result, skip_damaged, progress)
+
+    log.info("writing damage report %s...", report_path)
+    with report_path.open("w", encoding="utf-8") as rep:
+        rep.write(f"# qicsilver damage report for {volume_path}\n")
+        rep.write(f"# tape {hdr['tape_name']!r}; volume {hdr['vtbl']['description']!r}\n")
+        rep.write(f"# lost tape segments: {len(hdr['lost_segments'])} {hdr['lost_segments']}\n")
+        rep.write(
+            "# missing_bytes / size   flag   path\n"
+            "#   lost  = bytes fell in tape segments we could not recover (zero-filled)\n"
+            "#   error = the original backup software itself could not read the file (QIC-113\n"
+            "#           'file error' bit; often a locked file, sometimes a placeholder name)\n"
+        )
+        for path, missing, size, flagged in result.damaged:
+            flag = "error" if flagged and not missing else "lost"
+            rep.write(f"{missing:>10} / {size:<10} {flag:5}  {path}\n")
+
+    log.info(
+        f"wrote {out}: {result.files} files, {result.dirs} directories; "
+        f"{len(result.damaged)} damaged ({'skipped' if skip_damaged else 'zero-filled'}), "
+        f"see {report_path}"
+    )
+    return result
+
+
+def _write_extended(
+    vol: Volume,
+    vol_name: str,
+    out: Path,
+    result: TarResult,
+    skip_damaged: bool,
+    progress: Progress,
+) -> None:
+    """Extended-format volume: directory section last, at ``data_section_size``."""
+    hdr = vol.header
     data_size, dir_size = hdr["data_section_size"], hdr["dir_section_size"]
     if data_size is None or dir_size is None:
         log.debug(
             "volume %s: data_section_size %r, dir_section_size %r; refusing",
-            volume_path,
+            vol_name,
             data_size,
             dir_size,
         )
         raise ValueError(
-            f"{volume_path}: the volume table entry has no QIC-113 section sizes; not supported yet"
+            f"{vol_name}: the volume table entry has no QIC-113 section sizes; not supported yet"
         )
     log.debug("reading the directory section: %d bytes at offset %d", dir_size, data_size)
     dir_bytes, dir_missing = vol.read(data_size, dir_size)
@@ -108,7 +160,6 @@ def write_tar(
         f"{missing_total:,} of {len(vol.data):,} volume bytes missing"
     )
 
-    result = TarResult(out=out, report=report_path)
     layout = list(q.layout(entries))
     log.info("writing %s...", out)
     with (
@@ -157,24 +208,62 @@ def write_tar(
             tar.addfile(info, io.BytesIO(data))
             result.files += 1
 
-    log.info("writing damage report %s...", report_path)
-    with report_path.open("w", encoding="utf-8") as rep:
-        rep.write(f"# qicsilver damage report for {volume_path}\n")
-        rep.write(f"# tape {hdr['tape_name']!r}; volume {hdr['vtbl']['description']!r}\n")
-        rep.write(f"# lost tape segments: {len(hdr['lost_segments'])} {hdr['lost_segments']}\n")
-        rep.write(
-            "# missing_bytes / size   flag   path\n"
-            "#   lost  = bytes fell in tape segments we could not recover (zero-filled)\n"
-            "#   error = the original backup software itself could not read the file (QIC-113\n"
-            "#           'file error' bit; often a locked file, sometimes a placeholder name)\n"
-        )
-        for path, missing, size, flagged in result.damaged:
-            flag = "error" if flagged and not missing else "lost"
-            rep.write(f"{missing:>10} / {size:<10} {flag:5}  {path}\n")
 
+def _write_basic(
+    vol: Volume,
+    vtbl: VtblEntry,
+    out: Path,
+    result: TarResult,
+    skip_damaged: bool,
+    progress: Progress,
+) -> None:
+    """Basic-DOS volume: ``qiclib.qic113.extract`` lists every file, found or lost.
+
+    A found file's missing bytes come from the volume's hole map (its data
+    ``offset`` is into the same byte stream); a lost one is all missing.
+    """
+    log.debug("extracting the Basic-DOS file set (%d volume bytes)", len(vol.data))
+    fileset = qic113.extract(vol.data, vtbl)
+    missing_total = sum(b - a for a, b in vol.holes)
     log.info(
-        f"wrote {out}: {result.files} files, {result.dirs} directories; "
-        f"{len(result.damaged)} damaged ({'skipped' if skip_damaged else 'zero-filled'}), "
-        f"see {report_path}"
+        f"tape {vol.header['tape_name']!r}: {len(fileset.files)} entries "
+        f"({sum(f.lost for f in fileset.files)} lost); "
+        f"{missing_total:,} of {len(vol.data):,} volume bytes missing"
     )
-    return result
+    log.info("writing %s...", out)
+    with (
+        tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as tar,
+        progress.task("writing tar", total=len(fileset.files), unit="entries") as bar,
+    ):
+        for f in fileset.files:
+            bar.advance()
+            info = tarfile.TarInfo(f.path)
+            info.mtime = f.mtime or 0
+            info.pax_headers = {"TAPEWYRM.qic113_attributes": f"0x{f.attrs:02x}"}
+            if f.is_dir:
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                tar.addfile(info)
+                result.dirs += 1
+                continue
+            if f.lost or f.offset is None:
+                log.debug("%s: lost (no data entry); %d bytes zero-filled", f.path, f.size)
+                data, missing = bytes(f.size), f.size
+            else:
+                data, missing = vol.read(f.offset, f.size)
+            if missing or f.unreadable_at_backup:
+                log.debug(
+                    "%s: damaged (%d of %d bytes missing, unreadable at backup %s)",
+                    f.path,
+                    missing,
+                    f.size,
+                    f.unreadable_at_backup,
+                )
+                result.damaged.append((f.path, missing, f.size, f.unreadable_at_backup))
+                if skip_damaged:
+                    log.debug("%s: --skip-damaged; leaving it out", f.path)
+                    continue
+            info.size = len(data)
+            # QIC-113 attribute bit 1 is "write access allowed" (§7.1.3).
+            info.mode = 0o644 if f.attrs & qic113.ATTR_WRITE else 0o444
+            tar.addfile(info, io.BytesIO(data))
+            result.files += 1
