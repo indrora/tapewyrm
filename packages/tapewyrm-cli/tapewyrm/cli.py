@@ -79,15 +79,19 @@ class AppContext:
         port: str | None,
         profile: str | None,
         config: str | None,
+        console: Console | None = None,
     ) -> AppContext:
         """Resolve config precedence CLI -> file -> profile defaults.
 
         A value set on the CLI wins; otherwise the config file supplies it;
         otherwise the profile / built-in defaults apply.
+
+        ``console`` is the stderr console logging was already routed to; the
+        group builds it and calls ``setup_logging`` *before* this, so the
+        config/profile debug lines below show under ``-v``. ``None`` makes a
+        fresh one (tests, library callers).
         """
         file_settings: dict[str, Any] = {}
-        # Note: this runs before setup_logging(), so these debug lines only
-        # show if logging was configured by something else first.
         if config is not None:
             cfg_path = Path(config)
             if cfg_path.exists():
@@ -120,6 +124,7 @@ class AppContext:
             passes=passes,
             out_dir=Path(out_dir) if out_dir else None,
             settings=file_settings,
+            console=console if console is not None else make_console(),
         )
 
 
@@ -151,9 +156,12 @@ def cli(
     The single Tapewyrm tool: capture, decode, recover, and flash firmware.
     Does not require the ``gw`` executable.
     """
-    app = AppContext.load(port, profile, config)
+    # Logging first: AppContext.load reads the config file and drive profile,
+    # and its debug lines are exactly what -v is for when one isn't picked up.
+    console = make_console()
+    setup_logging(console, verbose, quiet)
+    app = AppContext.load(port, profile, config, console)
     app.show_progress = show_progress
-    setup_logging(app.console, verbose, quiet)
     log.debug(
         "context: port=%r profile=%r passes=%d out_dir=%s progress=%s",
         app.port,

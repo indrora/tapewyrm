@@ -288,6 +288,23 @@ def test_capture_abort_sends_control():
     cap.__exit__(None, None, None)
 
 
+def test_timed_capture_maps_transport_closed_to_link_closed():
+    # A device that drops mid-probe must surface as LinkClosed, as chunks()
+    # does, and the abort that chunks_for() promises must not mask it.
+    link, t = _good_link()
+    t.queue_response(Txn.CAPTURE, b"")
+    t.queue_stream(b"\xaa")
+    cap = link.capture(10, StopCond())
+    chunks = cap.chunks_for(60.0)
+    assert next(chunks) == b"\xaa"
+    t.close()
+    with pytest.raises(LinkClosed):
+        next(chunks)
+    # The abort was attempted (and failed on the dead transport), so the
+    # session is torn down and __exit__ has nothing left to do.
+    assert cap._aborted and cap._closed
+
+
 def test_closed_link_raises():
     link = DeviceLink(FakeTransport())
     with pytest.raises(LinkClosed):

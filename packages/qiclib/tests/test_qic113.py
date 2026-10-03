@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from qiclib.qic113 import extract, is_extended_os
 from qiclib.testing.builders import build_data_entry, build_dir_entry, build_vtbl_entry
 from qiclib.volume import VtblEntry
@@ -162,6 +164,54 @@ def test_directory_order_follows_the_spec_example_and_skips_empty_dirs():
         "TEXT/t.txt",
         "EMPTY",
     } <= paths
+
+
+@pytest.mark.parametrize("sizes_in_vtbl", [True, False], ids=["vtbl-sizes", "scan-fallback"])
+def test_directory_last_finds_segment_aligned_directory(sizes_in_vtbl):
+    """Directory-Last: the directory sits after the Segment Gap (QIC-113 Rev G §7, §7.1.1).
+
+    The stream is laid out in whole segments, as an uncompressed volume's
+    segments are: [data + zero gap][directory + zero padding]. The directory
+    must be found from the VTBL's data section size rounded up to a segment
+    and, when the VTBL has no sizes, from the end of the data-section walk --
+    not from ``len(stream) - dir_section_size`` (that lands in the padding)
+    nor at the last data entry's signature (that parses as garbage).
+    """
+    import struct
+
+    from qiclib.tape_profile import SEGMENT_DATA_BYTES
+
+    fdata = b"directory-last payload"
+    directory = build_dir_entry(
+        "sub", attrs=ATTR_READ | ATTR_SUBDIR | ATTR_LAST_IN_DIR, modify_date=0x3A000000
+    ) + build_dir_entry(
+        "f.txt",
+        attrs=ATTR_READ | ATTR_LAST_IN_DIR | ATTR_LAST_IN_TABLE,
+        data_entry_size=len(fdata),
+    )
+    data = build_data_entry(build_dir_entry("f.txt", attrs=ATTR_READ), "sub", fdata)
+    stream = (
+        data
+        + bytes(SEGMENT_DATA_BYTES - len(data))
+        + directory
+        + bytes(SEGMENT_DATA_BYTES - len(directory))
+    )
+
+    from qiclib.volume import _parse_vtbl_entry
+
+    raw = bytearray(build_vtbl_entry(start_seg=2, end_seg=3, flags=0x20, os_type=1))
+    if sizes_in_vtbl:
+        struct.pack_into("<I", raw, 92, len(directory))
+        struct.pack_into("<Q", raw, 96, len(data))
+    vtbl = _parse_vtbl_entry(bytes(raw))
+    assert vtbl.directory_last
+
+    by_path = {f.path: f for f in extract(stream, vtbl).files}
+    assert by_path["sub"].is_dir  # only the directory section lists it
+    assert by_path["sub"].mtime is not None
+    assert by_path["sub/f.txt"].data == fdata
+    assert not by_path["sub/f.txt"].lost
+    assert set(by_path) == {"sub", "sub/f.txt"}
 
 
 def test_extended_os_detection():

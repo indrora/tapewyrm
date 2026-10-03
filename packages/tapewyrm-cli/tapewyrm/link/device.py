@@ -567,17 +567,27 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         self._closed = False
         self._aborted = False
 
+    def _read(self) -> bytes:
+        """One stream read, with transport errors mapped to link errors.
+
+        Shared by :meth:`chunks` and :meth:`chunks_for` so both report a dead
+        transport the same way: ``TransportClosed`` (a subclass of
+        ``TransportError``, so it must be caught first) becomes ``LinkClosed``,
+        anything else ``LinkError``.
+        """
+        try:
+            return self._transport.read_stream()
+        except TransportClosed as exc:
+            log.debug("capture stream: transport closed: %s", exc)
+            raise LinkClosed(str(exc)) from exc
+        except TransportError as exc:
+            log.debug("capture stream read failed: %s", exc)
+            raise LinkError(f"capture stream read failed: {exc}") from exc
+
     def chunks(self) -> Iterator[bytes]:
         """Yield raw flux byte chunks until the stream is exhausted (END / abort)."""
         while not self._closed:
-            try:
-                data = self._transport.read_stream()
-            except TransportClosed as exc:
-                log.debug("capture stream: transport closed: %s", exc)
-                raise LinkClosed(str(exc)) from exc
-            except TransportError as exc:
-                log.debug("capture stream read failed: %s", exc)
-                raise LinkError(f"capture stream read failed: {exc}") from exc
+            data = self._read()
             if not data:
                 # The device drained the stream (END + NUL, then silence). Mark
                 # the session closed so __exit__ doesn't send ABORT -- which no
@@ -603,16 +613,22 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         log.debug("timed capture: streaming for %.1f s", seconds)
         try:
             while time.monotonic() < deadline:
-                try:
-                    data = self._transport.read_stream()
-                except TransportError as exc:
-                    log.debug("capture stream read failed: %s", exc)
-                    raise LinkError(f"capture stream read failed: {exc}") from exc
+                data = self._read()
                 if data:
                     yield data
-        finally:
+        except BaseException:
+            # A read failed, or the caller stopped early (GeneratorExit). Abort
+            # best-effort: on a dead link the abort fails too, and raising that
+            # here would replace the error that explains what went wrong.
+            log.debug("timed capture interrupted; aborting best-effort")
+            self._abort_best_effort()
+            raise
+        else:
+            # Deadline reached on a healthy link: a failed abort may leave the
+            # tape moving, so it is the error to report.
             log.debug("timed capture over (%.1f s requested); aborting", seconds)
             self.abort()
+        finally:
             self._closed = True
 
     def abort(self) -> None:
@@ -640,10 +656,14 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         # the device stops the tape (DESIGN.md §5.2 — stop before releasing).
         if not self._closed and not self._aborted:
             log.debug("capture session still live at teardown; aborting")
-            try:
-                self.abort()
-            except LinkError as exc:
-                # Best-effort; closing the link is the backstop. But a failed
-                # abort can leave the tape moving, so a human should hear of it.
-                log.warning("could not abort capture on teardown: %s", exc)
+            self._abort_best_effort()
         self._closed = True
+
+    def _abort_best_effort(self) -> None:
+        """Abort, logging rather than raising if it fails (teardown paths)."""
+        try:
+            self.abort()
+        except LinkError as exc:
+            # Best-effort; closing the link is the backstop. But a failed
+            # abort can leave the tape moving, so a human should hear of it.
+            log.warning("could not abort capture on teardown: %s", exc)

@@ -47,10 +47,17 @@ def _extent(offset: int, *frames: tuple[bool, bytes]) -> bytes:
     return out.ljust(SEGMENT_BYTES, b"\x00")
 
 
-def _write_image(path: Path, segments: dict[int, bytes]) -> Path:
-    count = max(segments) + 1
+def _write_image(
+    path: Path,
+    segments: dict[int, bytes],
+    overrides: dict[int, SegmentEntry] | None = None,
+) -> Path:
+    """Save a TWTI; ``overrides`` replaces the default entry (CLEAN/MISSING) per segment."""
+    overrides = overrides or {}
+    count = max([*segments, *overrides]) + 1
     entries = [
-        SegmentEntry(SegmentState.CLEAN, 0, len(segments[n])) if n in segments
+        overrides[n] if n in overrides
+        else SegmentEntry(SegmentState.CLEAN, 0, len(segments[n])) if n in segments
         else SegmentEntry(SegmentState.MISSING)
         for n in range(count)
     ]  # fmt: skip
@@ -99,3 +106,56 @@ def test_wrong_profile_size_is_refused_not_a_memory_error(tmp_path):
     # Read as Rev N, bytes 96-103 hold the size *and* "SB" of the label: ~10^18.
     with pytest.raises(ValueError, match="wrong layout"):
         extract(_mtn_image(tmp_path), tmp_path / "out", tape_profile="qic80-rev-n")
+
+
+K = 1024
+
+
+def _plain_entry(*, start_seg: int, end_seg: int, data_size: int) -> bytes:
+    """An uncompressed Rev N VTBL record with a quadword data_section_size."""
+    rec = bytearray(build_vtbl_entry(start_seg=start_seg, end_seg=end_seg, description="PLAIN"))
+    struct.pack_into("<Q", rec, 96, data_size)
+    return bytes(rec)
+
+
+def _plain_image(tmp_path: Path, *, end_seg: int = 6) -> Path:
+    """Uncompressed volume over segments 3..6 whose segments are not all 29 KB.
+
+    seg 3: CLEAN, 2 sectors excluded by the bad-sector map -> 27 KB of b"a"
+    seg 4: MISSING, 1 sector excluded                      -> 28 KB hole
+    seg 5: BAD (whole segment mapped out)                  -> contributes nothing
+    seg 6: CLEAN, full                                     -> 29 KB of b"c"
+    """
+    vtbl = build_volume_table_segment(
+        2, [_plain_entry(start_seg=3, end_seg=end_seg, data_size=(27 + 28 + 29) * K)]
+    )
+    return _write_image(
+        tmp_path / "plain.twti",
+        {
+            0: seg_mod.segment_data(build_header_segment(0)),
+            1: seg_mod.segment_data(build_header_segment(1)),
+            2: seg_mod.segment_data(vtbl),
+            3: b"a" * (27 * K),
+            6: b"c" * (29 * K),
+        },
+        {
+            3: SegmentEntry(SegmentState.CLEAN, 0, 27 * K, 0b11 << 5),
+            4: SegmentEntry(SegmentState.MISSING, 0, 0, 1 << 7),
+            5: SegmentEntry(SegmentState.BAD),
+        },
+    )
+
+
+def test_uncompressed_volume_concatenates_short_segments_in_order(tmp_path):
+    """Each segment lands after the previous one's usable bytes, not at n * 29 KB."""
+    [path] = extract(_plain_image(tmp_path), tmp_path / "out")
+    vol = Volume.load(path)
+    assert vol.data == b"a" * (27 * K) + bytes(28 * K) + b"c" * (29 * K)
+    assert vol.holes == [(27 * K, 55 * K)]
+    assert vol.header["lost_segments"] == [4]
+
+
+def test_end_seg_past_image_is_a_value_error(tmp_path):
+    """A volume running off the end of the image is refused, not an IndexError."""
+    with pytest.raises(ValueError, match="past the end"):
+        extract(_plain_image(tmp_path, end_seg=9), tmp_path / "out")

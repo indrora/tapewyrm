@@ -20,6 +20,32 @@ from qiclib import volume as volume_mod
 
 log = logging.getLogger(__name__)
 
+# A QIC-80 segment is 32 sectors, the last 3 of the non-excluded ones being
+# Reed-Solomon ECC; the rest (29 when nothing is excluded) carry data.
+_SECTORS_PER_SEGMENT = 32
+_ECC_SECTORS = 3
+_SECTOR_BYTES = 1024
+
+
+def _expected_data_len(excluded_mask: int) -> int:
+    """Bytes of data a segment holds given the sectors its bad-sector map excludes.
+
+    Used to size the hole a MISSING or UNCORRECTABLE segment leaves in an
+    uncompressed volume. ``data_len`` cannot be used for that: a MISSING
+    segment records 0, and an UNCORRECTABLE one records whatever partial data
+    survived. The bad-sector map is the one thing that fixes a segment's size
+    independently of whether it was read, so it is what the writing software
+    saw too: 32 sectors, minus the excluded ones, minus 3 for ECC.
+
+    Caveat: ``qiclib.build`` only knows the mask for segments it actually
+    read, so a MISSING segment it wrote carries mask 0 and gets a full 29 KB
+    hole. That is the best guess available (and what
+    ``volume.volume_streams`` zero-fills); a volume whose missing segment
+    really had excluded sectors will still drift by those sectors.
+    """
+    excluded = bin(excluded_mask & ((1 << _SECTORS_PER_SEGMENT) - 1)).count("1")
+    return max(0, _SECTORS_PER_SEGMENT - excluded - _ECC_SECTORS) * _SECTOR_BYTES
+
 
 def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
     d = asdict(e)
@@ -114,11 +140,16 @@ def extract(
                 )
             elif e.end_seg >= len(img.entries):
                 log.debug(
-                    "volume %d: end_seg %d is past the image's %d segments; "
-                    "extraction will fail with IndexError",
+                    "volume %d: end_seg %d is past the image's %d segments; refusing",
                     k,
                     e.end_seg,
                     len(img.entries),
+                )
+                raise ValueError(
+                    f"volume {k}: the volume table says it ends at segment {e.end_seg}, "
+                    f"past the end of the image ({len(img.entries)} segments, last is "
+                    f"{len(img.entries) - 1}); the image is truncated or the table is read "
+                    "with the wrong layout -- try another --tape-profile"
                 )
             if size == 0:
                 log.debug(
@@ -155,6 +186,12 @@ def extract(
             stream = SparseVolume(size=size)
             lost: list[int] = []
             n_bad = 0
+            # Uncompressed volumes only: where the next segment's data goes.
+            # The volume is the concatenation of each segment's usable data in
+            # order, and segments differ in length (the bad-sector map shortens
+            # some, BAD ones hold nothing), so the offset is a running sum, not
+            # (n - start_seg) * segment size.
+            pos = 0
             with progress.task(
                 f"volume {k}", total=e.end_seg + 1 - e.start_seg, unit="segments"
             ) as bar:
@@ -162,17 +199,30 @@ def extract(
                     bar.advance()
                     st = img.entries[n].state
                     if st is SegmentState.BAD:
+                        # Mapped out before the backup was written: the
+                        # software skipped it, so it takes no room in the volume.
                         log.debug("segment %d (volume %d): BAD per bad-sector map; skipping", n, k)
                         n_bad += 1
                         continue
                     if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
-                        log.debug("segment %d (volume %d): state %s; marking lost", n, k, st.name)
+                        hole = _expected_data_len(img.entries[n].excluded_mask)
+                        log.debug(
+                            "segment %d (volume %d): state %s; marking lost (%d-byte hole "
+                            "at %d if uncompressed)",
+                            n,
+                            k,
+                            st.name,
+                            hole,
+                            pos,
+                        )
                         lost.append(n)
+                        pos += hole
                         continue
                     data = img.segment(n)
                     if e.compressed is False:
-                        # Uncompressed volume: segments are laid end to end.
-                        stream.add((n - e.start_seg) * len(data), data)
+                        # Uncompressed volume: usable data laid end to end.
+                        stream.add(pos, data)
+                        pos += len(data)
                         continue
                     try:
                         ext = qic122.decode_extent(data, offset_bytes=offset_bytes)

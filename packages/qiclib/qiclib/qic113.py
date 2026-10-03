@@ -26,6 +26,7 @@ import logging
 import struct
 from dataclasses import dataclass, field
 
+from qiclib.tape_profile import SEGMENT_DATA_BYTES
 from qiclib.types import FileEntry, FileSet
 from qiclib.volume import VtblEntry, decode_short_date
 
@@ -481,8 +482,15 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
     """Detect Extended-OS vs Basic-DOS from the VTBL entry (DESIGN.md §7.5).
 
     Extended-OS if byte 56 bit 0 (vendor-specific) is set **and** the vendor
-    extension words at offsets 58/60 read 113 / 7; Basic-DOS if byte 125 == 1
-    (Format & OS Type = DOS) or otherwise.
+    extension words at offsets 58/60 read 113 / a revision; Basic-DOS otherwise.
+
+    Byte 125 (Format & OS Type) is deliberately *not* a marker either way. On
+    QIC-40/80 tapes QIC-113 Rev G §6 makes the vendor bit plus the 113
+    signature the only mark of an extended volume, and the bench tape's
+    extended volume has OS type 6 only *behind* that mark. Reading "type != 1"
+    as Extended would misroute any plain QIC-80 volume with an odd byte 125,
+    and "type == 1" changes nothing (it is the default). This used to have a
+    separate byte-125 branch returning False -- dead code, now just logged.
     """
     raw = vtbl.raw
     if len(raw) >= 62 and (vtbl.flags & 0x01):
@@ -502,10 +510,11 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
             ext1,
             ext2,
         )
-    if len(raw) >= 126 and raw[125] == 1:
-        log.debug("vtbl %r: OS type byte 125 = 1; Basic-DOS", vtbl.description)
-        return False  # explicit Basic-DOS
-    log.debug("vtbl %r: no Extended-OS marker; defaulting to Basic-DOS", vtbl.description)
+    log.debug(
+        "vtbl %r: no Extended-OS marker (OS type byte %r); Basic-DOS",
+        vtbl.description,
+        vtbl.os_type,
+    )
     return False
 
 
@@ -587,17 +596,20 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
     stream = _strip_link_subsection(stream)
 
     if vtbl.directory_last:
-        # Directory-Last: [Data Section][gap][Directory Section]. Locate the
-        # directory by subtracting Directory Section Size (rounded up to whole
-        # segments) from the end. At the framing level we scan from there.
+        # Directory-Last: [Data Section][Segment Gap][Directory Section]
+        # (QIC-113 Rev G §7); see _directory_last_offset for how it is found.
         dir_start = _directory_last_offset(stream, vtbl)
         log.debug("extract: directory-last layout, directory at %d", dir_start)
         dir_entries, _ = _parse_directory_section(stream[dir_start:])
         data_section_start = 0
+        # The data walk stops at the directory: an entry of unknown size
+        # (0xFFFFFFFF) would otherwise run on through the gap and directory.
+        data_stream = stream[:dir_start]
     else:
         log.debug("extract: directory-first layout")
         dir_entries, dir_end = _parse_directory_section(stream)
         data_section_start = dir_end
+        data_stream = stream
 
     # Build the tree (gives directory nodes + full paths) and add directories.
     log.debug("extract: building tree from %d directory entries", len(dir_entries))
@@ -619,9 +631,9 @@ def extract(stream: bytes, vtbl: VtblEntry) -> FileSet:
 
     # Walk the data section for file bytes.
     if extended:
-        data_entries = _parse_extended_data_section(stream, data_section_start)
+        data_entries = _parse_extended_data_section(data_stream, data_section_start)
     else:
-        data_entries = _parse_basic_data_section(stream, data_section_start)
+        data_entries = _parse_basic_data_section(data_stream, data_section_start)
 
     for de in data_entries:
         # Prefer the tree node's metadata if the path matches; fall back to the
@@ -687,30 +699,100 @@ def _file_bytes(entry: DirEntry, path: str) -> int:
     return max(0, entry.data_entry_size - header)
 
 
-def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:
-    """Best-effort start offset of a Directory-Last directory section.
+def _plausible_dir_entry(stream: bytes, off: int) -> bool:
+    """Does a Basic-DOS Directory Entry plausibly start at ``off``?
 
-    Exact location is ``Ending Segment - ceil(Directory Section Size / segment)``
-    in segment space (DESIGN.md §7.5); at the framing level we fall back to
-    locating the first plausible directory entry by scanning for the data-entry
-    signature's *absence* — i.e. we search backward from the end for a run that
-    parses as directory entries. As a robust default we look for the last
-    occurrence region after the data section. If the directory size is known and
-    fits, subtract it from the stream length.
+    Same test as :func:`_plausible_entry` applies to a data-entry header: a
+    sane size byte (9 = MTN, 10 = spec, more = vendor blob) and a non-empty
+    printable name. Zero gap padding fails on the size byte; a data-entry
+    signature fails too (its first byte, 0xCC, is no size byte).
     """
-    size = vtbl.dir_section_size or 0  # None for vendor-specific volumes
-    if 0 < size <= len(stream):
-        log.debug("directory-last: section size %d fits %d-byte stream", size, len(stream))
-        return len(stream) - size
+    if not 0 <= off < len(stream) or not 9 <= stream[off] <= 64:
+        return False
+    parsed = _parse_dir_entry(stream, off)
+    if parsed is None:
+        return False
+    name = parsed[0].name
+    return 0 < len(name) and all(0x20 <= ord(c) < 0x7F for c in name)
+
+
+def _round_up_to_segment(off: int) -> int:
+    """``off`` rounded up to the next whole segment of volume bytes."""
+    return -(-off // SEGMENT_DATA_BYTES) * SEGMENT_DATA_BYTES
+
+
+def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:
+    """Start offset of a Directory-Last directory section in ``stream``.
+
+    QIC-113 Rev G §7 / §8: a Directory-Last volume is
+    ``File Set Data Section + Segment Gap + File Set Directory Section``, and
+    §7.1 / §3.26 put the directory on a segment boundary. §7.1.1 locates it
+    in *segment* space, counting back from the VTBL's Ending Segment by the
+    Directory Section Size rounded up to whole segments. ``stream`` does not
+    end at the Ending Segment (the caller sizes it from the VTBL's section
+    sizes, and a truncated capture ends anywhere), so we count forward from
+    the other end instead: the data section starts at 0 and is
+    ``data_section_size`` bytes long (VTBL 96-103), and the directory is the
+    first segment boundary at or after it.
+
+    That holds for uncompressed volumes, whose segments are laid end to end
+    so the gap is really in the stream. A compressed volume's stream is built
+    from the extents' uncompressed offsets, where the gap takes no room: on
+    the bench tape ("jc", CMS, Rev F) the directory sits at exactly
+    ``data_section_size``. So both positions are candidates, the likelier one
+    first, and the first that parses as a Directory Entry wins.
+
+    The old code took ``len(stream) - dir_section_size``, which is only right
+    when the stream ends exactly at the end of the directory section, and fell
+    back to the *start* of the last data entry's signature, which parses as
+    garbage (size byte 0xCC). Without usable sizes we now walk the data
+    section (:func:`_parse_basic_data_section`, which honours each entry's
+    size) and take the end of the last data entry, then the segment boundary
+    after it.
+
+    Note: §7.1.2 also describes a 4-byte "Directory Section Ending Offset"
+    ahead of the directory; jc's directory starts straight with entries, so
+    that is only read as part of the linked-tape structure, which is not
+    supported here.
+    """
+    data_size = vtbl.data_section_size
+    candidates: list[int] = []
+    if data_size:
+        exact, aligned = data_size, _round_up_to_segment(data_size)
+        # Uncompressed: the gap is physically in the stream (see above).
+        candidates += [aligned, exact] if vtbl.compressed is False else [exact, aligned]
+        log.debug(
+            "directory-last: data section %d bytes; trying directory at %s",
+            data_size,
+            candidates,
+        )
+    else:
+        log.debug(
+            "directory-last: data section size %r unusable; walking the data section",
+            data_size,
+        )
+        walked = _parse_basic_data_section(stream, 0)
+        if walked:
+            last = walked[-1]
+            end = (last.offset or 0) + len(last.data)
+            candidates += [end, _round_up_to_segment(end)]
+            log.debug(
+                "directory-last: last data entry %r ends at %d; trying directory at %s",
+                last.path,
+                end,
+                candidates,
+            )
+        else:
+            log.debug("directory-last: no data entries found by the walk")
+    for off in candidates:
+        if _plausible_dir_entry(stream, off):
+            log.debug("directory-last: directory entry found at %d", off)
+            return off
+        log.debug("directory-last: no plausible directory entry at %d", off)
+    fallback = candidates[0] if candidates else len(stream)
     log.debug(
-        "directory-last: section size %s unusable for %d-byte stream; scanning for last data entry",
-        vtbl.dir_section_size,
+        "directory-last: no candidate parsed; assuming directory at %d of %d bytes",
+        fallback,
         len(stream),
     )
-    # Fallback: assume the directory begins right after the final data entry.
-    last_sig = stream.rfind(SIG_DATA_ENTRY)
-    if last_sig < 0:
-        log.debug("directory-last: no data entry signature; assuming directory at 0")
-        return 0
-    # Skip past the last data entry's anchor; the directory follows the gap.
-    return last_sig
+    return fallback
