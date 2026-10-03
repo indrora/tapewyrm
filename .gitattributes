@@ -1,0 +1,4 @@
+# uv writes uv.lock with LF and rewrites the whole file on every `uv add`,
+# `uv lock` and most `uv sync`s. Fighting that (the rest of the repo is CRLF)
+# just churns the lockfiles, so they are LF in the index and the checkout.
+**/uv.lock text eol=lf
