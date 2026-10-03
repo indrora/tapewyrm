@@ -1,0 +1,12 @@
+# QIC-3020-MC Rev H (docs/qic-standards/qic3020h.pdf) cover.
+# (§7.1's format code 6 mentions 1,000 ft x 0.315 in tapes, but the cover gives
+# no capacity for one, so there is no profile for it.)
+
+name = "qic3020-wide-750ft"
+description = "QIC-3020 wide, 750 ft"
+standard = "QIC-3020"
+tracks = 50
+width_in = 0.315
+length_ft = 750
+capacity_mb = 1600
+coercivity = "900 Oe"

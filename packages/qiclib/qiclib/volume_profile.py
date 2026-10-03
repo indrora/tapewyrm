@@ -1,4 +1,4 @@
-"""Tape profiles: per-tape quirks of the volume table, as data (TOML).
+"""Volume profiles: per-tape quirks of the volume table, as data (TOML).
 
 Drive profiles (``qic117.profile``) capture how a *drive* misbehaves; tape
 profiles capture how the *software that wrote a tape* laid out its volume table.
@@ -15,12 +15,12 @@ who wrote it:
 * any other vendor-specific entry: only bytes 0-56 mean anything
   (``vendor-unknown``).
 
-A profile is a TOML file in ``tapewyrm/profiles/tape/`` (or any path)::
+A profile is a TOML file in ``tapewyrm/profiles/volume/`` (or any path)::
 
     name = "mtn"
     description = "..."
 
-    [match]                      # hints for --tape-profile guess (all optional)
+    [match]                      # hints for --volume-profile guess (all optional)
     vendor_bit = false           # VTBL byte 56 bit 0
     vtbl_bytes = [[58, "4d544e"]]  # [offset, hex] that must appear in the record
     format_codes = [2]           # header format codes this software used
@@ -45,7 +45,7 @@ claims a 4.9-billion-GB volume), so the margin is usually wide.
 Scope: ``qicsilver identify`` and ``qicsilver extract`` both read volume
 tables through this (``qiclib.identify``, ``qiclib.extract``). The fixed Rev N
 / QIC-113 parser in ``qiclib.volume`` remains as the reference;
-tests/test_tape_profile.py checks that the ``qic80-rev-n`` and ``cms-qic113``
+tests/test_volume_profile.py checks that the ``qic80-rev-n`` and ``cms-qic113``
 profiles agree with it.
 """
 
@@ -67,7 +67,7 @@ from qiclib.volume import (
 
 log = logging.getLogger(__name__)
 
-PROFILES_DIR = Path(__file__).resolve().parent / "profiles" / "tape"
+PROFILES_DIR = Path(__file__).resolve().parent / "profiles" / "volume"
 GUESS = "guess"
 
 # The extended VTBL fields a profile may place. Numeric fields are little
@@ -93,8 +93,8 @@ SEGMENT_DATA_BYTES = DATA_SECTORS_PER_SEGMENT * 1024
 HINT_WEIGHT = 2
 
 
-class TapeProfileError(Exception):
-    """A tape profile could not be loaded or is malformed."""
+class VolumeProfileError(Exception):
+    """A volume profile could not be loaded or is malformed."""
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,7 @@ class FieldSpec:
 
 
 @dataclass(frozen=True)
-class TapeProfile:
+class VolumeProfile:
     name: str
     description: str = ""
     vendor_bit: bool | None = None  # [match] hint; None = no opinion
@@ -129,37 +129,37 @@ def _resolve_path(name_or_path: str) -> Path:
     """
     p = Path(name_or_path)
     if p.suffix == ".toml" or p.exists() or p.is_absolute() or len(p.parts) > 1:
-        log.debug("tape profile %r is path-like; using it as a path", name_or_path)
+        log.debug("volume profile %r is path-like; using it as a path", name_or_path)
         return p
-    log.debug("tape profile %r is a bare name; looking in %s", name_or_path, PROFILES_DIR)
+    log.debug("volume profile %r is a bare name; looking in %s", name_or_path, PROFILES_DIR)
     return PROFILES_DIR / f"{name_or_path}.toml"
 
 
-def load(name_or_path: str) -> TapeProfile:
+def load(name_or_path: str) -> VolumeProfile:
     path = _resolve_path(name_or_path)
     if not path.is_file():
-        log.debug("tape profile %s is not a file; raising", path)
+        log.debug("volume profile %s is not a file; raising", path)
         known = ", ".join(builtin_names())
-        raise TapeProfileError(f"no tape profile {name_or_path!r} (built in: {known})")
-    log.debug("reading tape profile %s", path)
+        raise VolumeProfileError(f"no volume profile {name_or_path!r} (built in: {known})")
+    log.debug("reading volume profile %s", path)
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
-        log.debug("tape profile %s: TOML error %s; raising", path, exc)
-        raise TapeProfileError(f"{path}: {exc}") from exc
+        log.debug("volume profile %s: TOML error %s; raising", path, exc)
+        raise VolumeProfileError(f"{path}: {exc}") from exc
     return _from_dict(data, path)
 
 
-def _from_dict(data: dict, path: Path) -> TapeProfile:
+def _from_dict(data: dict, path: Path) -> VolumeProfile:
     if "name" not in data:
-        log.debug("tape profile %s has no 'name' key (keys %s); raising", path, sorted(data))
-        raise TapeProfileError(f"{path}: missing 'name'")
+        log.debug("volume profile %s has no 'name' key (keys %s); raising", path, sorted(data))
+        raise VolumeProfileError(f"{path}: missing 'name'")
     match = data.get("match", {})
     fields: dict[str, FieldSpec] = {}
     for key, value in data.get("vtbl", {}).items():
         if key not in FIELD_NAMES:
-            log.debug("tape profile %s: [vtbl] key %r not a known field; raising", path, key)
-            raise TapeProfileError(
+            log.debug("volume profile %s: [vtbl] key %r not a known field; raising", path, key)
+            raise VolumeProfileError(
                 f"{path}: unknown [vtbl] field {key!r} (known: {', '.join(sorted(FIELD_NAMES))})"
             )
         offset, length = value
@@ -167,13 +167,13 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
             # Bytes 0-56 are fixed by Rev N for everyone; profiles only place
             # what comes after.
             log.debug(
-                "tape profile %s: [vtbl] %s offset %s length %s outside 57-127; raising",
+                "volume profile %s: [vtbl] %s offset %s length %s outside 57-127; raising",
                 path,
                 key,
                 offset,
                 length,
             )
-            raise TapeProfileError(f"{path}: [vtbl] {key} = {value} is outside bytes 57-127")
+            raise VolumeProfileError(f"{path}: [vtbl] {key} = {value} is outside bytes 57-127")
         fields[key] = FieldSpec(int(offset), int(length))
     vtbl_bytes = tuple(
         (int(off), bytes.fromhex(hexstr)) for off, hexstr in match.get("vtbl_bytes", [])
@@ -181,15 +181,15 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
     extent = data.get("extent", {})
     unknown = sorted(set(extent) - {"offset_bytes"})
     if unknown:
-        log.debug("tape profile %s: [extent] keys %s not known; raising", path, unknown)
-        raise TapeProfileError(f"{path}: unknown [extent] key(s) {', '.join(unknown)}")
+        log.debug("volume profile %s: [extent] keys %s not known; raising", path, unknown)
+        raise VolumeProfileError(f"{path}: unknown [extent] key(s) {', '.join(unknown)}")
     offset_bytes = extent.get("offset_bytes", 8)
     if offset_bytes not in (4, 8):
         log.debug(
-            "tape profile %s: [extent] offset_bytes %r not 4 or 8; raising", path, offset_bytes
+            "volume profile %s: [extent] offset_bytes %r not 4 or 8; raising", path, offset_bytes
         )
-        raise TapeProfileError(f"{path}: [extent] offset_bytes = {offset_bytes!r} must be 4 or 8")
-    return TapeProfile(
+        raise VolumeProfileError(f"{path}: [extent] offset_bytes = {offset_bytes!r} must be 4 or 8")
+    return VolumeProfile(
         name=str(data["name"]),
         description=str(data.get("description", "")),
         vendor_bit=match.get("vendor_bit"),
@@ -203,12 +203,12 @@ def _from_dict(data: dict, path: Path) -> TapeProfile:
 
 def builtin_names() -> list[str]:
     if not PROFILES_DIR.is_dir():
-        log.debug("profile directory %s missing; no built-in tape profiles", PROFILES_DIR)
+        log.debug("profile directory %s missing; no built-in volume profiles", PROFILES_DIR)
         return []
     return sorted(p.stem for p in PROFILES_DIR.iterdir() if p.suffix == ".toml")
 
 
-def load_builtin() -> list[TapeProfile]:
+def load_builtin() -> list[VolumeProfile]:
     return [load(name) for name in builtin_names()]
 
 
@@ -221,7 +221,7 @@ def _int(rec: bytes, spec: FieldSpec) -> int:
     return int.from_bytes(rec[spec.offset : spec.offset + spec.length], "little")
 
 
-def decode_entry(rec: bytes, profile: TapeProfile) -> VtblEntry:
+def decode_entry(rec: bytes, profile: VolumeProfile) -> VtblEntry:
     """Decode one 128-byte VTBL record using ``profile``'s field layout."""
     entry = parse_vtbl_base(rec)
     f = profile.fields
@@ -268,7 +268,7 @@ class Check:
 class Verdict:
     """One profile's reading of the whole volume table, and how believable it is."""
 
-    profile: TapeProfile
+    profile: VolumeProfile
     entries: list[VtblEntry]
     checks: list[Check]
 
@@ -285,7 +285,7 @@ def _printable(text: str) -> bool:
     return all(32 <= ord(ch) < 127 for ch in text)
 
 
-def match_checks(rec: bytes, vol: VolumeInfo, profile: TapeProfile) -> list[Check]:
+def match_checks(rec: bytes, vol: VolumeInfo, profile: VolumeProfile) -> list[Check]:
     """The profile's own ``[match]`` hints against one record."""
     checks: list[Check] = []
     if profile.vendor_bit is not None:
@@ -377,11 +377,11 @@ def entry_checks(entry: VtblEntry, vol: VolumeInfo, now: datetime | None = None)
 
 
 def evaluate(
-    records: list[bytes], vol: VolumeInfo, profile: TapeProfile, now: datetime | None = None
+    records: list[bytes], vol: VolumeInfo, profile: VolumeProfile, now: datetime | None = None
 ) -> Verdict:
     entries: list[VtblEntry] = []
     checks: list[Check] = []
-    log.debug("tape profile %s: evaluating %d VTBL records", profile.name, len(records))
+    log.debug("volume profile %s: evaluating %d VTBL records", profile.name, len(records))
     for rec in records:
         entry = decode_entry(rec, profile)
         entries.append(entry)
@@ -391,7 +391,7 @@ def evaluate(
     # score/failures walk the checks, so only pay for them when DEBUG is on.
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
-            "tape profile %s: score %d, %d of %d checks failed",
+            "volume profile %s: score %d, %d of %d checks failed",
             profile.name,
             verdict.score,
             len(verdict.failures),
@@ -403,13 +403,13 @@ def evaluate(
 def guess(
     records: list[bytes],
     vol: VolumeInfo,
-    profiles: list[TapeProfile] | None = None,
+    profiles: list[VolumeProfile] | None = None,
     now: datetime | None = None,
 ) -> list[Verdict]:
     """Every profile's verdict, best first (ties keep catalogue order)."""
     if profiles is None:
         log.debug("guess: no profiles given; loading the built-in ones")
     candidates = profiles if profiles is not None else load_builtin()
-    log.debug("guess: scoring %d tape profiles against %d records", len(candidates), len(records))
+    log.debug("guess: scoring %d volume profiles against %d records", len(candidates), len(records))
     verdicts = [evaluate(records, vol, p, now) for p in candidates]
     return sorted(verdicts, key=lambda v: v.score, reverse=True)

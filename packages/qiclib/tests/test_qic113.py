@@ -179,7 +179,7 @@ def test_directory_last_finds_segment_aligned_directory(sizes_in_vtbl):
     """
     import struct
 
-    from qiclib.tape_profile import SEGMENT_DATA_BYTES
+    from qiclib.volume_profile import SEGMENT_DATA_BYTES
 
     fdata = b"directory-last payload"
     directory = build_dir_entry(

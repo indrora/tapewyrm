@@ -1,0 +1,11 @@
+# QIC-40-MC Rev M (docs/qic-standards/qic40m.pdf): cover and §5.3 (sectors per track / 32).
+
+name = "qic40-dc2000"
+description = "QIC-40 DC2000, 205 ft"
+standard = "QIC-40"
+tracks = 20
+width_in = 0.250
+length_ft = 205
+capacity_mb = 40
+model = "DC2000"
+segments_per_track = 68  # exact: QIC-40 fixes the count

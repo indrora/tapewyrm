@@ -1,0 +1,10 @@
+# QIC-3010-MC Rev H (docs/qic-standards/qic3010h.pdf) cover.
+
+name = "qic3010-wide-1000ft"
+description = "QIC-3010 wide, 1,000 ft"
+standard = "QIC-3010"
+tracks = 50
+width_in = 0.315
+length_ft = 1000
+capacity_mb = 1100
+coercivity = "900 Oe"

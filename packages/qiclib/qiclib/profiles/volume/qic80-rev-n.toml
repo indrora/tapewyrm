@@ -2,7 +2,7 @@
 #
 # The spec layout, for software that follows it to the letter: vendor-specific
 # bit clear, every field at its Rev N offset. qiclib.volume._parse_vtbl_entry
-# (the reference parser) uses the same offsets; tests/test_tape_profile.py
+# (the reference parser) uses the same offsets; tests/test_volume_profile.py
 # keeps the two in step.
 
 name = "qic80-rev-n"

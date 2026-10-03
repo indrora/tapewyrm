@@ -1,0 +1,10 @@
+# QIC-3010-MC Rev H (docs/qic-standards/qic3010h.pdf) cover.
+
+name = "qic3010-400ft"
+description = "QIC-3010, 400 ft"
+standard = "QIC-3010"
+tracks = 40
+width_in = 0.250
+length_ft = 400
+capacity_mb = 340
+coercivity = "900 Oe"

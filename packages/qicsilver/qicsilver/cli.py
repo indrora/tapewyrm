@@ -59,17 +59,17 @@ def cli(ctx: click.Context, show_progress: bool, verbose: int, quiet: int) -> No
     ctx.obj = app
 
 
-_TAPE_PROFILE_HELP = "volume-table layout: a profile name or path, or 'guess' to try them all"
+_VOLUME_PROFILE_HELP = "volume-table layout: a profile name or path, or 'guess' to try them all"
 
 
 @cli.command()
 @click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
-@click.option("--tape-profile", default="guess", show_default=True, help=_TAPE_PROFILE_HELP)
+@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
 # Not -v/--verbose: that is the global log-level flag on `qicsilver` itself.
 @click.option("--raw", is_flag=True, help="also dump raw records and profile scoring")
 @click.pass_obj
-def identify(app: AppContext, image: Path, as_json: bool, tape_profile: str, raw: bool) -> None:
+def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, raw: bool) -> None:
     """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
 
     IMAGE is a TWTI tape image. To identify raw captures, `tw convert` them
@@ -79,12 +79,12 @@ def identify(app: AppContext, image: Path, as_json: bool, tape_profile: str, raw
     import json
 
     from qiclib.identify import format_info, identify, to_dict
-    from qiclib.tape_profile import TapeProfileError
+    from qiclib.volume_profile import VolumeProfileError
 
-    log.debug("identifying %s (tape profile %r)", image, tape_profile)
+    log.debug("identifying %s (volume profile %r)", image, volume_profile)
     try:
-        info = identify(image, tape_profile=tape_profile)
-    except (ValueError, TapeProfileError) as exc:
+        info = identify(image, volume_profile=volume_profile)
+    except (ValueError, VolumeProfileError) as exc:
         log.debug("identify failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     if as_json:
@@ -100,23 +100,23 @@ def identify(app: AppContext, image: Path, as_json: bool, tape_profile: str, raw
     "-o", "--out", "out", required=True, type=click.Path(file_okay=False, path_type=Path),
     help="directory for the volume files (vol-NN.twvl)",
 )  # fmt: skip
-@click.option("--tape-profile", default="guess", show_default=True, help=_TAPE_PROFILE_HELP)
+@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
 @click.pass_obj
-def extract(app: AppContext, image: Path, out: Path, tape_profile: str) -> None:
+def extract(app: AppContext, image: Path, out: Path, volume_profile: str) -> None:
     """TWTI tape image -> one TWVL file per backup volume.
 
-    Reads the volume table through the tape profile `qicsilver identify` would
+    Reads the volume table through the volume profile `qicsilver identify` would
     pick, decompresses QIC-122 data and lays each volume out by its QIC-113
     offsets, recording the byte ranges that were lost. Then `qicsilver tar`.
     """
     from qiclib.extract import extract as do_extract
-    from qiclib.tape_profile import TapeProfileError
+    from qiclib.volume_profile import VolumeProfileError
 
-    log.debug("extracting %s to %s (tape profile %r)", image, out, tape_profile)
+    log.debug("extracting %s to %s (volume profile %r)", image, out, volume_profile)
     try:
         with app.progress() as prog:
-            written = do_extract(image, out, tape_profile=tape_profile, progress=prog)
-    except (ValueError, TapeProfileError) as exc:
+            written = do_extract(image, out, volume_profile=volume_profile, progress=prog)
+    except (ValueError, VolumeProfileError) as exc:
         log.debug("extract failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     for path in written:

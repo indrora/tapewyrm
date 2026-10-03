@@ -149,9 +149,9 @@ def decode_extent(segment_data: bytes, *, offset_bytes: int = 8) -> Extent:
 
     ``offset_bytes`` is the width of the extent's leading uncompressed-offset
     field. QIC-113 Rev G makes it a quadword (8); some older software wrote a
-    doubleword (4) -- the "MTN" tapes do, see profiles/tape/mtn.toml. Read with
+    doubleword (4) -- the "MTN" tapes do, see profiles/volume/mtn.toml. Read with
     the wrong width, the first frame size lands inside the offset and nearly
-    every segment fails to decode. The tape profile carries the width.
+    every segment fails to decode. The volume profile carries the width.
     """
     if offset_bytes not in (4, 8):
         log.debug("extent: offset width %d not 4 or 8; raising", offset_bytes)

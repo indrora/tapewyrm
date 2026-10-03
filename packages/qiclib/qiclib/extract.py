@@ -1,6 +1,6 @@
 """`qicsilver extract`: TWTI tape image -> TWVL volume files.
 
-Reads the volume table through a tape profile, decodes QIC-122 extents and
+Reads the volume table through a volume profile, decodes QIC-122 extents and
 lays each volume out with the TWVL format from ``tapewyrm_archive.twvl``.
 """
 
@@ -15,8 +15,8 @@ from tapewyrm_archive.twti import SegmentState, TapeImage
 from tapewyrm_archive.twvl import VERSION, SparseVolume, Volume, find_holes
 
 from qiclib import qic122
-from qiclib import tape_profile as tp
 from qiclib import volume as volume_mod
+from qiclib import volume_profile as vp
 
 log = logging.getLogger(__name__)
 
@@ -77,13 +77,13 @@ def extract(
     image_path: Path,
     out_dir: Path,
     *,
-    tape_profile: str = tp.GUESS,
+    volume_profile: str = vp.GUESS,
     progress: Progress = NULL_PROGRESS,
 ) -> list[Path]:
     """Write every volume on the tape image as ``vol-NN.twvl`` in ``out_dir``.
 
-    The volume table is read through a tape profile, exactly as ``qicsilver identify``
-    reads it (``tape_profile`` is a name, a path, or ``"guess"``). Only bytes
+    The volume table is read through a volume profile, exactly as ``qicsilver identify``
+    reads it (``volume_profile`` is a name, a path, or ``"guess"``). Only bytes
     0-56 of a VTBL entry are universal: section sizes, the compression flag and
     the extent offset width differ by the software that wrote the tape, and the
     plain Rev N layout misreads them on e.g. MTN tapes -- a size taken from the
@@ -107,19 +107,19 @@ def extract(
     if vt_entry.state is SegmentState.UNCORRECTABLE:
         # Not refused (behaviour unchanged), but the table may be garbage.
         log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
-    log.debug("reading volume table from segment %d with tape profile %r", vt_seg, tape_profile)
+    log.debug("reading volume table from segment %d with volume profile %r", vt_seg, volume_profile)
     # Deferred: identify imports twti and the codec stack; keep this module light.
     from qiclib.identify import from_image
 
-    verdicts = from_image(img, tape_profile=tape_profile).verdicts
+    verdicts = from_image(img, volume_profile=volume_profile).verdicts
     if verdicts:
         best = verdicts[0]
         profile = best.profile
         vtbl = best.entries
-        log.info("volume table read with tape profile %s (score %d)", profile.name, best.score)
+        log.info("volume table read with volume profile %s (score %d)", profile.name, best.score)
         if len(verdicts) > 1 and verdicts[1].score == best.score:
             log.warning(
-                "tape profiles %s and %s fit equally well; using %s (pick one with --tape-profile)",
+                "volume profiles %s and %s fit equally well; using %s (pick one with --volume-profile)",
                 profile.name,
                 verdicts[1].profile.name,
                 profile.name,
@@ -167,7 +167,7 @@ def extract(
                     f"volume {k}: the volume table says it ends at segment {e.end_seg}, "
                     f"past the end of the image ({len(img.entries)} segments, last is "
                     f"{len(img.entries) - 1}); the image is truncated or the table is read "
-                    "with the wrong layout -- try another --tape-profile"
+                    "with the wrong layout -- try another --volume-profile"
                 )
             if size == 0:
                 log.debug(
@@ -182,10 +182,10 @@ def extract(
             # The whole volume is allocated up front (SparseVolume.read), so a
             # misread size is a MemoryError, not a bad file. Refuse anything
             # the volume's segments could not hold even at the best plausible
-            # compression ratio -- the same bound tape_profile's size check uses.
+            # compression ratio -- the same bound volume_profile's size check uses.
             span = max(0, e.end_seg - e.start_seg + 1)
-            ratio = 1 if e.compressed is False else tp.MAX_COMPRESSION_RATIO
-            max_size = span * tp.SEGMENT_DATA_BYTES * ratio
+            ratio = 1 if e.compressed is False else vp.MAX_COMPRESSION_RATIO
+            max_size = span * vp.SEGMENT_DATA_BYTES * ratio
             if size > max_size:
                 log.debug(
                     "volume %d: %d bytes > %d (%d segments x %d x %d); refusing",
@@ -193,13 +193,13 @@ def extract(
                     size,
                     max_size,
                     span,
-                    tp.SEGMENT_DATA_BYTES,
+                    vp.SEGMENT_DATA_BYTES,
                     ratio,
                 )
                 raise ValueError(
                     f"volume {k}: the volume table claims {size:,} bytes, but its {span} "
                     f"segments hold at most {max_size:,}; the table is probably read with the "
-                    "wrong layout -- try another --tape-profile"
+                    "wrong layout -- try another --volume-profile"
                 )
             # Uncompressed volumes are the segments' usable data laid end to
             # end, so their real length -- and every segment boundary -- is

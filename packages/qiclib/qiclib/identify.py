@@ -22,7 +22,7 @@ On top of the raw fields it makes two guesses:
   * **the cartridge** (:mod:`qiclib.cartridge`) from tracks and
     segments per track, cross-checked against what the drive itself reported
     when the source is a TWRF capture;
-  * **the tape profile** (:mod:`qiclib.tape_profile`): which software's
+  * **the volume profile** (:mod:`qiclib.volume_profile`): which software's
     volume-table layout fits, since only bytes 0-56 of an entry are universal.
 
 Sources, all offline:
@@ -48,11 +48,12 @@ from typing import Any
 from tapewyrm_archive import twti
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.qic117 import TAPE_TYPES, DriveConfig, TapeStatus, decode_vendor_id
+from tapewyrm_archive.types import TapeFormat
 
 from qiclib import cartridge
 from qiclib import segment as seg_mod
-from qiclib import tape_profile as tp
 from qiclib import volume as volume_mod
+from qiclib import volume_profile as vp
 from qiclib.geometry import Geometry
 from qiclib.types import RawSector, SegmentStatus
 from qiclib.volume import BadSectorMap, VolumeInfo, VtblEntry
@@ -74,15 +75,30 @@ FPR_LEN = 256  # the format parameter record is bytes 0-255 of sector 0 (Rev N �
 # 3M bench tape has byte 78 = 0x03 and bytes 144-145 = 0x0002.
 UNUSED_FPR_RANGES = ((22, 24), (78, 128), (129, 130), (134, 138), (144, 146), (234, 256))
 
+# FPR byte 4. Code 4 ("variable length") is shared by QIC-80-MC Rev N,
+# QIC-3010-MC and QIC-3020-MC, so its spec is filled in per tape by
+# _format_text; code 6 exists only in QIC-3020-MC Rev H §7.1.
 FORMAT_CODES = {
     2: "fixed format (QIC-80-MC Rev K)",
     3: "fixed format (QIC-80-MC Rev K)",
-    4: "variable length (QIC-80-MC Rev N)",
+    4: "variable length",
     5: "fixed format (QIC-80-MC Rev K)",
+    6: "more than 65535 segments (QIC-3020-MC Rev H)",
 }
 # Rev N §7.1 byte 5: "Revision M = Hex '0D', Revision L = Hex '0C', etc.,
 # Revisions prior to L = '00'." Only the values it names are named here.
+# QIC-3010-MC and QIC-3020-MC §7.1 call byte 5 "unused, set to zero".
 REVISIONS = {0x00: "before Rev L", 0x0C: "Rev L", 0x0D: "Rev M"}
+
+# Report Tape Status format bits (QIC-117) -> cartridge profile standard names.
+DRIVE_STANDARDS = {
+    TapeFormat.QIC40: "QIC-40",
+    TapeFormat.QIC80: "QIC-80",
+    TapeFormat.QIC3010: "QIC-3010",
+    TapeFormat.QIC3020: "QIC-3020",
+}
+# Standards whose §7.1 has no header revision byte (byte 5 is unused there).
+_NO_REVISION_BYTE = ("QIC-3010", "QIC-3020")
 
 
 @dataclass
@@ -93,8 +109,8 @@ class TapeInfo:
     ``corrected``, ``uncorrectable``, ``missing`` (never read) and, for images,
     ``bad`` (the bad-sector map marks the whole segment unusable).
 
-    ``verdicts`` holds every tape profile's reading of the volume table, best
-    first; with ``--tape-profile NAME`` it holds just that one. ``volumes`` is
+    ``verdicts`` holds every volume profile's reading of the volume table, best
+    first; with ``--volume-profile NAME`` it holds just that one. ``volumes`` is
     the chosen reading.
     """
 
@@ -106,10 +122,13 @@ class TapeInfo:
     vtbl_seg: int | None  # None when no volume-table segment could be found
     vtbl_state: str
     vtbl_records: list[bytes]
-    verdicts: list[tp.Verdict]
+    verdicts: list[vp.Verdict]
     cartridge: cartridge.CartridgeGuess
     drive: dict | None = None  # TWRF header of the capture, when there is one
     notes: list[str] = field(default_factory=list)
+    # The recording standard ("QIC-3020"), from the cartridge guess or, when
+    # that found nothing, from the hint it was given; None when unknown.
+    standard: str | None = None
 
     @property
     def volumes(self) -> list[VtblEntry]:
@@ -128,7 +147,7 @@ class TapeInfo:
 def identify(
     path: Path,
     *,
-    tape_profile: str = tp.GUESS,
+    volume_profile: str = vp.GUESS,
     progress: Progress = NULL_PROGRESS,
 ) -> TapeInfo:
     """Identify a tape from a TWTI image.
@@ -143,7 +162,7 @@ def identify(
             magic = f.read(len(twti.MAGIC))
         if magic == twti.MAGIC:
             log.debug("%s: TWTI magic; identifying from the image", path)
-            return from_image(twti.TapeImage.open(path), tape_profile=tape_profile)
+            return from_image(twti.TapeImage.open(path), volume_profile=volume_profile)
         log.debug("%s: magic %r != %r; refusing", path, magic, twti.MAGIC)
     else:
         log.debug("%s: not a file; refusing", path)
@@ -153,7 +172,7 @@ def identify(
 def from_sectors(
     sectors: Iterable[RawSector],
     *,
-    tape_profile: str = tp.GUESS,
+    volume_profile: str = vp.GUESS,
     drive: dict | None = None,
 ) -> TapeInfo:
     """Identify from recovered sectors: locate the header, correct the volume table.
@@ -223,12 +242,12 @@ def from_sectors(
         vtbl_state,
         vtbl_data,
         notes,
-        tape_profile,
+        volume_profile,
         drive,
     )
 
 
-def from_image(img: twti.TapeImage, *, tape_profile: str = tp.GUESS) -> TapeInfo:
+def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeInfo:
     """Identify from a TWTI image: re-read the header and volume table segments.
 
     The image header already carries the parsed format parameter record, but we
@@ -301,7 +320,7 @@ def from_image(img: twti.TapeImage, *, tape_profile: str = tp.GUESS) -> TapeInfo
         vtbl_state,
         vtbl_data,
         notes,
-        tape_profile,
+        volume_profile,
         drive,
     )
 
@@ -316,7 +335,7 @@ def _assemble(
     vtbl_state: str,
     vtbl_data: bytes | None,
     notes: list[str],
-    tape_profile: str,
+    volume_profile: str,
     drive: dict | None,
 ) -> TapeInfo:
     """The source-independent half: pick a profile, guess the cartridge, gather notes."""
@@ -324,12 +343,12 @@ def _assemble(
     log.debug("volume table: %d records", len(records))
     if vtbl_data is not None:
         notes += _extension_notes(vtbl_data)
-    if tape_profile == tp.GUESS:
+    if volume_profile == vp.GUESS:
         if not records:
-            log.debug("no volume table records; no tape profile to guess")
+            log.debug("no volume table records; no volume profile to guess")
         else:
-            log.debug("guessing tape profile from %d records", len(records))
-        verdicts = tp.guess(records, vol) if records else []
+            log.debug("guessing volume profile from %d records", len(records))
+        verdicts = vp.guess(records, vol) if records else []
         if len(verdicts) > 1 and verdicts[0].score == verdicts[1].score:
             log.debug(
                 "profiles %s and %s tie at score %d; using the first",
@@ -338,13 +357,14 @@ def _assemble(
                 verdicts[0].score,
             )
             notes.append(
-                f"tape profiles {verdicts[0].profile.name} and {verdicts[1].profile.name} "
-                "fit equally well; showing the first. Pick one with --tape-profile"
+                f"volume profiles {verdicts[0].profile.name} and {verdicts[1].profile.name} "
+                "fit equally well; showing the first. Pick one with --volume-profile"
             )
     else:
-        log.debug("loading forced tape profile %r", tape_profile)
-        verdicts = [tp.evaluate(records, vol, tp.load(tape_profile))]
-    guess = cartridge.guess(vol.tracks, vol.segments_per_track)
+        log.debug("loading forced volume profile %r", volume_profile)
+        verdicts = [vp.evaluate(records, vol, vp.load(volume_profile))]
+    hint, hint_from = _standard_hint(vol, drive)
+    guess = cartridge.guess(vol.tracks, vol.segments_per_track, hint, hint_from)
     return TapeInfo(
         vol=vol,
         bsm=bsm,
@@ -358,7 +378,36 @@ def _assemble(
         cartridge=guess,
         drive=drive,
         notes=notes,
+        standard=guess.standard or hint,
     )
+
+
+def _standard_hint(vol: VolumeInfo, drive: dict | None) -> tuple[str | None, str]:
+    """Which recording standard the tape is, from anything but its geometry.
+
+    QIC-3010 and QIC-3020 share track counts (40 / 50), and the format
+    parameter record doesn't name its standard, so the cartridge guess needs
+    help to tell them apart. Two things know, best first:
+
+      * the drive: Report Tape Status bits 0-3 are the format of the tape it
+        has loaded, kept in the TWRF header of every capture;
+      * format code 6 (tapes with more than 65535 segments), which only
+        QIC-3020-MC Rev H §7.1 defines.
+
+    The drive's data rate is *not* used: both standards allow "other speeds and
+    compatible transfer rates" (§3.4), so a rate proves nothing.
+    """
+    if drive and drive.get("tape_status") is not None:
+        fmt = TapeStatus.decode(drive["tape_status"]).format
+        if fmt in DRIVE_STANDARDS:
+            log.debug("drive tape status says %s", fmt.name)
+            return DRIVE_STANDARDS[fmt], "the drive's tape status"
+        log.debug("drive tape status format %s names no standard; no drive hint", fmt.name)
+    if vol.format_code == 6:
+        log.debug("format code 6: only QIC-3020 defines it")
+        return "QIC-3020", "format code 6"
+    log.debug("no drive report and format code %d; no standard hint", vol.format_code)
+    return None, ""
 
 
 def _header_raw(seg) -> bytes:
@@ -496,17 +545,50 @@ def _drive_line(drive: dict) -> str | None:
     return "; ".join(parts) or None
 
 
+def _format_text(info: TapeInfo) -> str:
+    """FPR byte 4 in words, citing the standard the tape was formatted to.
+
+    Code 4 means "variable length" in QIC-80-MC Rev N, QIC-3010-MC and
+    QIC-3020-MC alike. When the standard is known it is named; when it isn't,
+    every standard using this many tracks is (a 40-track tape is QIC-3010 or
+    QIC-3020, never QIC-80), and Rev N is the fallback for track counts
+    nothing catalogues.
+    """
+    code = info.vol.format_code
+    text = FORMAT_CODES.get(code, "unknown")
+    if code != 4:
+        return text
+    if info.standard in cartridge.VARIABLE_FORMATS:
+        log.debug("format code 4 under known standard %s", info.standard)
+        return f"{text} ({cartridge.SPECS[info.standard]})"
+    by_tracks = dict.fromkeys(
+        c.standard
+        for c in cartridge.catalogue()
+        if c.tracks == info.vol.tracks and c.standard in cartridge.VARIABLE_FORMATS
+    )
+    if not by_tracks:
+        log.debug("no variable standard uses %d tracks; citing QIC-80 Rev N", info.vol.tracks)
+        return f"{text} ({cartridge.SPECS['QIC-80']})"
+    return f"{text} ({' or '.join(cartridge.SPECS[std] for std in by_tracks)})"
+
+
 def format_info(info: TapeInfo, *, verbose: bool = False) -> list[str]:
     """Human-readable report, one line per string."""
     vol = info.vol
     total = vol.segments_per_track * vol.tracks
-    revision = REVISIONS.get(vol.revision, "unknown")
+    # Header byte 5 and the factory-stamp bytes are cited from the tape's own
+    # standard when we know it; 146-233 are the same offsets in all three.
+    fpr_spec = cartridge.SPECS.get(info.standard or "", cartridge.SPECS["QIC-80"])
+    if info.standard in _NO_REVISION_BYTE:
+        revision = f"unused in {fpr_spec}"
+    else:
+        revision = REVISIONS.get(vol.revision, "unknown")
     lines = [
         f"tape name     {vol.tape_name or '-'}  (named {_date(vol.name_date)})",
     ]
     if vol.manufacturer or vol.lot_code:
         lines.append(f"manufacturer  {vol.manufacturer or '-'}  (lot {vol.lot_code or '-'})")
-        lines.append("              factory pre-formatted (QIC-80-MC Rev N §7.1 bytes 146-233)")
+        lines.append(f"              factory pre-formatted ({fpr_spec} §7.1 bytes 146-233)")
     else:
         lines.append("manufacturer  - (no factory stamp: formatted by its owner)")
     lines.append(f"cartridge     {info.cartridge.describe()}")
@@ -515,7 +597,7 @@ def format_info(info: TapeInfo, *, verbose: bool = False) -> list[str]:
         if drive_line:
             lines.append(f"drive saw     {drive_line}")
     lines += [
-        f"format        code {vol.format_code}, {FORMAT_CODES.get(vol.format_code, 'unknown')}; "
+        f"format        code {vol.format_code}, {_format_text(info)}; "
         f"header revision 0x{vol.revision:02x} ({revision})",
         f"geometry      {vol.tracks} tracks x {vol.segments_per_track} segments = {total} segments; "
         f"floppy sides 0-{vol.max_fsd}, tracks 0-{vol.max_ftk}, sectors 1-{vol.max_fsc}",
@@ -534,7 +616,7 @@ def format_info(info: TapeInfo, *, verbose: bool = False) -> list[str]:
     if info.verdicts:
         best = info.verdicts[0]
         others = ", ".join(f"{v.profile.name} {v.score}" for v in info.verdicts[1:])
-        line = f"tape profile  {best.profile.name} (score {best.score})"
+        line = f"volume profile  {best.profile.name} (score {best.score})"
         lines.append(line + (f"; others: {others}" if others else ""))
     if vol.reformat_error:
         lines.append("WARNING       a re-format error lost some header fields (byte 128 = 0xFF)")
@@ -585,6 +667,18 @@ def _verbose(info: TapeInfo) -> list[str]:
     return lines
 
 
+def _cartridge_json(c: cartridge.Cartridge) -> dict[str, Any]:
+    """A cartridge profile for --json, keeping the pre-profile schema's keys.
+
+    Before cartridges were TOML profiles the model was ``name``; ``name`` stays
+    (the model) so existing --json readers keep working, beside the new
+    ``model`` and ``profile`` (the profile's own name).
+    """
+    row = asdict(c)
+    row["name"] = c.model
+    return row
+
+
 def to_dict(info: TapeInfo) -> dict[str, Any]:
     """JSON-ready form for ``qicsilver identify --json``: raw fields plus decoded values."""
     vol = asdict(info.vol)
@@ -610,13 +704,15 @@ def to_dict(info: TapeInfo) -> dict[str, Any]:
         "vtbl_state": info.vtbl_state,
         "cartridge": {
             "description": guess.describe(),
-            "catalogue": asdict(guess.cartridge) if guess.cartridge else None,
+            "catalogue": _cartridge_json(guess.cartridge) if guess.cartridge else None,
             "estimated_ft": guess.estimated_ft,
             "exact": guess.exact,
+            "standard": info.standard,
+            "alternatives": [asdict(alt) for alt in guess.alternatives],
         },
         "drive": info.drive,
-        "tape_profile": info.profile,
-        "tape_profile_scores": {v.profile.name: v.score for v in info.verdicts},
+        "volume_profile": info.profile,
+        "volume_profile_scores": {v.profile.name: v.score for v in info.verdicts},
         "volumes": volumes,
         "notes": info.notes,
     }

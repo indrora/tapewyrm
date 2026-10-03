@@ -1,0 +1,12 @@
+# QIC-40-MC Rev M (docs/qic-standards/qic40m.pdf): cover and §5.3 (sectors per track / 32).
+# The cover only states 40 MB (205 ft); this length's capacity is not in our
+# copy of the spec, so capacity_mb is 0 (unknown) rather than guessed.
+
+name = "qic40-307ft"
+description = "QIC-40, 307.5 ft"
+standard = "QIC-40"
+tracks = 20
+width_in = 0.250
+length_ft = 307.5
+capacity_mb = 0
+segments_per_track = 102  # exact: QIC-40 fixes the count

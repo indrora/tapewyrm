@@ -1,0 +1,10 @@
+# QIC-80-MC Rev N (docs/qic-standards/qic80n.pdf) cover.
+
+name = "qic80-dc2120"
+description = "QIC-80 DC2120, 307.5 ft"
+standard = "QIC-80"
+tracks = 28
+width_in = 0.250
+length_ft = 307.5
+capacity_mb = 120
+model = "DC2120"

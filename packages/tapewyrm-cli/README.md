@@ -22,7 +22,7 @@ uv run mypy tapewyrm
 | `tape/`      | geometry (coordinate algebra) + transport / capture orchestration |
 | `codec/`     | offline decode: flux → MFM → place → RS → volume → QIC-113 files  |
 | `rawflux/`   | the `RawFluxCapture` linear-track-stack container                |
-| `profiles/`  | `drive/`: per-drive `DriveProfile` TOML; `tape/`: per-tape `TapeProfile` TOML |
+| `profiles/`  | `drive/`: per-drive `DriveProfile` TOML; `tape/`: per-tape `VolumeProfile` TOML |
 
 ## CLI
 

@@ -1,0 +1,10 @@
+# QIC-80-MC Rev N (docs/qic-standards/qic80n.pdf) cover.
+
+name = "qic80-1000ft"
+description = "QIC-80, 1,000 ft"
+standard = "QIC-80"
+tracks = 28
+width_in = 0.250
+length_ft = 1000
+capacity_mb = 400
+coercivity = "550 Oe"

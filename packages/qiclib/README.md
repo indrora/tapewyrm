@@ -12,7 +12,7 @@ back.
 | `qiclib.rs`, `segment` | QIC-80 Reed-Solomon ECC, per-segment correction |
 | `qiclib.volume` | header segment, bad-sector map, volume table (QIC-80 Rev N) |
 | `qiclib.cartridge` | which cartridge a geometry implies |
-| `qiclib.tape_profile` + `profiles/tape/*.toml` | per-software volume-table layouts (Rev N, CMS, MTN, ...) |
+| `qiclib.volume_profile` + `profiles/volume/*.toml` | per-software volume-table layouts (Rev N, CMS, MTN, ...) |
 | `qiclib.qic113`, `qic113ext`, `qic122` | backup directory formats and QIC-122 decompression |
 | `qiclib.build` | sectors -> TWTI image (the layout half of `tw convert`) |
 | `qiclib.identify` | what is on a tape, from a TWTI image |

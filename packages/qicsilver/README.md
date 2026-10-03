@@ -20,7 +20,7 @@ everything here takes seconds.
 ## Commands
 
 - **identify**: cartridge, factory stamp, dates, bad sectors and the volume
-  table, read through the tape profile that fits (`--tape-profile` to force
+  table, read through the volume profile that fits (`--volume-profile` to force
   one, `--json` for machines, `--raw` for the raw records).
 - **extract**: one TWVL file per backup volume. QIC-122 is decompressed and
   each volume is laid out by its QIC-113 offsets; byte ranges in unrecovered

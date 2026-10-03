@@ -26,9 +26,9 @@ import logging
 import struct
 from dataclasses import dataclass, field
 
-from qiclib.tape_profile import SEGMENT_DATA_BYTES
 from qiclib.types import FileEntry, FileSet
 from qiclib.volume import VtblEntry, decode_short_date
+from qiclib.volume_profile import SEGMENT_DATA_BYTES
 
 log = logging.getLogger(__name__)
 

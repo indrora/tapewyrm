@@ -471,7 +471,7 @@ def parse_volume_table_data(data: bytes) -> list[VtblEntry]:
 def vtbl_records(data: bytes) -> list[bytes]:
     """The raw 128-byte ``VTBL`` records of a volume-table data area, in order.
 
-    Tape profiles (``codec.tape_profile``) decode these themselves, so this is
+    Volume profiles (``codec.volume_profile``) decode these themselves, so this is
     the one place that knows how the table is walked.
     """
     records: list[bytes] = []
@@ -507,7 +507,7 @@ def parse_vtbl_base(rec: bytes) -> VtblEntry:
     QIC-80-MC Rev N §8: bytes 0-56 are always defined, even for vendor-specific
     entries. Everything later (sizes, label, compression, OS type) is left
     ``None`` for the caller -- the built-in Rev N / QIC-113 logic below, or a
-    tape profile -- to fill in.
+    volume profile -- to fill in.
     """
     return VtblEntry(
         signature=rec[0:4],
@@ -528,9 +528,9 @@ def parse_vtbl_base(rec: bytes) -> VtblEntry:
 def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
     """Decode one 128-byte VTBL entry (DESIGN.md §7.3, §7.5).
 
-    The fixed Rev N / QIC-113 interpretation, once used by ``tw extract`` (extract now reads through tape profiles). The
-    ``qic80-rev-n`` and ``cms-qic113`` tape profiles encode the same offsets as
-    data (tests/test_tape_profile.py keeps the two in step).
+    The fixed Rev N / QIC-113 interpretation, once used by ``tw extract`` (extract now reads through volume profiles). The
+    ``qic80-rev-n`` and ``cms-qic113`` volume profiles encode the same offsets as
+    data (tests/test_volume_profile.py keeps the two in step).
     """
     entry = parse_vtbl_base(rec)
     if entry.flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:

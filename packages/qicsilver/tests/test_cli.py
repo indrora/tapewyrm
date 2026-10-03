@@ -74,7 +74,7 @@ def test_cli_text(tmp_path):
     assert "tape name     BACKUP" in result.output
 
 
-def test_cli_tape_profile_and_json(tmp_path):
+def test_cli_volume_profile_and_json(tmp_path):
     data = bench_3m.header_data()
     header = make_segment_from_sectors(
         0, 0, 0, [data[k * 1024 : (k + 1) * 1024] for k in range(29)]
@@ -84,13 +84,13 @@ def test_cli_tape_profile_and_json(tmp_path):
     result = CliRunner().invoke(cli, ["identify", "--json", str(path)])
     assert result.exit_code == 0, result.output
     doc = json.loads(result.output)
-    assert doc["tape_profile"] == "mtn"
+    assert doc["volume_profile"] == "mtn"
     assert doc["header"]["lot_code"] == "0001"
     assert doc["cartridge"]["catalogue"]["name"] == "DC2120"
     assert doc["volumes"][0]["raw_hex"].startswith("5654424c")
 
-    forced = CliRunner().invoke(cli, ["identify", "--tape-profile", "cms-qic113", str(path)])
-    assert forced.exit_code == 0 and "tape profile  cms-qic113" in forced.output
+    forced = CliRunner().invoke(cli, ["identify", "--volume-profile", "cms-qic113", str(path)])
+    assert forced.exit_code == 0 and "volume profile  cms-qic113" in forced.output
 
-    bad = CliRunner().invoke(cli, ["identify", "--tape-profile", "nope", str(path)])
-    assert bad.exit_code != 0 and "no tape profile 'nope'" in bad.output
+    bad = CliRunner().invoke(cli, ["identify", "--volume-profile", "nope", str(path)])
+    assert bad.exit_code != 0 and "no volume profile 'nope'" in bad.output

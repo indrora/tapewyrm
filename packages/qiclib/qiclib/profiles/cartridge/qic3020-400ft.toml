@@ -1,0 +1,10 @@
+# QIC-3020-MC Rev H (docs/qic-standards/qic3020h.pdf) cover.
+
+name = "qic3020-400ft"
+description = "QIC-3020, 400 ft"
+standard = "QIC-3020"
+tracks = 40
+width_in = 0.250
+length_ft = 400
+capacity_mb = 680
+coercivity = "900 Oe"

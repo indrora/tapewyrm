@@ -1,4 +1,4 @@
-"""`tw extract` (image.twvl.extract): volumes read through the tape profile.
+"""`tw extract` (image.twvl.extract): volumes read through the volume profile.
 
 The regression this pins down is captures/old-connor.twti: an MTN-written tape
 whose volume table the plain Rev N parser misreads (data size taken from the
@@ -29,7 +29,7 @@ APPENDIX_A = bytes.fromhex("20 90 88 38 1C 21 E2 5C 15 80")
 
 
 def _mtn_entry(*, start_seg: int, end_seg: int, dir_size: int, data_size: int) -> bytes:
-    """A VTBL record laid out the way profiles/tape/mtn.toml describes."""
+    """A VTBL record laid out the way profiles/volume/mtn.toml describes."""
     rec = bytearray(build_vtbl_entry(start_seg=start_seg, end_seg=end_seg, description=""))
     rec[58:61] = b"MTN"
     struct.pack_into("<I", rec, 92, dir_size)
@@ -105,7 +105,7 @@ def test_mtn_volume_extracts_with_four_byte_extent_offsets(tmp_path):
 def test_wrong_profile_size_is_refused_not_a_memory_error(tmp_path):
     # Read as Rev N, bytes 96-103 hold the size *and* "SB" of the label: ~10^18.
     with pytest.raises(ValueError, match="wrong layout"):
-        extract(_mtn_image(tmp_path), tmp_path / "out", tape_profile="qic80-rev-n")
+        extract(_mtn_image(tmp_path), tmp_path / "out", volume_profile="qic80-rev-n")
 
 
 K = 1024
@@ -185,7 +185,7 @@ def test_uncompressed_directory_last_keeps_the_gap_and_records_the_directory(tmp
             4: (b"D" * 50).ljust(SEGMENT_BYTES, b"\x00"),  # directory section
         },
     )
-    [out] = extract(path, tmp_path / "out", tape_profile="qic80-rev-n")
+    [out] = extract(path, tmp_path / "out", volume_profile="qic80-rev-n")
     vol = Volume.load(out)
     assert vol.header["directory_offset"] == SEGMENT_BYTES
     assert vol.data[:100] == b"d" * 100

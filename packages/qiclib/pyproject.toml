@@ -1,7 +1,7 @@
 [project]
 name = "qiclib"
 version = "0.1.0"
-description = "QIC tape layout and backup formats: QIC-80 segments/ECC/header, QIC-113, QIC-122, tape profiles"
+description = "QIC tape layout and backup formats: QIC-80 segments/ECC/header, QIC-113, QIC-122, volume profiles"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Unlicense"
@@ -26,7 +26,7 @@ tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# qiclib/profiles/tape/*.toml ship inside the package (hatch includes package data).
+# qiclib/profiles/volume/*.toml ship inside the package (hatch includes package data).
 [tool.hatch.build.targets.wheel]
 packages = ["qiclib"]
 

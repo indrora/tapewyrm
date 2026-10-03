@@ -1,0 +1,23 @@
+# Verbatim MC3020EX "QIC-Extra": an extended-length QIC-3020 cartridge whose
+# shell sticks out past a standard minicartridge. The bench tape (2026-10-03,
+# factory formatted 1999-11-21, stamp "FMTJ") has a 40 x 1475 header; the
+# QIC-3020-MC Rev H §5.4.1 minimum puts 1475 segments/track at ~1,030 ft, so
+# it is the cover's 1,000 ft x 0.250 in class, and capacity_mb is that cover
+# entry (1.7 GB). The label's "1.6G" is the same tape counted in binary:
+# (59000 - 98 bad segments) x 29 KB = 1.75 GB = 1.63 GiB.
+#
+# It is the only 1,000 ft x 0.250 in QIC-3020 profile, so every tape of that
+# class is reported as "MC3020EX class".
+
+name = "qic-extra"
+description = "Verbatim MC3020EX QIC-Extra, QIC-3020 1,000 ft"
+standard = "QIC-3020"
+tracks = 40
+width_in = 0.250
+length_ft = 1000
+capacity_mb = 1700
+coercivity = "900 Oe"
+model = "MC3020EX"
+vendor = "Verbatim"
+label = "QIC-Extra"
+label_capacity = "1.6 GB"

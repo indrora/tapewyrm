@@ -10,7 +10,7 @@ from tapewyrm_archive.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, Ta
 
 from qiclib import identify as ident
 from qiclib import segment as seg_mod
-from qiclib.testing import bench_3m
+from qiclib.testing import bench_3m, bench_qicextra
 from qiclib.testing.builders import (
     build_header_segment,
     build_volume_table_segment,
@@ -171,7 +171,7 @@ def test_image_detected_by_magic_not_suffix(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The 3M DC2120 bench tape: factory stamp, cartridge, tape profile
+# The 3M DC2120 bench tape: factory stamp, cartridge, volume profile
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +189,7 @@ def test_3m_tape_end_to_end():
     assert info.vol.manufacturer == "3M     QIC80-I IO80Fi@68IPS V1.11.22A ID5"
     assert info.vol.lot_code == "0001"
     assert info.cartridge.cartridge is not None
-    assert info.cartridge.cartridge.name == "DC2120"
+    assert info.cartridge.cartridge.model == "DC2120"
     assert info.profile == "mtn"
     assert info.volumes[0].source_label == "DISK1_VOL1"
     assert (len(info.bsm.bad_lsns), info.notes) == (2, [])
@@ -199,7 +199,7 @@ def test_3m_tape_end_to_end():
 
 
 def test_forced_profile_is_used_even_when_it_scores_badly():
-    info = ident.from_sectors(_3m_sectors(), tape_profile="qic80-rev-n")
+    info = ident.from_sectors(_3m_sectors(), volume_profile="qic80-rev-n")
     assert info.profile == "qic80-rev-n" and len(info.verdicts) == 1
     assert info.verdicts[0].failures
 
@@ -223,3 +223,53 @@ def test_drive_reports_are_shown():
     info = ident.from_sectors(_3m_sectors(), drive=drive)
     line = next(x for x in ident.format_info(info) if x.startswith("drive saw"))
     assert "307.5 ft" in line and "extra-length" in line
+
+
+# ---------------------------------------------------------------------------
+# Verbatim MC3020EX "QIC-Extra" bench tape (QIC-3020)
+# ---------------------------------------------------------------------------
+
+
+def _qicextra_sectors() -> list[RawSector]:
+    data = bench_qicextra.header_data()
+    header = make_segment_from_sectors(
+        0, 0, 0, [data[k * 1024 : (k + 1) * 1024] for k in range(29)]
+    )
+    vtbl = make_segment_from_sectors(0, 2, 2, [bytes(1024)])
+    return _sectors(header, vtbl)
+
+
+def test_qicextra_tape_end_to_end():
+    """The bench QIC-Extra header plus its drive reports: MC3020EX, cited as QIC-3020."""
+    info = ident.from_sectors(_qicextra_sectors(), drive=bench_qicextra.DRIVE)
+    assert (info.vol.tracks, info.vol.segments_per_track) == (40, 1475)
+    assert info.vol.manufacturer == "FMTJ"
+    assert (len(info.bsm.bad_lsns), len(info.bsm.bad_segments)) == (35, 98)
+    assert info.standard == "QIC-3020"
+    assert info.cartridge.cartridge is not None
+    assert info.cartridge.cartridge.model == "MC3020EX"
+    lines = ident.format_info(info)
+    line = next(x for x in lines if x.startswith("cartridge"))
+    assert "QIC-3020, 1,000 ft x 0.250 in (MC3020EX class, Verbatim QIC-Extra)" in line
+    assert "1.7 GB native" in line and "per the drive's tape status" in line
+    line = next(x for x in lines if x.startswith("format"))
+    assert "variable length (QIC-3020-MC Rev H)" in line and "QIC-80" not in line
+    assert "unused in QIC-3020-MC Rev H" in line
+    assert any("QIC-3020-MC Rev H §7.1 bytes 146-233" in x for x in lines)
+
+
+def test_qicextra_without_drive_reports():
+    """No drive: geometry alone still lands on QIC-3020, as the only fit."""
+    info = ident.from_sectors(_qicextra_sectors())
+    assert info.standard == "QIC-3020"
+    assert info.cartridge.cartridge is not None
+    assert "only QIC-3020 fits" in info.cartridge.describe()
+
+
+def test_unknown_40_track_format_names_both_standards():
+    """40 tracks, no fit, no drive: code 4 is QIC-3010 or QIC-3020, never Rev N."""
+    seg = _header(0, tracks=40, segments_per_track=100)
+    info = ident.from_sectors(_sectors(seg, _header(1), _vtbl()))
+    assert info.standard is None
+    line = next(x for x in ident.format_info(info) if x.startswith("format"))
+    assert "(QIC-3010-MC Rev H or QIC-3020-MC Rev H)" in line

@@ -266,7 +266,7 @@ tapewyrm/
       colorado.toml
       iomega.toml
       conner.toml
-    tape/             # per-tape quirks: VTBL layout, BSM layout (`qicsilver identify --tape-profile`)
+    tape/             # per-tape quirks: VTBL layout, BSM layout (`qicsilver identify --volume-profile`)
   cli.py              # probe / capture / decode / recover / replay
 tests/
   fixtures/           # golden RawFluxCaptures, recorded transaction logs
