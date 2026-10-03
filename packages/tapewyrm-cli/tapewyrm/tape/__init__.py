@@ -1,1 +1,1 @@
-"""Tape layer: geometry (coordinate algebra) + transport/capture orchestration."""
+"""Tape layer: whole-track dumps, the flux probe and capture orchestration."""

@@ -1,6 +1,6 @@
 """QIC-113 Rev G section 8: extended-OS volumes (directory + data entries).
 
-Written from docs/qic113g.pdf and checked against the bench tape "jc" (a CMS
+Written from docs/qic-standards/qic113g.pdf and checked against the bench tape "jc" (a CMS
 backup of a Windows 95 C: drive, QIC-113 Rev F, 5,474 entries).
 
 Layout (section 8)::

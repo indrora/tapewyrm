@@ -11,7 +11,9 @@ How to read the result:
 
 * No transitions at all while the tape moved: nothing reached RDATA. Either the
   read channel is dead, or this drive gates RDATA off during high-speed
-  motion. Run the same probe on a known-good drive (and tape) to tell which.
+  motion. On the bench both Colorados (a known-good Jumbo 350 and the 1400)
+  gave zero transitions under Physical Forward, so drives do gate it: only
+  ``--motion logical``, which needs a referenced tape, tests the read channel.
 * Transitions with sharp histogram peaks: a recorded signal. MFM gives peaks at
   2, 3 and 4 half-bitcells; at Physical (high) speed they sit closer together
   than at the drive's data rate, so sectors won't decode, but the shape is

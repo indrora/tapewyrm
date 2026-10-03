@@ -1,9 +1,11 @@
 """Regression tests on REAL bytes read off the bench tape (2026-09-30).
 
 Colorado Jumbo 350, QIC-80 cartridge "jc", track 0, capture
-captures/2026-09-30-colorado350-track0-cap1.raw (sha256 8de4ffd0...); every
-sector decoded with good ID + data CRCs. Field meanings per QIC-80-MC Rev N
-(docs/qic80n.pdf) sections 7.1 and 8.
+captures/2026-09-30-colorado350-track0-cap1.raw (sha256 8de4ffd0...; a
+pre-TWRF stream that current tools no longer read -- the bytes below are
+what it decoded to); every sector decoded with good ID + data CRCs. Field
+meanings per QIC-80-MC Rev N (docs/qic-standards/qic80n.pdf) sections 7.1
+and 8.
 """
 
 from qiclib.testing.builders import make_segment_from_sectors

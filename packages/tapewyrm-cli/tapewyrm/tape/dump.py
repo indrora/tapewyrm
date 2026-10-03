@@ -1,8 +1,8 @@
 """`tw dump`: whole tape tracks -> TWRF captures, gently.
 
 Step one of ``tw dump -> tw convert -> qicsilver extract``. One Logical Forward pass
-per track, streamed straight to disk as a TWRF container (``track-NN.twrf``:
-:mod:`tapewyrm.rawflux.container`). Its header records everything needed to
+per track, streamed straight to disk as a TWRF capture (``track-NN.twrf``:
+:mod:`tapewyrm_archive.twrf`, TWS-1). Its header records everything needed to
 decode the flux later without guessing -- above all the bit rate, taken from
 Report Drive Configuration (the rate the drive uses for Logical Forward with
 this cartridge, QIC-117 Rev J (8)) -- plus the drive's raw status,
@@ -11,7 +11,7 @@ commits that produced it.
 
 Dumping only gets transitions off the tape; judging the data is ``tw
 convert``'s job. What a dump does check after each pass is cheap and needs no
-decoding (:func:`stream_health`): did the pass end at logical EOT, does the
+decoding (:func:`check_pass`): did the pass end at logical EOT, does the
 stream match the firmware's END accounting, and how many segments did the drive
 find? During Logical Forward the drive pulses INDEX once at the start of every
 segment it finds (Rev J (10)), and nothing else: on the bench, 207 pulses for a

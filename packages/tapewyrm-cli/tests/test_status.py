@@ -1,4 +1,4 @@
-"""Rev J error names, reset classification, vendor ID and tape-type decoding."""
+"""Rev J error names and which error codes are benign resets."""
 
 from tapewyrm.qic117.status import BENIGN_ERRORS, classify_error, error_name
 

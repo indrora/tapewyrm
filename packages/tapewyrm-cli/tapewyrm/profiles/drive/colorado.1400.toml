@@ -12,9 +12,11 @@
 #     -> 1 Mbps, the QIC-3010 rate.
 #   * A QIC-80 tape (jc) is recorded at 500 kbps. Rev J says the rate bits
 #     "may change upon insertion of a cartridge or after a Select Rate
-#     command", so reading QIC-80 may need `tw drive rate 500` (command 27,
-#     N = 2) after the tape is referenced. TODO(bench): confirm whether the
-#     drive picks 500 kbps itself once a QIC-80 tape is referenced.
+#     command". On the bench this 1400 never referenced jc (Seek Load Point
+#     ends Ready at BOT, tape format UNKNOWN), and command 27 accepts
+#     `format qic3010` and `rate 1000` but refuses `format qic80` and
+#     `rate 500` with error 31 (Rate or Format Selection Error). So, so far,
+#     this drive cannot read QIC-80 tapes; dump them on a 350.
 
 name = "colorado.1400"
 bit_order = "lsb"                 # QIC-117 reports clock LSB-first off TRK0

@@ -1,4 +1,4 @@
-"""`tw identify`: header + volume table from the start of track 0 (image/identify.py)."""
+"""`qicsilver identify`: header + volume table from the start of track 0 (qiclib.identify)."""
 
 from __future__ import annotations
 

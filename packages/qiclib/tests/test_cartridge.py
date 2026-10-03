@@ -1,4 +1,4 @@
-"""Cartridge guess from header geometry (tape/cartridge.py)."""
+"""Cartridge guess from header geometry (qiclib.cartridge)."""
 
 from __future__ import annotations
 

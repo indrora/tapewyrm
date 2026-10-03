@@ -6,21 +6,16 @@ types (``Direction``, ``TapeFormat``, ``MarkerKind``, ``CaptureHeader``,
 decoders in :mod:`tapewyrm_archive.qic117`; the sector/segment/file types in
 :mod:`qiclib.types`. Nothing here imports from
 the rest of the package, so every layer can depend on it without cycles. The
-bit-level report decoders (``DriveStatus.decode`` etc.) are grounded in the
-QIC-117 report payload tables (DESIGN.md §13.1).
+one report decoder left here, ``ErrorCode.decode``, follows the QIC-117 report
+payload tables (DESIGN.md §13.1).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# The recovery report (pipeline) is built from qiclib segment statuses and file sets.
+# RecoveryReport (built by the fixture codec.pipeline) uses qiclib's types.
 from qiclib.types import FileSet, SegmentStatus
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # Device / link layer (DESIGN.md §6A.2, §13.3)
@@ -121,11 +116,6 @@ class DriveProfile:
     @classmethod
     def default(cls) -> DriveProfile:
         return cls(name="default", wake_sequence=(), timing=TimingParams())
-
-
-# ---------------------------------------------------------------------------
-# Capture container metadata (DESIGN.md §7.1)
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

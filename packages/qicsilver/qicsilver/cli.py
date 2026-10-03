@@ -138,9 +138,10 @@ def tar(
 ) -> None:
     """TWVL volume -> pax tar OUTPUT of the backup's files, plus a damage report.
 
-    Keeps the backup's own paths (long Windows 95 names), modification times
-    and DOS attributes (pax header TAPEWYRM.dos_attributes). Files with bytes
-    in unrecovered segments are written zero-filled unless --skip-damaged.
+    Keeps the backup's own paths, modification times and attributes (pax
+    header TAPEWYRM.dos_attributes, or TAPEWYRM.qic113_attributes for a
+    Basic-DOS volume). Files with bytes in unrecovered segments are written
+    zero-filled unless --skip-damaged.
     """
     from qicsilver.tar import write_tar
 

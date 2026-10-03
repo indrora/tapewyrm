@@ -8,9 +8,16 @@ Three things live in / near the header segment:
   * the **volume table** (first segment of the logical area): 128-byte ``VTBL``
     entries describing each file set's segment range.
 
-``volume_streams`` then concatenates, for each VTBL entry, the *data* sectors of
-its segment range (the 3 ECC sectors dropped) in logical-segment order into the
-file set's Volume Data Area byte stream (DESIGN.md §7.5 input).
+``volume_streams`` concatenates, for each VTBL entry, the *data* sectors of
+its segment range (the 3 ECC sectors dropped) in logical-segment order into
+one in-memory byte stream (DESIGN.md §7.5 input). It is the simple path used
+by tests and by tapewyrm-cli's ``codec.pipeline``; the real one is
+``qiclib.extract``, which reads the table through a volume profile,
+decompresses QIC-122 extents and writes TWVL files with their holes.
+
+The fixed Rev N / QIC-113 VTBL decoding here (``_parse_vtbl_entry``) is the
+reference the ``qic80-rev-n`` and ``cms-qic113`` volume profiles are tested
+against; ``qicsilver identify`` and ``extract`` read through the profiles.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 # The packed-date decoder lives in the archive (shared with `tw inspect`);
-# re-exported here under its old name for qiclib callers.
+# re-exported here, its old home, for qiclib callers.
 from tapewyrm_archive.qic80date import decode_short_date  # noqa: F401
 
 from qiclib import place
@@ -48,7 +55,7 @@ DATA_SECTORS_PER_SEGMENT = Segment.DATA_ROWS  # 29
 class VolumeInfo:
     """Decoded format parameter record: header segment sector 0, bytes 0-255.
 
-    Offsets follow QIC-80-MC Rev N §7.1 (docs/qic80n.pdf). Rev N defines the
+    Offsets follow QIC-80-MC Rev N §7.1 (docs/qic-standards/qic80n.pdf). Rev N defines the
     header for format code 04; codes 2, 3 and 5 are Rev K fixed formats, which
     we have not got -- but the bench Colorado tape (code 5) matches the Rev N
     field layout byte for byte (segments/track, tracks, name, dates, counters).
@@ -130,7 +137,8 @@ class VtblEntry:
     end_seg: int  # 6-7 (word)
     description: str  # 8-51
     flags: int  # 56
-    os_type: int | None  # 125: 1 = DOS; anything else = extended format
+    os_type: int | None  # 125: 1 = DOS (not what marks an extended volume; see
+    # qic113.is_extended_os)
     compressed: bool | None  # 124 bit 7
     dir_section_size: int | None  # 92-95
     raw: bytes = b""
@@ -444,7 +452,7 @@ def parse_volume_table_data(data: bytes) -> list[VtblEntry]:
 def vtbl_records(data: bytes) -> list[bytes]:
     """The raw 128-byte ``VTBL`` records of a volume-table data area, in order.
 
-    Volume profiles (``codec.volume_profile``) decode these themselves, so this is
+    Volume profiles (``qiclib.volume_profile``) decode these themselves, so this is
     the one place that knows how the table is walked.
     """
     records: list[bytes] = []
@@ -501,9 +509,11 @@ def parse_vtbl_base(rec: bytes) -> VtblEntry:
 def _parse_vtbl_entry(rec: bytes) -> VtblEntry:
     """Decode one 128-byte VTBL entry (DESIGN.md §7.3, §7.5).
 
-    The fixed Rev N / QIC-113 interpretation, once used by ``tw extract`` (extract now reads through volume profiles). The
-    ``qic80-rev-n`` and ``cms-qic113`` volume profiles encode the same offsets as
-    data (tests/test_volume_profile.py keeps the two in step).
+    The fixed Rev N / QIC-113 interpretation, used by
+    :func:`parse_volume_table_data`; ``qicsilver identify`` and ``extract``
+    read through volume profiles instead. The ``qic80-rev-n`` and
+    ``cms-qic113`` profiles encode the same offsets as data
+    (tests/test_volume_profile.py keeps the two in step).
     """
     entry = parse_vtbl_base(rec)
     if entry.flags & 0x01 and int.from_bytes(rec[58:60], "little") != QIC113_SIGNATURE:
@@ -549,8 +559,12 @@ def volume_streams(
     order. BSM-flagged whole-bad segments are skipped (they hold no logical data).
 
     Requires the volume-table segment to be locatable: the table is the first
-    segment of the logical area. We find it by scanning corrected segments for a
-    ``VTBL``/``XTBL`` signature.
+    segment of the logical area. We find it by scanning segments for a
+    ``VTBL``/``XTBL`` signature in their (uncorrected) data rows.
+
+    A missing segment is zero-filled at a full 29 sectors, and compressed
+    volumes come out still compressed: this is not the TWVL path (see the
+    module docstring).
     """
     spt = vol.segments_per_track or 1
     by_abs = _segments_by_abs(segs)

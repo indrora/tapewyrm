@@ -186,8 +186,10 @@ def cli(
 ) -> None:
     """tw — Tapewyrm: QIC-80 floppy-tape recovery over Greaseweazle v4.1.
 
-    The single Tapewyrm tool: capture, decode, recover, and flash firmware.
-    Does not require the ``gw`` executable.
+    Captures tape tracks as flux (dump), turns the captures into a TWTI tape
+    image (convert), and drives and flashes the board. Reading backups and
+    files out of the image is the job of qicsilver. Does not require the
+    ``gw`` executable.
     """
     # Logging first: AppContext.load reads the config file and drive profile,
     # and its debug lines are exactly what -v is for when one isn't picked up.

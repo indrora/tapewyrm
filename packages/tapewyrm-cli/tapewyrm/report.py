@@ -1,8 +1,10 @@
 """Human-readable formatting over RecoveryReport (DESIGN.md §6A.9).
 
 The ``RecoveryReport`` dataclass lives in ``tapewyrm.types``; this module only
-formats it for the CLI: per-segment status counts, per-track coverage %, BSM
+formats it: per-segment status counts, per-track coverage %, BSM
 expected-vs-unexpected accounting, and the list of segments worth re-capturing.
+No command prints it today: only the fixture ``codec.pipeline`` builds a
+``RecoveryReport``, and ``tw convert`` records its results in the TWTI image.
 """
 
 from __future__ import annotations

@@ -9,7 +9,7 @@ The library half of ``tw inspect FILE``. It sits beside the three formats of
   exactly as stored (so ``--json`` can print them verbatim), and adds what is
   cheap: the file size, the size of the body behind the header, and for a
   tape image the segment-state counts from the segment table -- the table
-  only, never the 29 KB data slots.
+  only, never the 29 KiB data slots.
 - :func:`describe` turns an :class:`Inspection` into titled sections of
   (label, value) rows with every value already formatted -- thousands
   separators, MB, the drive's QIC-117 report bytes decoded -- and nothing
@@ -156,9 +156,10 @@ class _Prefix:
     stops short only at the end of the data; the caller turns a short buffer
     into the format's own truncation error, as the readers do.
 
-    A TWTZ written by ``TapeImage.save`` is one zstd frame, but ``zstd -d``
-    accepts concatenated frames, so a finished frame with input left over
-    starts a fresh decompressor on the rest rather than ending the stream.
+    A TWTZ written by ``TapeImage.save`` is one zstd frame, but TWS-2
+    section 7 allows several (as ``zstd -d`` does), so a finished frame with
+    input left over starts a fresh decompressor on the rest rather than
+    ending the stream.
     """
 
     def __init__(self, f: BinaryIO, path: Path, *, compressed: bool) -> None:

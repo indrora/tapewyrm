@@ -51,7 +51,7 @@ files.
   - [6.2. Reader Requirements](#62-reader-requirements)
 - [7. Versioning and Extensibility](#7-versioning-and-extensibility)
 - [8. Security and Privacy Considerations](#8-security-and-privacy-considerations)
-  - [8.1. Untrusted Input](#81-untrusted-input)
+  - [8.1. Malformed Input](#81-malformed-input)
   - [8.2. Privacy](#82-privacy)
 - [9. IANA Considerations](#9-iana-considerations)
 - [10. References](#10-references)
@@ -473,17 +473,23 @@ profile that decodes more of the record MAY add members to `vtbl`.
 
 ## 8. Security and Privacy Considerations
 
-### 8.1. Untrusted Input
+### 8.1. Malformed Input
 
-TWVL files and the tapes they come from are untrusted.
+Tapewyrm's threat model does not include malicious inputs ([TWS-2]
+Section 11.3): a TWVL is extracted by the user from their own image. What
+does occur is damage: a file cut short by an unfinished copy, and, far more
+often, a volume table that is damaged on tape or read through the wrong
+volume profile, whose fields then hold nonsense. Readers and writers MUST
+reject such values with a clear error rather than crash or allocate from
+them:
 
 - **Header length.** Header Length is a u32 and can claim up to
-  4 GiB. Readers SHOULD bound it (for example, to the file size and to
-  a fixed maximum such as 16 MiB) before allocating or parsing.
-- **JSON.** Readers SHOULD use a JSON parser with limits on nesting
-  depth, string length and number magnitude, and SHOULD validate member
-  types before use. Integers in the header can exceed 2^53; readers
-  MUST NOT silently lose precision on offsets and sizes.
+  4 GiB. Readers MUST check it against the file size before allocating
+  or parsing (Section 6.2, rule 3).
+- **JSON.** Readers SHOULD validate member types before use, and MAY
+  limit nesting depth, string length and number magnitude. Integers in
+  the header can exceed 2^53; readers MUST NOT silently lose precision
+  on offsets and sizes.
 - **Sizes from the volume table.** `data_section_size`,
   `dir_section_size` and the volume size derive from a VTBL record
   whose bytes 57-127 were interpreted through a guessed volume profile.

@@ -1,6 +1,6 @@
 """`qicsilver identify`: what is on a tape, read from its first few segments.
 
-Everything that describes a QIC-40/80 tape sits at the very start of track 0
+Everything that describes a QIC-40/80/3010/3020 tape sits at the very start of track 0
 (DESIGN.md §7.3):
 
   * the **header segment** -- the first defect-free segment, with a duplicate
@@ -34,8 +34,8 @@ Sources, all offline:
     (``tw convert`` them first). A capture of just the start of track 0 is
     enough.
 
-The live-drive path (wind to BOT, capture a few seconds, identify) is built on
-:func:`from_sectors`.
+A live-drive path (wind to BOT, capture a few seconds, identify) would build
+on :func:`from_sectors`; none exists yet, so today it serves the tests.
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ log = logging.getLogger(__name__)
 
 # The placement used before the header tells us the real geometry. Only the
 # header's own position has to come out right under it, and the header sits at
-# the origin of track 0, which places the same under any geometry (twti.convert
-# uses the same default).
+# the origin of track 0, which places the same under any geometry
+# (qiclib.build.build_image uses the same default).
 FALLBACK_GEOMETRY = Geometry(tracks=28, segments_per_track=207)
 
 DATA_BYTES_PER_SEGMENT = volume_mod.DATA_SECTORS_PER_SEGMENT * 1024
@@ -310,8 +310,7 @@ def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeIn
     # TWTI keeps the drive's reports per source capture; the first one whose
     # reports are non-null speaks for the drive, the same rule build_image
     # used for the header's "drive" object. Re-deriving it from the sources
-    # (rather than trusting header["drive"]) also fixes images written before
-    # that rule, which could carry an all-null drive.
+    # (rather than reading header["drive"]) keeps the two on one rule.
     drive = reporting_drive(img.header.get("sources", []))
     return _assemble(
         vol,

@@ -17,10 +17,11 @@ QIC twist (DESIGN.md §2.2, §6A.5): the FDC's C/H/R/N = ``(FTK, FSD, FSC, 03)``
 We keep the abused fields as ``(ftk, fsd, fsc)`` on the :class:`RawSector` rather
 than discarding them — they are the sector's tape coordinate.
 
-This module's *byte-level* framing (scan + CRC + encoder helpers) is fully real
-and round-trip tested. The *interval -> MFM bitstream* PLL step
-(:func:`recover_sectors`) is the one bench seam and is marked ``TODO(bench)``
-(DESIGN.md §13.6 item 1) — wire Greaseweazle's PLL there when available.
+Real flux goes through :func:`recover_sectors_from_flux`: Greaseweazle's PLL
+(``codec.gwpll``), then :func:`frame_bitcells` and
+:func:`recover_sectors_from_bytes`; that path is bench-proven. The older
+adapter :func:`recover_sectors` only serves the synthetic-fixture pipeline
+(``codec.flux``), whose "intervals" are already decoded bytes.
 """
 
 from __future__ import annotations
@@ -353,25 +354,17 @@ def recover_sectors_from_bytes(
 
 
 # ---------------------------------------------------------------------------
-# Interval -> bitstream -> bytes adapter (PLL step is the bench seam)
+# Fixture adapter: byte-valued "intervals" -> bytes -> sectors (codec.pipeline)
 # ---------------------------------------------------------------------------
 
 
 def intervals_to_bytes(flux: FluxStream, rate_kbps: int) -> bytes:
-    """Decode flux intervals into a decoded MFM **byte** stream.
+    """Pass a fixture's byte-valued "intervals" through as decoded MFM bytes.
 
-    TODO(bench), DESIGN.md §13.6 item 1: the interval -> MFM-bitstream PLL is the
-    timing-critical primitive we intend to reuse from Greaseweazle (its PLL +
-    bitcell recovery + IBM/MFM framing). Wire that here once the GW flux opcode
-    bytes and PLL are available on the bench. The byte-level framing below
-    (:func:`recover_sectors_from_bytes`) is fully real and does not depend on
-    this step.
-
-    Best-effort placeholder: if the FluxStream's ``intervals`` are exactly the
-    decoded byte values (as our offline fixtures produce — see codec.flux), pass
-    them through unchanged so the whole stack is end-to-end testable without
-    hardware. A real capture's intervals are inter-transition tick counts that
-    must go through the PLL; that path is the TODO above.
+    The offline fixtures (see ``codec.flux``) store the decoded byte stream
+    where the intervals would be, so the whole pipeline is testable without a
+    PLL. Real intervals are tick counts and are refused here: they go through
+    :func:`recover_sectors_from_flux` instead.
     """
     # Offline/fixture convention: intervals already hold decoded byte values.
     if all(0 <= v <= 0xFF for v in flux.intervals):
@@ -380,22 +373,23 @@ def intervals_to_bytes(flux: FluxStream, rate_kbps: int) -> bytes:
             len(flux.intervals),
         )
         return bytes(flux.intervals)
-    # Real-flux fallback stub: cannot decode without the PLL (see TODO above).
+    # Real tick intervals: not this adapter's job.
     log.debug(
-        "intervals are not byte-valued (%d intervals, %d kbps); PLL not wired, refusing",
+        "intervals are not byte-valued (%d intervals, %d kbps); refusing",
         len(flux.intervals),
         rate_kbps,
     )
     raise NotImplementedError(
-        "interval->bitstream PLL not wired (TODO(bench), DESIGN §13.6 item 1)"
+        "intervals are not byte-valued fixture data; decode real flux with "
+        "mfm.recover_sectors_from_flux"
     )
 
 
 def recover_sectors(flux: FluxStream, rate_kbps: int) -> Iterator[RawSector]:
-    """Adapter: flux intervals -> MFM bitstream -> bytes -> sectors.
+    """Fixture adapter: byte-valued intervals -> bytes -> sectors.
 
-    Thin wrapper over :func:`intervals_to_bytes` (the bench-seam PLL step) and
-    :func:`recover_sectors_from_bytes` (fully real byte framing).
+    Thin wrapper over :func:`intervals_to_bytes` (fixture pass-through) and
+    :func:`recover_sectors_from_bytes`. Real flux: :func:`recover_sectors_from_flux`.
     """
     log.debug("recovering sectors from %d intervals at %d kbps", len(flux.intervals), rate_kbps)
     decoded = intervals_to_bytes(flux, rate_kbps)

@@ -688,15 +688,20 @@ same care as the original medium. The header also holds a device serial
 number and host and firmware commits, which identify the capturing
 equipment.
 
-**Untrusted sizes.** `hlen` is a u32 from the file. A reader SHOULD bound
+**Malformed input.** Tapewyrm's threat model does not include malicious
+inputs ([TWS-2] Section 11.3): captures are the user's own. Truncated and
+malformed files are expected, and readers MUST reject or flag them cleanly
+(Section 8.2), never crash on them.
+
+**Sizes from the file.** `hlen` is a u32 from the file. A reader SHOULD bound
 it (a real header is under 1 KiB) and MUST NOT allocate more than the
 file's remaining length for it. Marker `len` is a u8 and bounded. A
 reader MUST bounds-check every multi-byte record against the end of the
 body.
 
-**JSON.** The header is untrusted input. Readers SHOULD use a JSON parser
-with limits on nesting depth and number size, and MUST check member types
-before use. Numbers in the header SHOULD be range-checked (for example,
+**JSON.** The header may be damaged. Readers MUST check member types
+before use (Section 8.2, item 5), and MAY limit nesting depth and number
+size. Numbers in the header SHOULD be range-checked (for example,
 `sample_clock_hz` of 0 would divide by zero when converting ticks to
 time).
 

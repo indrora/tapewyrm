@@ -1,8 +1,10 @@
 """QIC-117 status helpers: error classification + decoder re-exports (DESIGN.md §6A.3).
 
-The bit-level report decoders (``DriveStatus``/``ErrorCode``/``DriveConfig``/
-``TapeStatus``) LIVE in ``tapewyrm.types`` — they are re-exported here only for
-the convenience of callers in this package. **Do not duplicate them.**
+The bit-level report decoders live elsewhere -- ``DriveStatus``,
+``DriveConfig`` and ``TapeStatus`` in ``tapewyrm_archive.qic117`` (captures
+record their raw bytes), ``ErrorCode`` in ``tapewyrm.types`` -- and are
+re-exported here only for the convenience of callers in this package. **Do
+not duplicate them.**
 
 What is genuinely new here is the *error classification* table consulted by the
 tape layer to decide whether to abort a sweep (DESIGN.md §6A.3): broken-tape (10)
@@ -13,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-# Re-export the decoders for convenience (they live in types.py — single source).
+# Re-export the decoders for convenience (single source: see the module docstring).
 from tapewyrm_archive.qic117 import DriveConfig, DriveStatus, TapeStatus
 
 from tapewyrm.types import ErrorCode
@@ -58,7 +60,7 @@ ERR_BROKEN_TAPE = 10  # FATAL: physical tape break — abort the sweep immediate
 ERR_POWER_ON_RESET = 26
 ERR_SOFTWARE_RESET = 27
 ERR_WAKEUP_RESET = 41
-ERR_RESET_OCCURRED = ERR_POWER_ON_RESET  # kept for callers of the old name
+ERR_RESET_OCCURRED = ERR_POWER_ON_RESET  # old name; nothing uses it any more
 
 # Codes that must abort the sweep. Broken-tape is the only one the design pins as
 # the canonical fatal; other genuinely-unrecoverable hardware faults can be added

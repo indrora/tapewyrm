@@ -1,12 +1,13 @@
-"""Offline decode codec for Tapewyrm (DESIGN.md §6.4, §6A.5, §13.5).
+"""Offline physical-layer codec for Tapewyrm (DESIGN.md §6.4, §6A.5, §13.5).
 
-Pure-Python, hardware-free decode stack: flux bytes -> intervals -> MFM sectors
--> placed sectors -> segments -> RS erasure decode -> volume byte streams ->
-QIC-113 file sets. Every stage is a pure function over the foundation dataclasses
-in ``tapewyrm.types`` and is fixture-testable with no drive attached.
+Pure-Python, hardware-free: a TWRF capture's GW flux stream -> tick intervals
+(``gwstream``, the archive's ``parse_body``) -> MFM bitcells (``gwpll``,
+Greaseweazle's PLL, vendored) -> sync-aligned bytes -> sectors (``mfm``). That
+is what ``tw convert`` and ``tw dump --check`` run; everything above the
+sector (merge, placement, Reed-Solomon, volumes, QIC-113) is qiclib's.
 
-The genuine hardware/bench seams (GW flux opcode bytes, the interval->bitstream
-PLL) are isolated and marked ``TODO(bench)`` per DESIGN.md §13.6 item 1.
+``flux`` and ``pipeline`` are the synthetic-fixture path: decoded MFM bytes
+standing in for flux, run through qiclib end to end in tests/test_pipeline.py.
 """
 
 from __future__ import annotations

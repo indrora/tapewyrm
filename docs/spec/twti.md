@@ -60,7 +60,7 @@ conforms to this document.
 - [10. Versioning and Extensibility](#10-versioning-and-extensibility)
 - [11. Security and Privacy Considerations](#11-security-and-privacy-considerations)
   - [11.1. Privacy](#111-privacy)
-  - [11.2. Untrusted Input](#112-untrusted-input)
+  - [11.2. Malformed Input](#112-malformed-input)
   - [11.3. Decompression Bombs](#113-decompression-bombs)
   - [11.4. Temporary Files](#114-temporary-files)
 - [12. IANA Considerations](#12-iana-considerations)
@@ -677,17 +677,23 @@ nothing but this document.
   SHOULD store images on encrypted storage and dispose of them as they would
   of the original tape.
 
-### 11.2. Untrusted Input
+### 11.2. Malformed Input
 
-Images are untrusted input.
+Tapewyrm's threat model does not include malicious inputs (Section 11.3):
+the images it reads are the user's own. Damaged ones are another matter. A
+copy that did not finish, a full disk or a stray edit leaves a file that is
+truncated or malformed, and readers MUST reject such a file cleanly, with an
+error that names the file (Section 9.2), never by crashing or by presenting
+what they could read as the tape. In particular:
 
-- `header_len` is attacker-controlled. Readers SHOULD bound it (the
-  reference writer's headers are a few KiB) and MUST NOT allocate memory
-  based on it without checking it against the file length.
-- JSON parsers SHOULD limit nesting depth, string length and number size.
-  Integers outside the range of an IEEE 754 double [RFC7493] or of the field
-  they describe MUST be rejected.
-- `segment_count` is attacker-controlled. Readers MUST check
+- `header_len` comes from the file and may be wrong. Readers MUST NOT
+  allocate memory based on it without checking it against the file length
+  (Section 9.2, item 9); the reference writer's headers are a few KiB.
+- Readers MUST check the JSON type of each member they use. Integers
+  outside the range of an IEEE 754 double [RFC7493] or of the field they
+  describe MUST be rejected. Readers MAY also limit nesting depth, string
+  length and number size; the reference reader does not.
+- `segment_count` comes from the file and may be wrong. Readers MUST check
   `D + 29696 * segment_count` against the file length (Section 9.2, item 9)
   before trusting it, and MUST NOT allocate per-segment structures for a
   count the file cannot hold.

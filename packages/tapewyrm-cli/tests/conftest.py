@@ -1,7 +1,7 @@
 """Shared pytest set-up for tapewyrm-cli.
 
 ``tw`` reads a per-user config file when ``--config`` is not given
-(``cli.default_config_path``). Point it at an empty temporary directory for
+(``tapewyrm.cli.app.default_config_path``). Point it at an empty temporary directory for
 every test, so a developer's own ~/.config/tapewyrm/config.toml can never
 change what the tests see.
 """

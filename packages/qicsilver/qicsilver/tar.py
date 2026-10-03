@@ -4,15 +4,16 @@ The last step after ``tw dump -> tw convert -> qicsilver extract``::
 
     qicsilver tar jc-1998/vol-00.twvl jc-1998.tar
 
-(This was ``contrib/qic2tar.py`` before qicsilver existed.) The input is a TWVL
-volume written by ``qicsilver extract``. Every directory and file
-of the backup goes into a POSIX (pax) tar:
+The input is a TWVL volume written by ``qicsilver extract``. Every directory
+and file of the backup goes into a POSIX (pax) tar:
 
-* paths come from the backup's own directory (long Windows 95 names; the root,
-  e.g. ``C:``, becomes the top-level directory ``C``),
+* paths come from the backup's own directory (in the extended format, long
+  Windows 95 names, and the root, e.g. ``C:``, becomes the top-level
+  directory ``C``),
 * modification times are the ones recorded in the backup,
 * read-only files get mode 0444, other files 0644, directories 0755,
-* DOS/Windows attributes are kept as a pax header ``TAPEWYRM.dos_attributes``.
+* the backup's attribute byte is kept as a pax header (which one depends on
+  the directory format, below).
 
 Files whose bytes fall partly in holes (tape segments that could not be
 recovered) are still written, zero-filled, unless ``--skip-damaged`` is given.

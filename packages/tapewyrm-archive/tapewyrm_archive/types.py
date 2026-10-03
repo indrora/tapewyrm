@@ -74,7 +74,7 @@ class MarkerKind(IntEnum):
 
 @dataclass(frozen=True)
 class CaptureHeader:
-    """The linearization key stamped on every RawFluxCapture (DESIGN.md §7.1)."""
+    """The linearization key stamped on every TWRF capture (DESIGN.md §7.1, TWS-1 §4)."""
 
     rate_kbps: int
     sample_clock_hz: int
@@ -87,17 +87,20 @@ class CaptureHeader:
     tracks: int = 0
     sectors_per_segment: int = 32
     device_serial: str = ""
-    physical_reverse: bool = False  # salvage pass; flux is time-reversed offline
+    # Salvage pass taken in Physical Reverse: the flux is in time-reversed
+    # order. Recorded only; `tw convert` does not yet reverse it (TWS-1 8.2).
+    physical_reverse: bool = False
     # --- TWRF v2: who read it, and what the drive said (all optional) ---------
     # Raw QIC-117 report bytes at capture time, so a capture is self-describing
-    # and the decoder never has to assume the bit rate. None = not reported
-    # (drive too old for that report, or a v1 file).
+    # and the decoder never has to assume the bit rate. None = the drive did not
+    # answer that report. The reader requires every member (TWS-1 section 8.2),
+    # so None never means "absent from the file".
     drive_status: int | None = None  # Report Drive Status (6)
     drive_config: int | None = None  # Report Drive Configuration (8): rate bits 3-4
     drive_rom: int | None = None  # Report ROM Version (9)
     drive_vendor_id: int | None = None  # Report Vendor ID (32)
     tape_status: int | None = None  # Report Tape Status (33)
-    tw_commit: str | None = None  # host build (tapewyrm.buildinfo)
+    tw_commit: str | None = None  # tw build (tapewyrm-cli's tapewyrm.buildinfo)
     firmware_commit: str | None = None  # device build (BUILD_INFO verb)
     firmware_dirty: bool | None = None
 

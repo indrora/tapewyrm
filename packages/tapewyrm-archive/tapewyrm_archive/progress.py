@@ -1,6 +1,7 @@
 """Progress reporting hooks for long-running library loops (STYLE.md §2.5).
 
-Library code (``tape.dump``, ``image.twti``, ``image.twvl``, ...) wants to say
+Library code (``twrf.parse_body``, ``TapeImage.save``, ``qiclib.build`` and
+``qiclib.extract``, tapewyrm-cli's ``tape.dump``, ...) wants to say
 "I am 40 of 207 segments into this" without knowing *how* that is shown. It
 takes a ``progress: Progress = NULL_PROGRESS`` argument and opens tasks on it:
 
@@ -10,10 +11,11 @@ takes a ``progress: Progress = NULL_PROGRESS`` argument and opens tasks on it:
             bar.advance()
 
 The default, :data:`NULL_PROGRESS`, does nothing, so tests and scripts pay no
-cost and need no terminal. The CLI passes a ``rich``-backed implementation
-(``tapewyrm.console.RichProgress``) when ``tw --progress`` is given. Keeping this
-a :class:`typing.Protocol` is what lets the library stay free of any import of
-``rich``: the presentation dependency lives only in the CLI.
+cost and need no terminal. The CLIs pass a ``rich``-backed implementation
+(``RichProgress`` in ``tapewyrm.console`` and ``qicsilver.console``) when
+``--progress`` is given. Keeping this a :class:`typing.Protocol` is what lets
+the libraries stay free of any import of ``rich``: the presentation
+dependency lives only in the CLIs.
 
 Units: a task's ``unit`` is a display hint only -- ``"bytes"`` renders the
 amount as a file size, ``"s"`` as seconds, anything else as ``M/N unit``.

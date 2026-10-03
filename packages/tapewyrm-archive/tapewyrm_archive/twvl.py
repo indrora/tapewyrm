@@ -1,10 +1,13 @@
 """TWVL: one extracted backup volume (`qicsilver extract` output).
 
 Step three of ``tw dump -> tw convert -> qicsilver extract``. Extraction is the
-QIC-113 layer: read the volume table from a TWTI tape image, decompress each
-volume's segments (QIC-122 extents, QIC-113 section 9) and lay the bytes out
-by their uncompressed offsets. Segments that couldn't be read leave holes,
-which are recorded rather than silently shifting what follows.
+QIC-113 layer: read the volume table from a TWTI tape image through a volume
+profile, then either decompress each segment's QIC-122 extent (QIC-113
+section 9) and place its bytes at their uncompressed offset, or, for an
+uncompressed volume, lay the segments' data end to end. Segments that
+couldn't be read leave holes, which are recorded rather than silently
+shifting what follows. The byte layout is owned by ``docs/spec/twvl.md``
+(TWS-3).
 
 Layout::
 
@@ -13,9 +16,11 @@ Layout::
 The header carries the volume-table entry (description, date, flags, section
 sizes, the raw 128-byte record), the tape's identity, the volume's size, the
 byte ranges that are missing, and the source image (as ``dir/name`` only,
-``tapewyrm_archive.provenance``). The volume bytes are the File Set Data Section
-followed by the File Set Directory Section (QIC-113 "directory last" order),
-which is what ``qicsilver tar`` turns into a tar.
+``tapewyrm_archive.provenance``). The volume bytes are the QIC-113 File Set,
+already decompressed, with its Directory and Data Sections in the order the
+backup software wrote them: data first when VTBL flags bit 5 is set
+("Directory-Last", as on the Colorado tape), directory first otherwise (as
+MTN volumes are). That is what ``qicsilver tar`` turns into a tar.
 
 This module is the file format only; extraction from a TWTI image lives
 in ``qiclib.extract``.

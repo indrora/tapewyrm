@@ -11,10 +11,14 @@ Transactions implemented:
     GW GET_INFO + INFO -> DeviceInfo         (capability gate runs in open())
     SET_TIMING   -> ok
     select()     -> GW SET_BUS_TYPE + SELECT (+ MOTOR)   (GW-native, not a TW verb)
+    deselect(), motor() -> GW DESELECT, GW MOTOR          (GW-native)
     COMMAND_TXN  -> {flags, bits, nbits}     (bits returned as raw bytes)
     WAIT_READY   -> {status}
+    SCOPE        -> ScopeTrace               (bench edge log)
+    BUILD_INFO   -> FirmwareBuild            (None on stock/older firmware)
     CAPTURE      -> CaptureStream            (continuous flux+marker stream)
-    ABORT        -> out-of-band control
+    flux_status() -> GW GET_FLUX_STATUS      (after a capture drains)
+    ABORT        -> out-of-band control      (a clear-comms baud change)
 
 Every request is a Greaseweazle command packet and every payload layout below is
 copied from the firmware handlers in firmware/src/qic/qic.c (the firmware is the

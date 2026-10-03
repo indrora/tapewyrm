@@ -173,8 +173,9 @@ tape status  : not supported by this drive (no ACK)
 Look for `ready` and `referenced` (the drive has found the tape's reference
 holes; `tw dump` refuses to start without it) and for the rate in
 `drive config`: `tw dump` records at that rate. The bench QIC-80 tapes read at
-500 kbps; the Colorado 1400 reports 1 Mbps, its QIC-3010 rate, and may need
-`tw drive rate 500` for a QIC-80 tape. Older drives don't answer every report; that is normal. If the
+500 kbps; the bench Colorado 1400 reports 1 Mbps, its QIC-3010 rate, refuses
+`tw drive rate 500` (error 31) and has not read a QIC-80 tape, so use a
+QIC-80 drive such as the 350 for those. Older drives don't answer every report; that is normal. If the
 cartridge is not referenced yet, `tw --profile colorado drive load-point`
 (which can take 30 s or more) has the drive find it again.
 
@@ -432,9 +433,11 @@ the start of track 0`, or `neither copy of the header segment was recovered`.
   drive reading a QIC-80 tape may need `tw drive rate 500` after the tape is
   referenced.
 - Dump track 0 again into a new directory and merge both dumps.
-- `tw drive flux --seconds 10` records a short sample and reports how much
-  signal and how many sectors it sees. Zero sectors means a head, rate or
-  tape problem, not a software one.
+- `tw drive flux --motion logical --seconds 10` records a short sample and
+  reports how much signal and how many sectors it sees. Zero sectors means a
+  head, rate or tape problem, not a software one. (The default
+  `--motion fwd` runs at high speed: sectors never decode there, and the
+  bench drives send no flux at all.)
 
 ### Wrong volume profile
 

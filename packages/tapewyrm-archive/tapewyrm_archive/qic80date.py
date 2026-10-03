@@ -6,7 +6,7 @@ name and first-format dates (TWS-2 section 4.3 keeps them raw in a TWTI's
 Decoding them is needed by ``tapewyrm_archive.inspect`` (``tw inspect``) and
 by qiclib (volume tables, ``qicsilver identify``), and the archive is the
 package both already depend on (STYLE.md section 2), so it lives here.
-``qiclib.volume`` re-exports :func:`decode_short_date` under its old name.
+``qiclib.volume`` re-exports :func:`decode_short_date` from its old home.
 """
 
 from __future__ import annotations

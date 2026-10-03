@@ -1,9 +1,12 @@
-"""Errors the archive readers raise for files they cannot trust.
+"""Errors the archive readers raise for files that are cut short or malformed.
 
 Every reader in this package (TWRF in ``twrf``, TWTI/TWTZ in ``twti``, TWVL
-in ``twvl``) refuses a file that is cut short or does not follow its spec
-(TWS-1 section 8.2, TWS-2 section 9.2, TWS-3 section 6.2) rather than hand back short or misplaced data as if
-it were the tape. Both errors are ``ValueError`` subclasses, so the CLIs'
+in ``twvl``, and ``inspect``, which reuses their checks) refuses a file that
+is cut short or does not follow its spec (TWS-1 section 8.2, TWS-2 section
+9.2, TWS-3 section 6.2) rather than hand back short or misplaced data as if
+it were the tape. The inputs are the user's own captures and images, so these
+guard against accidents (an unfinished copy, a stray edit), not against
+deliberately crafted files; see TWS-2 section 11. Both errors are ``ValueError`` subclasses, so the CLIs'
 existing ``except ValueError`` turns them into a one-line error and exit 1
 (STYLE.md section 2.5); callers that care which it was can catch these.
 

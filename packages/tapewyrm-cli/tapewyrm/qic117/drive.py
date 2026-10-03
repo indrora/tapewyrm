@@ -313,8 +313,9 @@ class Qic117Drive:
         skipped. Besides QIC-117 commands a step may be a *line* step (see
         ``LINE_STEPS``), which drives a cable line instead of sending pulses.
 
-        TODO(bench), DESIGN.md §9 item 3: the real wake timings/sequence per drive
-        family are bench-characterized; the profiles ship nominal placeholders.
+        TODO(bench), DESIGN.md §9 item 3: only the Colorado wake (Jumbo 350,
+        1400) is bench-confirmed; the other profiles carry ftape's sequences or
+        nominal placeholders until their drives reach the bench.
         """
         self.run_wake_steps()
         # Read status last: it also reads+clears any latched error / new-cartridge

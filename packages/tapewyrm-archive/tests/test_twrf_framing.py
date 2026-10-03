@@ -84,7 +84,8 @@ def test_encode_interval_matches_rdata_encode_flux_byte_forms():
 
 
 # ---------------------------------------------------------------------------
-# Markers and flux data on a hostile synthetic stream
+# Markers and flux data on a "hostile" synthetic stream: hostile to a naive
+# 0xFF scanner, not malicious -- every byte is one the firmware can emit
 # ---------------------------------------------------------------------------
 
 # Intervals chosen so the stream holds 0xFF in every non-escape position the

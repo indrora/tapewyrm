@@ -45,7 +45,7 @@ class Segment:
 
     ``sectors[i]`` is the sector with segment-relative index i, or None if not
     yet recovered. Excluded (BSM) positions are tracked separately so the RS
-    decoder can repack to codeword length N = 31 - bad_blocks (DESIGN.md §2.3).
+    decoder can repack to codeword length N = 32 - excluded (DESIGN.md §2.3).
     """
 
     tpt: int  # tape track
@@ -88,5 +88,7 @@ class FileEntry:
 class FileSet:
     name: str  # source device / volume description (e.g. "C:")
     files: list[FileEntry] = field(default_factory=list)
+    # The VTBL's compression flag, as given. Bytes from a TWVL were already
+    # decompressed by qiclib.extract; see qic113.maybe_decompress.
     compressed: bool = False
     extended_os: bool = False

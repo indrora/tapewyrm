@@ -1,7 +1,9 @@
 """Volume profiles: per-tape quirks of the volume table, as data (TOML).
 
-Drive profiles (``qic117.profile``) capture how a *drive* misbehaves; tape
-profiles capture how the *software that wrote a tape* laid out its volume table.
+Drive profiles (``tapewyrm.qic117.profile``, tapewyrm-cli) capture how a
+*drive* misbehaves; volume profiles capture how the *software that wrote a
+tape* laid out its volume table. (Cartridge profiles, :mod:`qiclib.cartridge`,
+describe the physical tape.)
 QIC-80-MC Rev N §8 only pins down bytes 0-56 of a 128-byte ``VTBL`` record
 (signature, segment range, description, date, flags). Everything after that --
 directory/data section sizes, source label, compression, OS type -- depends on
@@ -10,12 +12,13 @@ who wrote it:
 * Rev N itself puts them at 92/96/106/124/125 (``qic80-rev-n``);
 * Colorado's CMS backup sets the vendor bit and writes the QIC-113 signature
   (113 at byte 58), with the same offsets (``cms-qic113``);
-* the 3M DC2120 bench tape's software wrote ``MTN`` at byte 58, left the
-  vendor bit clear, and packed the label 4 bytes earlier (``mtn``);
+* the software behind the two MTN bench tapes (the 3M DC2120 and
+  old-connor) wrote ``MTN`` at byte 58, left the vendor bit clear, packed
+  the label 4 bytes earlier and used 4-byte extent offsets (``mtn``);
 * any other vendor-specific entry: only bytes 0-56 mean anything
   (``vendor-unknown``).
 
-A profile is a TOML file in ``tapewyrm/profiles/volume/`` (or any path)::
+A profile is a TOML file in ``qiclib/profiles/volume/`` (or any path)::
 
     name = "mtn"
     description = "..."
@@ -31,7 +34,9 @@ A profile is a TOML file in ``tapewyrm/profiles/volume/`` (or any path)::
     data_section_size = [96, 4]
     source_label = [102, 16]
     compression = [120, 1]       # bit 7 = compressed, bits 0-5 = QIC-123 code
-    os_type = [125, 1]
+
+    [extent]                     # optional
+    offset_bytes = 4             # extent offset width; 8 (Rev G) when absent
 
 **Guessing.** ``guess`` decodes every ``VTBL`` record with every profile and
 scores each reading with plausibility checks: does the segment range sit in the
@@ -125,7 +130,7 @@ class VolumeProfile:
 def _resolve_path(name_or_path: str) -> Path:
     """A bare name resolves in the packaged directory; anything path-like is a path.
 
-    Same rule as ``qic117.profile`` so the two flags behave alike.
+    Same rule as ``tapewyrm.qic117.profile`` so the two flags behave alike.
     """
     p = Path(name_or_path)
     if p.suffix == ".toml" or p.exists() or p.is_absolute() or len(p.parts) > 1:

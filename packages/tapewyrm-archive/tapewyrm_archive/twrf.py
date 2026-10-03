@@ -65,7 +65,7 @@ MAGIC = b"TWRF"
 # (status, configuration -- hence the bit rate --, ROM, vendor ID, tape status)
 # and the tw/firmware commits. Version 2 is the only version read: version 1
 # predates the release, nobody holds v1 captures but us, and the cure for one
-# is to dump the tape again (no compatibility before release, STYLE.md §2).
+# is to dump the tape again (no compatibility before release, TWS-1 section 9).
 FORMAT_VERSION = 2
 READABLE_VERSIONS = (2,)
 _PREAMBLE = struct.Struct("<4sHI")  # magic, version, header length
@@ -85,7 +85,7 @@ class WireMarker(IntEnum):
     These are the firmware's ``protocol.Marker`` codes. Once written into a
     file they are part of the *file format*, so the archive package owns its
     own copy rather than importing the generated, hardware-side
-    ``tapewyrm.link.protocol``. The host package's tests assert the two
+    ``tapewyrm.link.protocol``. tapewyrm-cli's tests assert the two
     tables are identical, so firmware and file format cannot drift apart
     silently.
     """
@@ -475,6 +475,14 @@ def flux_checksum(data: bytes) -> int:
 
 @dataclasses.dataclass
 class RawFluxCapture:
+    """One TWRF file: its header and its verbatim flux body (TWS-1).
+
+    :meth:`load` refuses a file whose preamble or header is cut short or
+    malformed (:func:`_read_header`); a body that stops early is kept and
+    reported by :attr:`is_truncated` / :meth:`verify`, as TWS-1 section 8.2
+    requires (a cut capture still decodes).
+    """
+
     header: CaptureHeader
     flux: bytes  # verbatim on-wire GW flux (with marker opcodes)
     # One parse_body() result, reused by markers()/segments()/end_marker()/

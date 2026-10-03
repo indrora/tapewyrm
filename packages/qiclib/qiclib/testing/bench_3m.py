@@ -21,7 +21,7 @@ HEADER_SECTOR0 = bytes.fromhex(
 ).ljust(1024, b"\x00")
 
 # The fixed-format bad-sector map (32-bit mask per segment from offset 2048,
-# see codec.volume.FIXED_BSM_OFFSET): the only two non-zero bytes in the rest
+# see qiclib.volume.FIXED_BSM_OFFSET): the only two non-zero bytes in the rest
 # of the header's data area. Segment 156 sector 21, segment 410 sector 9.
 BSM_BYTES = {2674: 0x20, 3689: 0x02}
 

@@ -1,7 +1,8 @@
 """QIC-122 (Stac LZS) decompression and QIC-113 compression extents.
 
-QIC-122 Rev B (docs/qic122b.pdf) defines the compressed stream; QIC-113 Rev G
-section 9 (docs/qic113g.pdf) defines how QIC-80 volumes pack it into segments.
+QIC-122 Rev B (docs/qic-standards/qic122b.pdf) defines the compressed stream;
+QIC-113 Rev G section 9 (docs/qic-standards/qic113g.pdf) defines how QIC-80
+volumes pack it into segments.
 Written from those two documents; no mature, widely used QIC-122 decoder
 exists to depend on (only small, unvetted LZS repos).
 
@@ -20,8 +21,10 @@ Compression Frame is an independent stream (the history starts empty).
 
 QIC-113 segment layout (non-spanning volume, the only kind seen so far)::
 
-    0, 8   Uncompressed Volume Byte Offset (sum of all earlier segments' output)
-    8, ... Compression Frames, back to back:
+    0, w   Uncompressed Volume Byte Offset (sum of all earlier segments' output);
+           w = 8 per Rev G, 4 on MTN tapes (the volume profile's
+           [extent] offset_bytes, passed as ``offset_bytes``)
+    w, ... Compression Frames, back to back:
              0, 2  Frame Size n (hi bit set = n bytes stored raw, not compressed)
              2, n  data
            Fewer than 18 bytes left after a frame = null fill, end of extent.
@@ -47,7 +50,7 @@ class Qic122Error(ValueError):
 def decompress(data: bytes) -> bytes:
     """Decompress one QIC-122 stream (up to its end marker)."""
     # A '0'/'1' string is the fastest pure-Python bit reader for this size of
-    # input (a frame is at most ~32 KB): int(bits[i:j], 2) does the slicing in C.
+    # input (a frame is at most ~32 KiB): int(bits[i:j], 2) does the slicing in C.
     bits = "".join(f"{b:08b}" for b in data)
     n = len(bits)
     out = bytearray()

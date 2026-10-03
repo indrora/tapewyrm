@@ -1,6 +1,6 @@
 """GF(256) Reed-Solomon erasure decoder, redundancy 3 (DESIGN.md §13.2, §2.3).
 
-The only nontrivial algorithm in the codec; everything else is parsing.
+The only nontrivial algorithm in qiclib; everything else is parsing.
 
 Field
 -----
@@ -39,7 +39,7 @@ Excluded-sector repack (DESIGN.md §2.3, §7.3)
 ---------------------------------------------
 BSM-excluded sectors are physically skipped on tape: the codeword is formed only
 from the **non-excluded** sectors, parity occupying the last 3 of them, so the
-codeword length is ``N = 31 - bad_blocks`` (i.e. ``32 - excluded_count``). The
+codeword length is ``N = 32 - excluded_count`` (32 with nothing excluded). The
 decoder packs the present non-excluded sectors down, decodes, then unpacks.
 """
 

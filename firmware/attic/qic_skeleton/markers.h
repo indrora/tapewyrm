@@ -8,12 +8,12 @@
  * index opcode) so they can NEVER be misread as flux. The marker CODES
  * (TW_MARK_*) and the little-endian payload LAYOUTS below are the firmware<->host
  * CONTRACT — they must stay byte-for-byte identical to what the host parses in
- * packages/tapewyrm-cli/tapewyrm/rawflux/container.py. Only the opcode-escape *framing* (the
+ * packages/tapewyrm-archive/tapewyrm_archive/twrf.py. Only the opcode-escape *framing* (the
  * escape byte + stuffing) is bench-dependent (§13.6 item 1). [Retired skeleton:
  * as built, the escape is GW's 0xFF and there is no stuffing; the host reader
  * is tapewyrm_archive/twrf.py, the format docs/spec/twrf.md.]
  *
- * Payload layouts (little-endian) — keep in sync with container.py:
+ * Payload layouts (little-endian) — keep in sync with twrf.py:
  *   SESSION_START : rate:u16, clock:u32, tpt:u16, direction:u8, pass_id:u16   (11 bytes)
  *   SEGMENT       : ticks:u32, index:u32                                       (8 bytes)
  *   EVENT         : code:u8                                                     (1 byte)
@@ -38,7 +38,7 @@ extern "C" {
  * Running accounting for a capture run. mk_* update this so the END marker can
  * carry honest counts (§5.4 termination/accounting). The checksum is the
  * additive sum of *flux data bytes only* (NOT marker bytes), masked to 32 bits
- * — this is the exact rule host container.py verify() checks.
+ * — this is the exact rule host twrf.py RawFluxCapture.verify() checks.
  */
 typedef struct {
     uint32_t flux_count;  /* number of flux transitions (intervals) encoded   */

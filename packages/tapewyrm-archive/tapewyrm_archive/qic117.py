@@ -1,7 +1,8 @@
 """What the QIC-117 report bytes stored in TWRF/TWTI headers mean.
 
 A capture records the drive's raw report bytes (Report Drive Status, Drive
-Configuration, Vendor ID, Tape Status; DESIGN.md §13.1) so it is
+Configuration, ROM Version, Vendor ID, Tape Status; DESIGN.md §13.1,
+TWS-1 section 4.3) so it is
 self-describing. Decoding them is needed both live, by ``tw`` talking to a
 drive, and offline, by qiclib/qicsilver describing an image -- so the decoders
 live here with the formats, which every package already depends on. Error

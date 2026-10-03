@@ -12,7 +12,7 @@ The recovery workflow starts here with two steps, each with its own file format:
 and continues offline in **qicsilver** (packages/qicsilver): ``identify``,
 ``extract`` (TWTI -> TWVL volumes) and ``tar``. tw ends at the TWTI image.
 
-plus the hardware side:
+plus the tools around them:
 
     inspect  show the header of any TWRF, TWTI/TWTZ or TWVL file (no hardware)
     info     host + firmware build identity, board, port and USB serial

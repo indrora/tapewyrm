@@ -4,7 +4,7 @@
 # QIC-3020-MC Rev H §5.4.1 minimum puts 1475 segments/track at ~1,030 ft, so
 # it is the cover's 1,000 ft x 0.250 in class, and capacity_mb is that cover
 # entry (1.7 GB). The label's "1.6G" is the same tape counted in binary:
-# (59000 - 98 bad segments) x 29 KB = 1.75 GB = 1.63 GiB.
+# (59000 - 98 bad segments) x 29 KiB = 1.75 GB = 1.63 GiB.
 #
 # It is the only 1,000 ft x 0.250 in QIC-3020 profile, so every tape of that
 # class is reported as "MC3020EX class".

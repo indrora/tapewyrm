@@ -3,7 +3,9 @@
 Decodes each capture's flux to sectors (MFM, the physical layer this package
 owns), then hands the passes to :func:`qiclib.build.build_image`, which merges,
 places and Reed-Solomon corrects every segment and writes the TWTI file.
-This is the one place tapewyrm-cli depends on qiclib (STYLE.md §2).
+This is the only command that needs qiclib's tape logic (STYLE.md §2); the rest
+of tapewyrm-cli borrows only its data types (and the test-only
+``codec.pipeline``).
 """
 
 from __future__ import annotations

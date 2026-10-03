@@ -4,7 +4,7 @@ Bridges :mod:`qiclib.place` (binned 32-slot segments) and
 :mod:`qiclib.rs` (the GF(256) erasure decoder):
 
   * build the CRC -> erasure mask,
-  * apply the excluded-sector repack (codeword length ``N = 31 - bad_blocks``),
+  * apply the excluded-sector repack (codeword length ``N = 32 - excluded``),
   * RS-correct, and
   * extract the 29 data sectors (29 * 1024 bytes) in order.
 

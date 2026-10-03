@@ -1,6 +1,8 @@
 """TapeTransport — logical motion + capture orchestration (DESIGN.md §6A.4).
 
-Turns a track number into a ``RawFluxCapture``. Serpentine is handled by the
+Turns a track number into an in-memory ``RawFluxCapture``. No command uses it:
+``tw dump`` (``tape.dump``) streams to disk, winds to each track's start and
+health-checks every pass, and only tests/test_tape.py drives this class. Serpentine is handled by the
 drive (Logical Forward presents data in logical order regardless of physical
 direction), so this layer **never reverses flux** — it only records ``direction``
 in the capture header for the codec.
@@ -212,14 +214,14 @@ class TapeTransport:
     # --- helpers ---
 
     def _sample_clock(self) -> int:
-        """Sample clock used to stamp the capture header.
+        """Sample clock used to stamp the capture header: always 72 MHz.
 
-        TODO(bench), DESIGN.md §13.6 item 1: the real sample-clock tick rate comes
-        from the device INFO / flux engine; until the GW flux encoding is read,
-        stamp the AT32F403 nominal 72 MHz placeholder.
+        TODO: the INFO verb reports the real clock (``DeviceInfo.sample_clock_hz``)
+        and ``tape.dump.drive_identity`` uses it; this still stamps the AT32F403
+        nominal 72 MHz.
         """
         info = self.drive.link.info
-        # No standard field carries the flux sample clock yet; use a nominal value.
+        # Nominal value regardless of INFO (see the TODO above).
         if info is not None and info.sram_bytes:  # info present -> link is open
             pass
         return 72_000_000

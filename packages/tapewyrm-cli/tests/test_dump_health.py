@@ -9,7 +9,7 @@ PERIOD = 51_000_000  # ~710 ms of 72 MHz ticks, one segment on the 350
 
 
 def _n28(v: int) -> bytes:
-    """GW's 28-bit field: 7 bits per byte, low bit set (the inverse of _n28)."""
+    """GW's 28-bit field: 7 bits per byte, low bit set (what the stream parser reads)."""
     return bytes(((v >> s) & 0x7F) << 1 | 1 for s in (0, 7, 14, 21))
 
 

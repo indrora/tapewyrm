@@ -17,7 +17,7 @@ def test_missing_segment_carries_the_bad_sector_maps_exclusions(tmp_path):
     """A segment never read still has the map's excluded sectors recorded.
 
     The map describes the tape, not what was read: qiclib.extract sizes a lost
-    segment's hole from this mask, and mask 0 would make it a full 29 KB.
+    segment's hole from this mask, and mask 0 would make it a full 29 KiB.
     """
     seg, slot = 5, 3
     header = {

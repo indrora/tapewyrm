@@ -3,10 +3,11 @@
 # QIC-117 Rev J defaults (DESIGN.md §13.1). Timings sit inside Rev J Table 1
 # (STEPW 1-1100 us, STEP 0.9-2.1 ms, TIMEOUT 2.2-2.9 ms) and were exercised on
 # the bench; select/wake are bench-confirmed (see [[wake]] below).
-# TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: characterize the real wake
-# sequence, exact pulse/report timings, CCS level (does it support 36/37 geometry,
-# Skip-Extended, Report Tape Status?), and vendor quirks on the bench via
-# `gw pin` + scope before trusting this profile.
+# TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: the wake sequence is done
+# (below); still to characterize are the exact pulse/report timing margins, the
+# CCS level (the Jumbo 350 never ACKs Report Tape Status (33) or Report Format
+# Segments (37); Skip-Extended is untried) and any vendor quirks, with
+# `tw drive scope` and a scope.
 
 name = "colorado"
 bit_order = "lsb"           # QIC-117 reports clock LSB-first off TRK0 (§2.1)

@@ -1,6 +1,9 @@
-"""Top-level decode pipeline (DESIGN.md §6.4, §6A.5, §13.5).
+"""Synthetic-fixture decode pipeline (DESIGN.md §6.4, §6A.5, §13.5).
 
-Wires the codec stages into ``decode(caps) -> (filesets, RecoveryReport)``:
+Wires the codec and qiclib stages into ``decode(caps) -> (filesets,
+RecoveryReport)`` over fixture captures whose flux is a decoded MFM byte
+stream (``codec.flux``). Only tests/test_pipeline.py runs it; real captures go
+through ``tw convert`` (``image.convert``) instead. The stages:
 
     load + recover sectors from each cap   (flux.load -> mfm.recover_sectors)
       -> merge.union                       (multi-pass union, before RS)

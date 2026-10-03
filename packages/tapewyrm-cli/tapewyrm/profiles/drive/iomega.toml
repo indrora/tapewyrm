@@ -4,7 +4,7 @@
 # placeholders.
 # TODO(bench), DESIGN.md §9 item 3 / §13.6 item 3: characterize the real wake
 # sequence, exact pulse/report timings, CCS level (36/37 geometry, Skip-Extended,
-# Report Tape Status support?), and vendor quirks on the bench via `gw pin` + scope
+# Report Tape Status support?), and vendor quirks on the bench via `tw drive scope` + a scope
 # before trusting this profile. Ditto units are known to vary by generation.
 
 name = "iomega"

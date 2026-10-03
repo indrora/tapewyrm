@@ -1,4 +1,4 @@
-"""Volume profiles: VTBL layouts as data, and guessing between them (codec/volume_profile.py)."""
+"""Volume profiles: VTBL layouts as data, and guessing between them (qiclib.volume_profile)."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def test_guess_picks_mtn_for_the_3m_tape():
 
 
 def test_rev_n_reads_garbage_from_the_3m_tape():
-    """The reading `tw identify` printed before profiles: the checks must reject it."""
+    """The reading identify printed before volume profiles: the checks must reject it."""
     vol, records = _3m()
     verdict = vp.evaluate(records, vol, vp.load("qic80-rev-n"), now=NOW)
     failed = {c.name for c in verdict.failures}
@@ -70,7 +70,7 @@ def test_rev_n_reads_garbage_from_the_3m_tape():
     ],
 )
 def test_profiles_agree_with_the_builtin_parser(rec):
-    """`tw extract` still uses volume._parse_vtbl_entry; keep the two in step."""
+    """volume._parse_vtbl_entry is the reference parser; keep the profiles in step with it."""
     builtin = volume_mod._parse_vtbl_entry(rec)
     name = "cms-qic113" if builtin.vendor_specific else "qic80-rev-n"
     assert vp.decode_entry(rec, vp.load(name)) == builtin

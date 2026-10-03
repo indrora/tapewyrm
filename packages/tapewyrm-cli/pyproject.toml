@@ -1,23 +1,24 @@
 [project]
 name = "tapewyrm"
 version = "0.1.0"
-description = "QIC-80 floppy-tape recovery over Greaseweazle v4.1 — host software"
+description = "tw: capture QIC-80 floppy tapes as flux over Greaseweazle v4.1 and convert them to TWTI tape images"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Unlicense"
 authors = [{ name = "Tapewyrm contributors" }]
 
-# Core runtime deps. The flux/PLL/MFM reuse from the `greaseweazle` host package
-# and the `numpy` acceleration path are *optional extras* (see below): the codec is
-# implemented in pure stdlib Python so the whole decode stack stays importable and
-# fixture-testable with no hardware and no heavy wheels (DESIGN.md §6A.10, §13.6).
+# Core runtime deps. The codec is pure stdlib Python -- Greaseweazle's PLL is
+# vendored (tapewyrm/codec/gwpll.py), not depended on -- so the whole decode stack
+# stays importable and fixture-testable with no hardware and no heavy wheels
+# (DESIGN.md §6A.10, §13.6).
 dependencies = [
     "click>=8.1",
     "pyserial>=3.5",
     "rich>=15.0.0",
     "rich-click>=1.9.9",
     "tapewyrm-archive",
-    # Only `tw convert` (sectors -> TWTI) uses it. STYLE.md §2.
+    # `tw convert` (sectors -> TWTI) is the only command that needs it; the rest
+    # of the package uses only its data types. STYLE.md §2.
     "qiclib",
 ]
 
@@ -27,13 +28,6 @@ tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }
 qiclib = { path = "../qiclib", editable = true }
 
 [project.optional-dependencies]
-# Optional vectorized GF(256) path; pure-Python fallback is always present.
-accel = ["numpy>=1.26"]
-# NOTE: the Greaseweazle host package (`pip install greaseweazle`) provides the
-# flux/PLL/MFM primitives the codec adapters can reuse. It is deliberately NOT a
-# declared dependency: it isn't needed for the hardware-free decode/test path, its
-# wheels lag new CPython releases, and the reuse is bench-gated anyway
-# (TODO(bench), DESIGN.md §13.6 item 1). Install it manually when wiring hardware.
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -42,8 +36,9 @@ dev = [
 ]
 
 [project.scripts]
-# `tw` is the shipped command — the single Tapewyrm tool (capture/decode/flash);
-# it deliberately does NOT reuse or require the `gw` executable (DESIGN.md §1).
+# `tw` is the shipped command: capture, convert to a TWTI image, drive and flash
+# the board (reading the image is qicsilver's job). It deliberately does NOT
+# reuse or require the `gw` executable (DESIGN.md §1).
 # `tapewyrm` is kept as a long-form alias.
 tw = "tapewyrm.cli:cli"
 tapewyrm = "tapewyrm.cli:cli"

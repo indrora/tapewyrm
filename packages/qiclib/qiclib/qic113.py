@@ -1,7 +1,8 @@
 """QIC-113 file-set extraction (DESIGN.md §7.5).
 
-Consumes a Volume Data Area byte stream + its :class:`VtblEntry` and yields a
-:class:`FileSet` (directory tree + file bytes).
+Consumes a volume's bytes + its :class:`VtblEntry` and yields a
+:class:`FileSet` (directory tree + file bytes). The bytes are normally a TWVL
+volume's (``qicsilver tar``), already decompressed by ``qiclib.extract``.
 
 Basic-DOS (§7) is implemented fully:
   * the *directory section* is concatenated variable-length Directory Entries in
@@ -14,10 +15,11 @@ Basic-DOS (§7) is implemented fully:
 Extended-OS (§8) is implemented to the framing level: ``0x33CC33CC`` + directory
 entry + path + Data Areas (``0x66996699`` + 2-byte Data-Area-ID; ID 7 = primary
 file bytes). Per-OS attribute structs are summarized / ``TODO``.
+(``qicsilver tar`` reads extended volumes with :mod:`qiclib.qic113ext`
+instead; this framing-level walk remains for :func:`extract`'s callers.)
 
 The multi-cartridge ``LTLT`` Link Sub-Section is recognized and skipped.
-Compressed volumes (VTBL byte 124 bit 7) route through :func:`maybe_decompress`,
-a clear ``TODO(bench)`` drop-in for STAC LZS / DCLZ (DESIGN.md §7.5, §9 item 7).
+:func:`maybe_decompress` is a pass-through hook; see its docstring.
 """
 
 from __future__ import annotations
@@ -309,8 +311,8 @@ _SIZE_UNKNOWN = 0xFFFFFFFF
 def _plausible_entry(stream: bytes, sig_at: int, entry: DirEntry, data_len: int | None) -> bool:
     """Is the Data Entry at ``sig_at`` real, or the signature bytes inside file data?
 
-    The 4-byte signature can occur in file contents (old-connor's has one in a
-    bitmap); trusting it there reads a binary "name" and a multi-GB size, and
+    The 4-byte signature can occur in file contents (one bench tape has one
+    inside a file); trusting it there reads a binary "name" and a multi-GB size, and
     the walk jumps past every real entry behind it. A real entry has a sane
     size byte (9 = MTN, 10 = spec, more = vendor blob), a printable name, and
     a data length that is not negative (``None`` = unknown, checked later).
@@ -519,27 +521,34 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Decompression hook (TODO(bench) drop-in)
+# Decompression hook (pass-through)
 # ---------------------------------------------------------------------------
 
 
 def maybe_decompress(stream: bytes, vtbl: VtblEntry) -> bytes:
-    """Decompress the Volume Data Area if the VTBL flags compression.
+    """Return ``stream`` unchanged; it only logs what the VTBL says.
 
-    TODO(bench), DESIGN.md §7.5 / §9 item 7: compressed volumes (VTBL byte 124
-    bit 7) frame STAC LZS (compression code 1) or DCLZ/ALDC (QIC-122/130/154)
-    Compression Frames. The framing is described in §7.5 but the LZS/DCLZ codec
-    itself is a drop-in not specified here. This hook is the single integration
-    point: parse the Frame headers and call the codec. Until that drop-in exists
-    we pass the stream through unchanged and rely on the caller noting
-    ``FileSet.compressed`` so the user knows the bytes are still compressed.
+    Decompression happens earlier, in ``qiclib.extract``, which decodes every
+    segment of a compressed volume as a QIC-122 (Stac LZS) extent and writes
+    the result to a TWVL. A TWVL's bytes are therefore already decompressed,
+    and TWS-3 section 4 forbids decompressing them again -- so on the
+    ``qicsilver tar`` path passing through is correct. (That path decodes
+    only VTBL bytes 0-56, so ``vtbl.compressed`` is None there and the
+    "no codec" line below is not reached.) Only a caller that hands in raw
+    segment data (``volume.volume_streams``, as tapewyrm-cli's
+    ``codec.pipeline`` does) gets compressed bytes back, which
+    ``FileSet.compressed`` flags.
+
+    The hook stays as the one place a codec for other compression codes
+    (DCLZ/ALDC, QIC-130/154) would go; ``qiclib.extract`` currently treats
+    every compressed volume as QIC-122 whatever its code (DESIGN.md §9 item 7).
     """
     if not vtbl.compressed:
         log.debug(
             "vtbl %r: compressed=%s; passing stream through", vtbl.description, vtbl.compressed
         )
         return stream
-    # TODO(bench): parse Compression Extents/Frames and invoke STAC LZS / DCLZ.
+    # TODO(bench): a codec for non-QIC-122 compression codes would go here.
     log.debug(
         "vtbl %r: compressed (code %s) but no codec hooked in; passing %d bytes through as-is",
         vtbl.description,
@@ -579,10 +588,11 @@ def _strip_link_subsection(stream: bytes) -> bytes:
 
 
 def extract(stream: bytes, vtbl: VtblEntry, *, dir_offset: int | None = None) -> FileSet:
-    """Extract a :class:`FileSet` from a Volume Data Area byte stream.
+    """Extract a :class:`FileSet` from a volume's bytes (normally a TWVL's).
 
     Handles Directory-First vs Directory-Last layout (VTBL byte 56 bit 5),
-    Basic-DOS vs Extended-OS, the ``LTLT`` skip, and the compression hook.
+    Basic-DOS vs Extended-OS, the ``LTLT`` skip, and the (pass-through)
+    compression hook. ``dir_offset`` is a TWVL's ``directory_offset``.
     """
     log.debug("extract: %r, %d-byte volume data area", vtbl.description, len(stream))
     extended = is_extended_os(vtbl)
@@ -736,10 +746,10 @@ def _directory_last_offset(stream: bytes, vtbl: VtblEntry) -> int:
     ``File Set Data Section + Segment Gap + File Set Directory Section``, and
     §7.1 / §3.26 put the directory on a segment boundary. §7.1.1 locates it
     in *segment* space, counting back from the VTBL's Ending Segment by the
-    Directory Section Size rounded up to whole segments. ``stream`` does not
-    end at the Ending Segment (the caller sizes it from the VTBL's section
-    sizes, and a truncated capture ends anywhere), so we count forward from
-    the other end instead: the data section starts at 0 and is
+    Directory Section Size rounded up to whole segments. ``stream`` need not
+    end at the Ending Segment (a compressed TWVL is sized from the VTBL's
+    section sizes, not from its segments), so we count forward from the
+    other end instead: the data section starts at 0 and is
     ``data_section_size`` bytes long (VTBL 96-103), and the directory is the
     first segment boundary at or after it.
 

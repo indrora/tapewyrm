@@ -36,7 +36,7 @@ QIC-3020 defines); with no hint and two standards that both fit, it says so and
 lists both rather than picking one.
 
 The drive has an opinion too: Report Tape Status (QIC-117 cmd 33) bits 4-6
-name a tape type (``qic117.status.TAPE_TYPES``). TWRF captures record it, and
+name a tape type (``tapewyrm_archive.qic117.TAPE_TYPES``). TWRF captures record it, and
 :mod:`qiclib.identify` prints both so they can be compared.
 
 The catalogue is data, not code: one TOML **cartridge profile** per tape in

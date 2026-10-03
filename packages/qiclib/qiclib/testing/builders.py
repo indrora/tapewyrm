@@ -1,4 +1,4 @@
-"""Synthesize codec fixtures: header segments, volume tables, QIC-113 volumes.
+"""Synthesize qiclib test fixtures: header segments, volume tables, QIC-113 volumes.
 
 These mirror the on-tape structures (DESIGN.md §7.3, §7.5) closely enough to
 exercise the parsers end-to-end with no hardware.

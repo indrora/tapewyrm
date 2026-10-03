@@ -7,7 +7,9 @@ Reed-Solomon corrected, in segment order -- plus how sure we are of each one.
 It knows nothing about backup formats; that is ``qicsilver extract``'s job.
 
 This module is the file format only (read, write, random access). Building
-an image from flux lives in ``tapewyrm.image.convert`` (tapewyrm-host).
+an image lives in ``qiclib.build``, which ``tw convert``
+(``tapewyrm.image.convert``, tapewyrm-cli) feeds with the sectors it
+decodes from flux. The byte layout is owned by ``docs/spec/twti.md`` (TWS-2).
 
 Layout (little endian)::
 
@@ -17,7 +19,7 @@ Layout (little endian)::
         u8  erasures        sectors RS had to rebuild (or couldn't)
         u16 data_len        bytes of real data in this segment's slot
         u32 excluded_mask   bit k = sector k excluded by the bad-sector map
-    segment data: segment_count x SEGMENT_STRIDE bytes (29 KB each, zero-padded)
+    segment data: segment_count x SEGMENT_STRIDE bytes (29 KiB each, zero-padded)
 
 The fixed stride gives random access by segment number. A segment's data is
 its corrected data rows (29 sectors, fewer when the bad-sector map excludes
@@ -40,9 +42,11 @@ length; ``du`` shows what it really costs.
 
 TWTZ: zstd-compressed TWTI
 --------------------------
-A ``.twtz`` file is a TWTI byte stream through one Zstandard compressor --
+A ``.twtz`` file is a TWTI byte stream compressed as Zstandard data --
 exactly what ``.tar.zst`` is to ``.tar`` -- so ``zstd -d x.twtz`` gives a valid
-``x.twti``. It is for moving and archiving images: the zero slots compress to
+``x.twti``. TWS-2 section 7 lets it be one or more zstd frames: readers
+accept several, and writers SHOULD write one, which :meth:`TapeImage.save`
+does (one compressor, one frame). It is for moving and archiving images: the zero slots compress to
 almost nothing, wherever the file lands.
 
 - Writing is chosen by suffix: :meth:`TapeImage.save` to a ``*.twtz`` path
@@ -79,7 +83,8 @@ log = logging.getLogger(__name__)
 
 MAGIC = b"TWTI"
 # Every Zstandard frame starts with this magic number (RFC 8878 §3.1.1,
-# 0xFD2FB528 little endian). A TWTZ file is one or more such frames.
+# 0xFD2FB528 little endian). A TWTZ file starts with one: it is one or more
+# frames (readers take them all), and TapeImage.save writes exactly one.
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 COMPRESSED_SUFFIX = ".twtz"
 VERSION = 1
@@ -133,7 +138,7 @@ def sniff(path: Path) -> str | None:
 
 
 def _is_zero(buf: bytes | memoryview) -> bool:
-    # bytes.count runs in C; a Python any() over 29 KB per segment would not.
+    # bytes.count runs in C; a Python any() over 29 KiB per segment would not.
     # bytes(b) of a bytes is b itself; of a memoryview block, a 4 KiB copy.
     return bytes(buf).count(0) == len(buf)
 
@@ -201,7 +206,7 @@ class TapeImage:
 
         A ``.twtz`` path is written zstd-compressed, anything else as a
         sparse TWTI (module docstring). ``progress`` gets one "writing image"
-        task in segments: each is at most a 29 KB write, so a per-segment
+        task in segments: each is at most a 29 KiB write, so a per-segment
         update is far off any hot path.
         """
         hdr = json.dumps(self.header, indent=1).encode("utf-8")
@@ -485,8 +490,3 @@ def _decompress_to_temp(path: Path, progress: Progress) -> str:
         written / 1e6,
     )
     return name
-
-
-# ---------------------------------------------------------------------------
-# tw convert
-# ---------------------------------------------------------------------------

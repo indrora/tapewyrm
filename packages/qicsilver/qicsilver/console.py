@@ -3,10 +3,10 @@
 A deliberate copy of ``tapewyrm/console.py`` (tapewyrm-cli), so both CLIs look
 and behave the same without either depending on the other. Keep the two in
 step: a change here belongs there too, and vice versa. Only ``_OUR_LOGGERS``
-differs.
+and the CLI names in this docstring differ.
 
 This is the only module (with ``cli``) that imports ``rich``. The library logs
-through :mod:`logging` and reports progress through :mod:`tapewyrm.progress`;
+through :mod:`logging` and reports progress through :mod:`tapewyrm_archive.progress`;
 here both are pointed at one stderr :class:`rich.console.Console`.
 
 Why one shared console: rich's live display (the progress bars) redraws the
@@ -18,8 +18,9 @@ renderer must share it.
 Why stderr: stdout is the data channel -- ``qicsilver identify --json``, status
 tables, summaries -- and must stay pipeable. Logs and bars are diagnostics.
 
-Verbosity: ``-v`` / ``-q`` move the ``tapewyrm`` logger's level around INFO,
-which is where the library's narrative ("track 3: capturing -> ...") lives.
+Verbosity: ``-v`` / ``-q`` move our packages' loggers (``_OUR_LOGGERS``)
+around INFO, which is where the library's narrative ("track 3: capturing ->
+...") lives.
 Third-party loggers stay at WARNING so ``-v`` doesn't turn on their noise.
 """
 
@@ -108,7 +109,7 @@ class _AmountColumn(ProgressColumn):
 
 
 class _RichTask:
-    """:class:`tapewyrm.progress.ProgressTask` over one rich task id."""
+    """:class:`tapewyrm_archive.progress.ProgressTask` over one rich task id."""
 
     def __init__(self, live: RichLive, task_id: TaskID) -> None:
         self._live = live
@@ -122,7 +123,7 @@ class _RichTask:
 
 
 class RichProgress:
-    """:class:`tapewyrm.progress.Progress` drawn as rich bars on ``console``.
+    """:class:`tapewyrm_archive.progress.Progress` drawn as rich bars on ``console``.
 
     Tasks are removed when their ``with`` block ends: nested per-item bars
     (one per track, one per volume) would otherwise pile up for the whole

@@ -1,7 +1,11 @@
-"""`qicsilver extract`: TWTI tape image -> TWVL volume files.
+"""`qicsilver extract`: TWTI/TWTZ tape image -> TWVL volume files.
 
-Reads the volume table through a volume profile, decodes QIC-122 extents and
-lays each volume out with the TWVL format from ``tapewyrm_archive.twvl``.
+Reads the volume table through a volume profile (:mod:`qiclib.identify`,
+:mod:`qiclib.volume_profile`), then builds each volume's bytes: QIC-122
+extents decoded and placed at their uncompressed offsets, or, for an
+uncompressed volume, the segments' data laid end to end. Each volume is
+written with the TWVL format from ``tapewyrm_archive.twvl`` (TWS-3), holes
+and all; ``qicsilver tar`` reads it from there.
 """
 
 from __future__ import annotations
@@ -38,9 +42,8 @@ def _expected_data_len(excluded_mask: int) -> int:
     independently of whether it was read, so it is what the writing software
     saw too: 32 sectors, minus the excluded ones, minus 3 for ECC.
 
-    ``qiclib.build`` records the map's mask on MISSING entries too, so this is
-    exact for images it wrote. Images from before that (mask 0 on MISSING
-    entries) get a full 29 KB hole, which drifts by any excluded sectors.
+    ``qiclib.build`` records the map's mask on MISSING entries too (TWS-2
+    section 5.3), so this is exact; a mask of 0 means a full 29 KiB.
     """
     excluded = bin(excluded_mask & ((1 << _SECTORS_PER_SEGMENT) - 1)).count("1")
     return max(0, _SECTORS_PER_SEGMENT - excluded - _ECC_SECTORS) * _SECTOR_BYTES
@@ -108,10 +111,13 @@ def extract(
         log.debug("volume table segment %d is %s; refusing", vt_seg, vt_entry.state.name)
         raise ValueError(f"volume table segment {vt_seg} was not recovered")
     if vt_entry.state is SegmentState.UNCORRECTABLE:
-        # Not refused (behaviour unchanged), but the table may be garbage.
+        # Not refused: a partly rebuilt table may still read. One that reads
+        # as garbage scores low with every volume profile, and a size it
+        # claims beyond what its segments can hold is refused below.
         log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
     log.debug("reading volume table from segment %d with volume profile %r", vt_seg, volume_profile)
-    # Deferred: identify imports twti and the codec stack; keep this module light.
+    # Deferred: identify pulls in build, segment and rs (the sector decode
+    # path), which only this step of extraction needs.
     from qiclib.identify import from_image
 
     verdicts = from_image(img, volume_profile=volume_profile).verdicts

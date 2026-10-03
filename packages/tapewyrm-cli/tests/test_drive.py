@@ -95,7 +95,7 @@ def test_report_dispatch_clocks_bits():
 
 
 def test_non_streaming_motion_polls_status_until_ready(monkeypatch):
-    # QIC-117 has no ready line: the drive polls Report Drive Status (ftape-style).
+    # QIC-117 has no ready line: the drive layer polls Report Drive Status (ftape-style).
     monkeypatch.setattr("time.sleep", lambda s: None)
     drive, link = _drive()
     link.queue_report(0b0000_0100, 1)  # cartridge, NOT ready (still moving)

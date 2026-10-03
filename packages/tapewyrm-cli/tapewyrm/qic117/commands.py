@@ -223,5 +223,5 @@ def encode_arg(cmd: Cmd, value: int) -> list[int]:
         ]
 
     # Plain single-train N+2 (Seek Head to Track 13, Select Rate/Format 27,
-    # Phantom Select 46, Diag modes 28/29).
+    # Phantom Select 46).
     return [_plus2(value)]

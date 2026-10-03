@@ -1,4 +1,4 @@
-"""QIC-122 decompression (docs/qic122b.pdf) and QIC-113 extents (docs/qic113g.pdf)."""
+"""QIC-122 decompression (qic122b.pdf) and QIC-113 extents (qic113g.pdf, docs/qic-standards/)."""
 
 import struct
 

@@ -1,4 +1,4 @@
-"""`tw extract` (image.twvl.extract): volumes read through the volume profile.
+"""`qicsilver extract` (qiclib.extract): volumes read through the volume profile.
 
 The regression this pins down is captures/old-connor.twti: an MTN-written tape
 whose volume table the plain Rev N parser misreads (data size taken from the
@@ -129,12 +129,12 @@ def _plain_entry(*, start_seg: int, end_seg: int, data_size: int) -> bytes:
 
 
 def _plain_image(tmp_path: Path, *, end_seg: int = 6) -> Path:
-    """Uncompressed volume over segments 3..6 whose segments are not all 29 KB.
+    """Uncompressed volume over segments 3..6 whose segments are not all 29 KiB.
 
-    seg 3: CLEAN, 2 sectors excluded by the bad-sector map -> 27 KB of b"a"
-    seg 4: MISSING, 1 sector excluded                      -> 28 KB hole
+    seg 3: CLEAN, 2 sectors excluded by the bad-sector map -> 27 KiB of b"a"
+    seg 4: MISSING, 1 sector excluded                      -> 28 KiB hole
     seg 5: BAD (whole segment mapped out)                  -> contributes nothing
-    seg 6: CLEAN, full                                     -> 29 KB of b"c"
+    seg 6: CLEAN, full                                     -> 29 KiB of b"c"
     """
     vtbl = build_volume_table_segment(
         2, [_plain_entry(start_seg=3, end_seg=end_seg, data_size=(27 + 28 + 29) * K)]
@@ -157,7 +157,7 @@ def _plain_image(tmp_path: Path, *, end_seg: int = 6) -> Path:
 
 
 def test_uncompressed_volume_concatenates_short_segments_in_order(tmp_path):
-    """Each segment lands after the previous one's usable bytes, not at n * 29 KB."""
+    """Each segment lands after the previous one's usable bytes, not at n * 29 KiB."""
     [path] = extract(_plain_image(tmp_path), tmp_path / "out")
     vol = Volume.load(path)
     assert vol.data == b"a" * (27 * K) + bytes(28 * K) + b"c" * (29 * K)

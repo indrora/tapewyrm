@@ -1,4 +1,4 @@
-"""qicsilver CLI: identify on TWTI images (moved from `tw identify`)."""
+"""qicsilver CLI: identify on TWTI/TWTZ images; clean errors on truncated inputs."""
 
 from __future__ import annotations
 

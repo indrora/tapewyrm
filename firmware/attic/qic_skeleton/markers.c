@@ -2,7 +2,7 @@
  * markers.c — tape marker injection on the GW opcode-escape channel (§5.4, §7.2).
  *
  * The marker CODES and payload LAYOUTS are the firmware<->host contract; see
- * markers.h and packages/tapewyrm-cli/tapewyrm/rawflux/container.py. The framing implemented here
+ * markers.h and packages/tapewyrm-archive/tapewyrm_archive/twrf.py. The framing implemented here
  * mirrors the host model:
  *
  *     <escape> <marker_code> <len:u8> <payload...>
@@ -15,7 +15,7 @@
  *
  * TODO(bench) §13.6 item 1: GW's real opcode-escape scheme may use a different
  * introducer byte and/or a multi-byte opcode form. When the GW firmware is read,
- * replace mk_frame_header() to match, and update container.py in lockstep. The
+ * replace mk_frame_header() to match, and update twrf.py in lockstep. The
  * marker codes/payloads must NOT change.
  */
 

@@ -51,13 +51,15 @@ src/floppy.c
   ├─ floppy_configure()/floppy_reset()── hook ─► qic_capture_abort_silent()  (safe-stop)
   ├─ #include "qic/qic.c"             ◄── the QIC verbs + markers + capture live here
   └─ process_command()                ── new cases ─► CMD_QIC_INFO / SET_TIMING / PULSES
-                                                      / WAIT_READY / CAPTURE
+                                                      / WAIT_READY / SCOPE / BUILD_INFO
+                                                      / CAPTURE
 ```
 
 `src/qic/qic.c` is **not** a separately-compiled translation unit (it would not
 build standalone — it references GW's `floppy.c` statics). It rides along inside
-`floppy.o` via the `#include`, and the build's auto-generated dependency files
-pick it up as a prerequisite of `floppy.o`, so edits to it trigger a rebuild.
+`floppy.o` via the `#include`, and the build's include scanning (SCons, under
+PlatformIO) picks it up as a prerequisite of `floppy.o`, so edits to it trigger
+a rebuild.
 
 ### QIC command set (grafted into `process_command()`)
 
@@ -68,6 +70,13 @@ pick it up as a prerequisite of `floppy.o`, so edits to it trigger a rebuild.
 | `CMD_QIC_PULSES`     | `0x82` | emit *N* STEP pulses verbatim; optionally clock *k* report bits off TRK0 |
 | `CMD_QIC_WAIT_READY` | `0x83` | poll the INDEX/ready line until ready or timeout |
 | `CMD_QIC_CAPTURE`    | `0x84` | issue motion verbatim, then arm a free-running flux capture (reuses the GW read path) |
+| `CMD_QIC_SCOPE`      | `0x87` | bench logic probe: optional *N* STEP pulses, then edge-log the drive's input lines |
+| `CMD_QIC_BUILD_INFO` | `0x88` | firmware build identity: git commit + dirty flag (`tw info`) |
+
+The numbers are `TW_TXN_*` from the generated `inc/protocol.h`. `0x85`
+(`SELECT`) and `0x86` (`ABORT`) are reserved there but are not cases: drive
+select uses GW's own `SELECT`/`DESELECT`/`MOTOR` commands, and a capture is
+aborted out of band through GW's clear-comms baud change.
 
 The marker codes and payload layouts the firmware emits are the firmware↔host
 contract; they come from the generated `inc/protocol.h` and must stay
@@ -85,7 +94,10 @@ dead-time SPACE) to the INDEX edge, not the time since the previous segment.
 
 ```
 firmware/
-  Makefile, Rules.mk      vendored GW build (builds in-tree; see below)
+  platformio.ini          the build: envs `tapewyrm` (app) and `bootloader`, at32f4 only
+  scripts/pio_*.py        PlatformIO hooks that install GW's own compiler flags
+  boards/                 the PlatformIO board definition for the v4.1
+  Makefile, Rules.mk      GW's original make build; superseded by PlatformIO, unused
   inc/
     protocol.h            GENERATED contract (DO NOT EDIT) — opcodes, marker codes, version
     cdc_acm_protocol.h    GW command set + flux byte encoding (FLUXOP_*, the GW opcode escape)
@@ -120,42 +132,49 @@ firmware/
 
 ## Building
 
-The vendored GW tree builds in-tree with the ARM GNU toolchain via Make. To
-build the combined Tapewyrm `tapewyrm` application image:
+The firmware builds with **PlatformIO** (`platformio.ini`), using the
+`ststm32` platform only as a toolchain and SCons host: there is no framework,
+and `scripts/pio_post.py` replaces the platform's flags with the ones GW's
+old `Rules.mk` used. From the repository root:
 
 ```sh
-cd firmware
-export ROOT="$(pwd)" FW_MAJOR=1 FW_MINOR=6
-mkdir -p out/at32f4/prod/tapewyrm
-make -C out/at32f4/prod/tapewyrm -f "$ROOT/Rules.mk" \
-    target.bin mcu=at32f4 prod=y tapewyrm=y PYTHON=python
+just fw          # = uv run tools/package.py --skip-host --mcus at32f4
+just fw-dist     # full firmware release, plus a combined .upd update file
 ```
 
-This produces `out/at32f4/prod/tapewyrm/target.{elf,bin}`. Build **prod**
-for releases; swap `prod=y` for `debug=y` during bring-up to enable the 3 Mbaud
-serial logging (useful while debugging the report-bit loop and the capture
-path). Run `make clean` between attempts.
+`tools/package.py` runs `pio run -e bootloader -e tapewyrm` in `firmware/`,
+which leaves `firmware.{elf,bin,hex}` per env under `.pio/build/<env>/`, then
+merges the bootloader and app HEX files into `tapewyrm.hex` in pure Python
+(`tools/ihex.py`) and copies the results to `dist/`. Nothing else is needed
+besides Python, `uv` and PlatformIO Core (`pio`): no `make`, no `srecord`.
+Only the AT32F4 (v4.x) target is wired up; the STM32F1/F7 sources are still
+in-tree but not built.
 
-> The `.hex` step needs `srec_cat` (srecord), which stitches in the bootloader.
-> If `srec_cat` is absent locally, build `target.bin`/`target.elf` to verify; CI
-> has srecord and produces the `.hex`.
+PlatformIO builds are always release builds (`NDEBUG`); GW's `debug=y` serial
+logging belonged to the make build and has no PlatformIO env.
 
-> **Pin the toolchain version.** The toolchain affects code generation and
-> therefore instruction timing — and this firmware is timing-sensitive (QIC
-> pulse cadence, report-bit windows, flux capture). Reproduce via the project's
-> pinned container / Nix flake (DESIGN.md §12.6, §12.8).
+> **The toolchain is pinned.** It affects code generation and therefore
+> instruction timing, and this firmware is timing-sensitive (QIC pulse
+> cadence, report-bit windows, flux capture). `platformio.ini` pins the xPack
+> ARM GCC (`toolchain-gccarmnoneeabi@~1.120301.0`, gcc 12.3), and PlatformIO
+> fetches that exact package itself.
+
+CI (`.github/workflows/firmware.yml`) runs the same command as `just fw`. It
+does not install PlatformIO; providing `pio` on the runner is outside that
+workflow's scope.
 
 Verify the QIC code linked in:
 
 ```sh
-arm-none-eabi-nm  out/at32f4/prod/tapewyrm/target.elf | grep -i qic
-arm-none-eabi-size out/at32f4/prod/tapewyrm/target.elf
+arm-none-eabi-nm   firmware/.pio/build/tapewyrm/firmware.elf | grep -i qic
+arm-none-eabi-size firmware/.pio/build/tapewyrm/firmware.elf
 ```
 
-(Many of the QIC handlers are `static` and get inlined into `process_command` /
-`floppy_read` under `-Os`; symbols such as `qic_pulses`, `qic_cap`, and
-`qic_timing` confirm the graft is present, and `size` shows the image grew over a
-stock GW build by the QIC logic.)
+(The ARM binutils live in PlatformIO's toolchain package if they are not on
+your `PATH`. Many of the QIC handlers are `static` and get inlined into
+`process_command` / `floppy_read` under `-Os`; symbols such as `qic_pulses`,
+`qic_cap`, and `qic_timing` confirm the graft is present, and `size` shows the
+image grew over a stock GW build by the QIC logic.)
 
 ## Flashing — three tiers (DESIGN.md §12.3)
 
@@ -206,14 +225,17 @@ descriptors / commands.** Details in `vendor-seam/README.md`.
 
 The marker **payload layouts** the firmware emits (in `src/qic/qic.c`) are the
 other half of the contract; they must stay byte-for-byte identical to what the
-host parses in `packages/tapewyrm-cli/tapewyrm/rawflux/container.py` (little-endian).
+host parses in `packages/tapewyrm-archive/tapewyrm_archive/twrf.py`
+(little-endian; TWS-1, `docs/spec/twrf.md`).
 
 ## What is real vs `TODO(bench)`
 
 The graft is **real, present, and compiles+links into the image**. The pieces
-that are genuinely hardware-timing-faithful and need a real drive + scope to
-finalize are marked `TODO(bench)` at their sites in `src/qic/qic.c` and the
-graft hooks in `src/floppy.c` (DESIGN.md §13.6):
+that are genuinely hardware-timing-faithful are marked `TODO(bench)` at their
+sites in `src/qic/qic.c` (DESIGN.md §13.6). All four have since worked end to
+end on one drive, the Colorado Jumbo 350, which dumped whole tapes that verify
+against the firmware's END accounting with one INDEX per segment; the markers
+stay until other drive families have been tried:
 
 1. **Exact QIC-117 pulse envelope.** The default cadence (`qic_timing`) tracks
    QIC-117 Rev J Table 1; the real per-drive values + report strategy
@@ -223,10 +245,11 @@ graft hooks in `src/floppy.c` (DESIGN.md §13.6):
    `write_pin(step,TRUE)` pulls the bus low at the drive, and that
    `get_trk0()`/`get_index()` `LOW` is the QIC "active" level. Confirm against
    the v4.1 schematic.
-3. **INDEX-per-segment edge handling.** On tape INDEX fires per *segment*
-   (~2 ms cadence), not per *revolution*. The graft rides GW's existing index
-   detection; confirm GW's `index_mask` debounce (`delay_params.index_mask`)
-   doesn't swallow segment edges at that cadence.
+3. **INDEX-per-segment edge handling.** On tape INDEX fires once per
+   *segment* during Logical Forward (~710 ms apart on the 350), not per
+   *revolution*, and a ready, idle drive also emits cue pulses every ~2-3 ms.
+   The graft rides GW's existing index detection; confirm GW's `index_mask`
+   debounce (`delay_params.index_mask`) doesn't swallow edges on other drives.
 4. **Free-running-capture DMA details.** The capture reuses GW's read-stop and
    overflow handling unchanged; confirm the DMA edge behaviour holds for a
    continuous (non-revolution-gated) stream.
