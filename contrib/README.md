@@ -1,11 +1,11 @@
 # contrib: tools that work on dumped tapes
 
 Utilities that operate on what `tw dump` produced, as opposed to the device.
-They use the `tapewyrm` package from `packages/tapewyrm-host/`, so run them through its
+They use the `tapewyrm` package from `packages/tapewyrm-cli/`, so run them through its
 environment from the repository root:
 
 ```bash
-uv run --project packages/tapewyrm-host python contrib/<tool>.py ...
+uv run --project packages/tapewyrm-cli python contrib/<tool>.py ...
 ```
 
 (`tools/` at the repository root holds build helpers used by `just`; these are

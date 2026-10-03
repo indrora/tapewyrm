@@ -2,7 +2,7 @@
 #
 # `protocol/generate.py` emits BOTH ends from this file:
 #   - firmware/protocol.h        (C)
-#   - packages/tapewyrm-host/tapewyrm/link/protocol.py   (Python)
+#   - packages/tapewyrm-cli/tapewyrm/link/protocol.py   (Python)
 # CI regenerates and fails on `git diff` so the two ends can never drift.
 #
 # TODO(bench), DESIGN.md §13.6 item 1: the `marker` codes below ride GW's flux

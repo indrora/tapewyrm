@@ -8,7 +8,7 @@
  * index opcode) so they can NEVER be misread as flux. The marker CODES
  * (TW_MARK_*) and the little-endian payload LAYOUTS below are the firmware<->host
  * CONTRACT — they must stay byte-for-byte identical to what the host parses in
- * packages/tapewyrm-host/tapewyrm/rawflux/container.py. Only the opcode-escape *framing* (the
+ * packages/tapewyrm-cli/tapewyrm/rawflux/container.py. Only the opcode-escape *framing* (the
  * escape byte + stuffing) is bench-dependent (§13.6 item 1).
  *
  * Payload layouts (little-endian) — keep in sync with container.py:

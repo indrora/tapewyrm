@@ -11,7 +11,8 @@ every decision). This README is the map; the design doc is the territory.
 
 | Path        | What                                                                       |
 |-------------|----------------------------------------------------------------------------|
-| `packages/tapewyrm-host/`     | Python host: device link, QIC-117 drive layer, tape transport, decode codec |
+| `packages/tapewyrm-cli/`     | `tw`: device link, QIC-117 drive layer, tape transport, flux/MFM decode |
+| `packages/tapewyrm-archive/` | TWRF / TWTI / TWVL file formats (stdlib-only base of every package)    |
 | `firmware/` | C firmware skeleton (QIC verbs, bus arbiter, free-running flux capture)      |
 | `protocol/` | Single source of truth (`protocol.toml`) + generator for both ends          |
 | `docs/`     | DESIGN.md and design notes                                                  |

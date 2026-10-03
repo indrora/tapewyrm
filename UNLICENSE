@@ -34,7 +34,7 @@ Tapewyrm is released into the public domain under the Unlicense (above).
   itself released into the public domain under the Unlicense — see
   `firmware/COPYING`. Tapewyrm modifications are likewise public domain.
 
-- The host software under `packages/tapewyrm-host/` is original Tapewyrm code implementing the
+- The host software under `packages/tapewyrm-cli/` is original Tapewyrm code implementing the
   public QIC-117 / QIC-80-MC / QIC-113 standards. The ftape project (GPL) was
   consulted only as a behavioural reference; no ftape code is copied or
   incorporated.

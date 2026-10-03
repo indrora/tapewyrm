@@ -1,0 +1,37 @@
+name: packages
+
+# Every Python package under packages/ (STYLE.md §2). They depend on each other
+# through editable path sources (tapewyrm-cli -> tapewyrm-archive, ...), so a
+# change to any package re-checks all of them.
+on:
+  push:
+    paths: ["packages/**", ".github/workflows/packages.yml"]
+  pull_request:
+    paths: ["packages/**", ".github/workflows/packages.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: tapewyrm-archive, module: tapewyrm_archive }
+          - { package: tapewyrm-cli, module: tapewyrm }
+    defaults:
+      run:
+        working-directory: packages/${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Sync
+        run: uv sync --extra dev
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy ${{ matrix.module }}
+      - name: Pytest
+        run: uv run pytest --cov=${{ matrix.module }} --cov-report=term-missing

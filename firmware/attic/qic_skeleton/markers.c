@@ -2,7 +2,7 @@
  * markers.c — tape marker injection on the GW opcode-escape channel (§5.4, §7.2).
  *
  * The marker CODES and payload LAYOUTS are the firmware<->host contract; see
- * markers.h and packages/tapewyrm-host/tapewyrm/rawflux/container.py. The framing implemented here
+ * markers.h and packages/tapewyrm-cli/tapewyrm/rawflux/container.py. The framing implemented here
  * mirrors the host model:
  *
  *     <escape> <marker_code> <len:u8> <payload...>

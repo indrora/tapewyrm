@@ -3,7 +3,7 @@
 The last step after ``tw dump -> tw convert -> tw extract``. Usage (from the
 repository root)::
 
-    uv run --project packages/tapewyrm-host python contrib/qic2tar.py jc-1998/vol-00.twvl -o jc-1998.tar
+    uv run --project packages/tapewyrm-cli python contrib/qic2tar.py jc-1998/vol-00.twvl -o jc-1998.tar
 
 The input is a TWVL volume written by ``tw extract``. Every directory and file
 of the backup goes into a POSIX (pax) tar:
@@ -32,7 +32,7 @@ import tarfile
 from pathlib import Path
 
 from tapewyrm.codec import qic113ext as q
-from tapewyrm.image.twvl import Volume
+from tapewyrm_archive.twvl import Volume
 
 
 def _tar_name(path: str) -> str:

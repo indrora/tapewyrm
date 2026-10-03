@@ -32,7 +32,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FW = ROOT / "firmware"
-HOST = ROOT / "packages" / "tapewyrm-host"
+HOST = ROOT / "packages" / "tapewyrm-cli"
+ARCHIVE = ROOT / "packages" / "tapewyrm-archive"
 DIST = ROOT / "dist"
 
 sys.path.insert(0, str(ROOT / "tools"))
@@ -141,10 +142,14 @@ def make_upd(fw: dict[str, dict[str, Path]], major: int, minor: int) -> bytes:
 
 
 def build_host() -> list[Path]:
-    print("== host wheel + sdist ==")
+    print("== host wheels + sdists (tapewyrm-archive, tapewyrm) ==")
     uv = tool("uv")
-    subprocess.run([uv, "build", "--out-dir", str(HOST / "dist")], cwd=str(HOST), check=True)
-    return sorted((HOST / "dist").glob("tapewyrm-*"))
+    # The tapewyrm wheel depends on tapewyrm-archive, which is not on PyPI, so
+    # the bundle ships both; `pip install host/*.whl` then resolves locally.
+    for pkg in (ARCHIVE, HOST):
+        subprocess.run([uv, "build", "--out-dir", str(HOST / "dist")], cwd=str(pkg), check=True)
+    dist = HOST / "dist"
+    return sorted([*dist.glob("tapewyrm-*"), *dist.glob("tapewyrm_archive-*")])
 
 
 def assemble(
