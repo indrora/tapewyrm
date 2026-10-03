@@ -159,9 +159,9 @@ logging belonged to the make build and has no PlatformIO env.
 > ARM GCC (`toolchain-gccarmnoneeabi@~1.120301.0`, gcc 12.3), and PlatformIO
 > fetches that exact package itself.
 
-CI (`.github/workflows/firmware.yml`) runs the same command as `just fw`. It
-does not install PlatformIO; providing `pio` on the runner is outside that
-workflow's scope.
+CI (`.github/workflows/firmware.yml`) runs the same command as `just fw`,
+after installing PlatformIO with pipx (its toolchain downloads are cached).
+The tag-triggered `package.yml` does the same for the full release.
 
 Verify the QIC code linked in:
 
