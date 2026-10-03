@@ -68,3 +68,5 @@ ci: gen host
 # run qicsilver (TWTI image -> identify / extract / tar), e.g. `just qicsilver identify captures/jc.twti`
 qicsilver *args:
     uv run --project packages/qicsilver qicsilver {{args}}
+tapewyrm *args:
+    uv run --project packages/tapewyrm-cli tw {{args}}
