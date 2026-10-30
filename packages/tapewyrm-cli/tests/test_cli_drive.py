@@ -9,6 +9,7 @@ import tapewyrm.cli as cli_mod
 from tapewyrm.cli import app as app_mod
 from tapewyrm.cli import drive as drive_mod
 from tapewyrm.cli import session as session_mod
+from tapewyrm.qic117 import commands
 
 
 class _StubDrive:
@@ -99,6 +100,65 @@ def test_status_shows_every_report_and_survives_unsupported(monkeypatch):
 )
 def test_error_associated_command_0_and_1_are_classes(word, text):
     assert session_mod._decode_error(word) == text
+
+
+class _CleanDrive:
+    """Records the jogs `tw drive clean` asks for; cartridge presence is settable."""
+
+    def __init__(self, cartridge_present: bool = True):
+        from tapewyrm_archive.qic117 import DriveStatus
+
+        self._st = DriveStatus.decode(0b0101 if cartridge_present else 0b0001)
+        self.jogs: list[tuple[int, float]] = []
+
+    def status(self):
+        return self._st
+
+    def jog(self, cmd, seconds):
+        self.jogs.append((cmd.code, seconds))
+        return self._st
+
+
+def _clean_session(monkeypatch, drive):
+    @contextmanager
+    def fake_session(app):
+        yield drive
+
+    monkeypatch.setattr(drive_mod, "_drive_session", fake_session)
+
+
+def test_clean_alternates_forward_and_reverse(monkeypatch):
+    drive = _CleanDrive()
+    _clean_session(monkeypatch, drive)
+    res = CliRunner().invoke(cli_mod.cli, ["drive", "clean", "--passes", "3", "--seconds", "5"])
+    assert res.exit_code == 0, res.output
+    assert drive.jogs == [
+        (commands.PHYSICAL_FORWARD.code, 5.0),
+        (commands.PHYSICAL_REVERSE.code, 5.0),
+        (commands.PHYSICAL_FORWARD.code, 5.0),
+    ]
+    assert "pass 3/3 fwd" in res.output
+    assert "eject the cleaning cartridge" in res.output
+
+
+def test_clean_defaults_to_two_thirty_second_passes(monkeypatch):
+    drive = _CleanDrive()
+    _clean_session(monkeypatch, drive)
+    res = CliRunner().invoke(cli_mod.cli, ["drive", "clean"])
+    assert res.exit_code == 0, res.output
+    assert drive.jogs == [
+        (commands.PHYSICAL_FORWARD.code, 30.0),
+        (commands.PHYSICAL_REVERSE.code, 30.0),
+    ]
+
+
+def test_clean_refuses_an_empty_drive(monkeypatch):
+    drive = _CleanDrive(cartridge_present=False)
+    _clean_session(monkeypatch, drive)
+    res = CliRunner().invoke(cli_mod.cli, ["drive", "clean"])
+    assert res.exit_code != 0
+    assert "no cartridge" in res.output
+    assert drive.jogs == []
 
 
 def test_track_argument_is_six_bit(stub):

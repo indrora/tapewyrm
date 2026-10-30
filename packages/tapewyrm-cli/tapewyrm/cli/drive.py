@@ -240,6 +240,62 @@ def drive_stop(app: AppContext) -> None:
         click.echo(f"status : {_fmt_status(d.command(commands.STOP_TAPE))}")
 
 
+@drive.command("clean")
+@click.option(
+    "--passes",
+    type=click.IntRange(1, 20),
+    default=2,
+    show_default=True,
+    help="how many passes; odd passes run forward, even ones reverse",
+)
+@click.option(
+    "--seconds",
+    default=30.0,
+    show_default=True,
+    help="how long to run the tape on each pass (stops early at EOT/BOT)",
+)
+@click.pass_obj
+def drive_clean(app: AppContext, passes: int, seconds: float) -> None:
+    """Clean the head with a CLEANING CARTRIDGE: run it back and forth.
+
+    QIC-117 has no "clean heads" command. Cleaning cartridges (the DC2000-size
+    ones sold for QIC-40/80 drives) carry a dry abrasive or lint-free tape and
+    are cleaned simply by passing that tape over the head for a while; the DOS
+    backup software of the day did exactly this. So this is Physical Forward
+    and Physical Reverse, alternating, --seconds per pass. The default of two
+    passes brings the tape back to roughly where it started.
+
+    Physical motion is used on purpose: a cleaning cartridge has no format and
+    no reference bursts, so Seek Load Point and Logical Forward would only time
+    out or latch a reference error, while Physical Forward/Reverse run an
+    unreferenced tape (which is why `tw drive flux` uses them too). Each pass
+    stops early if the drive goes Ready, i.e. it hit EOT/BOT, and Stop Tape is
+    always sent on the way out, even on Ctrl-C (Qic117Drive.jog).
+
+    Only run this with a cleaning cartridge loaded. On a data tape it writes
+    nothing (physical motion is read-only), it just wears the tape for nothing.
+
+    TODO(bench): the 30 s default is the figure on the cleaning-cartridge
+    inserts we remember, not one we can cite; adjust once a sheet turns up.
+    """
+    from tapewyrm.qic117 import commands
+
+    with _drive_session(app) as d:
+        st = d.status()
+        if not st.cartridge_present:
+            raise click.ClickException(
+                f"no cartridge in the drive (status {_fmt_status(st)}); load the cleaning cartridge"
+            )
+        for n in range(1, passes + 1):
+            # Odd passes forward, even passes reverse, so pairs of passes net to zero.
+            cmd = commands.PHYSICAL_FORWARD if n % 2 else commands.PHYSICAL_REVERSE
+            label = "fwd" if n % 2 else "rev"
+            log.debug("clean pass %d/%d: %s for %.1f s", n, passes, cmd.name, seconds)
+            st = d.jog(cmd, seconds)
+            click.echo(f"pass {n}/{passes} {label:<3}: {_fmt_status(st)}")
+        click.echo("clean  : done -- eject the cleaning cartridge")
+
+
 @drive.command("track")
 @click.argument("track", type=click.IntRange(0, 63))  # 6-bit argument (Rev J §1.4.3)
 @click.pass_obj
