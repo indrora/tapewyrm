@@ -20,6 +20,7 @@ from pathlib import Path
 
 from qiclib import identify
 from tapewyrm_archive import twti
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twti import SegmentState, TapeImage
 
 from cinnabar.annotate import sectors as sectors_mod
@@ -37,8 +38,8 @@ _OVERVIEW = {
 }
 
 
-def open_image(path: Path) -> Tape:
-    img = TapeImage.open(path)
+def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
+    img = TapeImage.open(path, progress=progress)
     geometry = img.header.get("geometry", {})
     tracks = int(geometry.get("tracks", 0))
     spt = int(geometry.get("segments_per_track", 0))
@@ -69,7 +70,7 @@ def open_image(path: Path) -> Tape:
     )
 
     @lru_cache(maxsize=4)
-    def load(track: int) -> Track:
+    def _load(track: int) -> Track:
         segments: list[Segment] = []
         overview: list[str] = []
         for tps in range(spt):
@@ -113,5 +114,9 @@ def open_image(path: Path) -> Tape:
             overview,
             (("track", str(track)), ("segments", str(len(segments)))),
         )
+
+    def load(track: int, progress: Progress = NULL_PROGRESS) -> Track:
+        with progress.task(f"placing track {track}", total=None):
+            return _load(track)
 
     return Tape(str(path), kind, list(range(tracks)), load, detail)

@@ -36,9 +36,12 @@ from qiclib import volume as volume_mod
 from qiclib.volume import VtblEntry
 from tapewyrm_archive.qic80date import decode_short_date
 
-from cinnabar.model import Shape, Span
+from cinnabar.model import Shape, Span, assign_rows
 
 VTBL_RECORD = 128
+VTBL_ROWS = ("QIC-113: Volume table", "QIC-113: Volumes", "QIC-113: Volume fields")
+VOLUME_ROWS = ("QIC-113: Sections", "QIC-113: Entries", "QIC-113: Entry parts")
+EXTENT_ROWS = ("QIC-113: Extent", "QIC-122: Frames", "QIC-122: Frame fields")
 
 # (offset, length, label, key) of a VTBL entry, QIC-113 Rev G section 5 (and
 # section 6 for the QIC-40/80 vendor-specific layout, same offsets).
@@ -187,18 +190,17 @@ def vtbl_spans(data: bytes, entries: list[VtblEntry]) -> list[Span]:
             break
         used += 1
     end = max(off, VTBL_RECORD)
-    return [
-        Span(
-            0,
-            end,
-            "Volume Table",
-            f"{used} entries",
-            "vtbl",
-            Shape.CHEVRON,
-            (("entries", str(used)),),
-            tuple(children),
-        )
-    ]
+    table = Span(
+        0,
+        end,
+        "Volume Table",
+        f"{used} entries",
+        "vtbl",
+        Shape.CHEVRON,
+        (("entries", str(used)),),
+        tuple(children),
+    )
+    return [assign_rows(table, VTBL_ROWS)]
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +370,7 @@ def _extended_directory(stream: bytes, start: int) -> list[Span]:
     return spans
 
 
-def volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
+def _volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
     """Level-0 spans of an uncompressed volume's byte stream: its directory and data sections.
 
     Basic-DOS, directory first (QIC-113 section 7):
@@ -452,6 +454,11 @@ def volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
     return out
 
 
+def volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
+    """:func:`_volume_spans` with rows assigned: sections, entries, entry parts."""
+    return [assign_rows(s, VOLUME_ROWS) for s in _volume_spans(stream, vtbl)]
+
+
 # ---------------------------------------------------------------------------
 # Compressed volumes: extents and frames, per segment
 # ---------------------------------------------------------------------------
@@ -460,7 +467,7 @@ _RAW_FRAME = 0x8000
 _TAIL_FILL = 18  # QIC-113 section 9.1.4: a frame never starts in the last 18 bytes
 
 
-def extent_spans(data: bytes, *, spanning: bool, offset_bytes: int = 8) -> list[Span]:
+def _extent_spans(data: bytes, *, spanning: bool, offset_bytes: int = 8) -> list[Span]:
     """One segment of a compressed volume: its Compression Extent and frames (QIC-113 section 9).
 
     With segment spanning the first two bytes are the Next Extent Offset: 2
@@ -535,3 +542,11 @@ def extent_spans(data: bytes, *, spanning: bool, offset_bytes: int = 8) -> list[
         )
     )
     return out
+
+
+def extent_spans(data: bytes, *, spanning: bool, offset_bytes: int = 8) -> list[Span]:
+    """:func:`_extent_spans` with rows assigned: extent, frames, frame fields."""
+    return [
+        assign_rows(s, EXTENT_ROWS)
+        for s in _extent_spans(data, spanning=spanning, offset_bytes=offset_bytes)
+    ]

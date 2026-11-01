@@ -24,10 +24,12 @@ from collections.abc import Sequence
 from qiclib.types import RawSector
 from tapewyrm_archive.twti import SegmentEntry, SegmentState
 
-from cinnabar.model import SECTOR_BYTES, Shape, Span
+from cinnabar.model import SECTOR_BYTES, Shape, Span, assign_rows
 
 SECTORS = 32
 DATA_SECTORS = 29
+SLOT_ROW = "TWTI: Sectors"
+SECTOR_ROWS = ("MFM: Sectors", "MFM: Fields")
 
 
 def slot_spans(entry: SegmentEntry, base: int = 0) -> list[Span]:
@@ -74,7 +76,7 @@ def slot_spans(entry: SegmentEntry, base: int = 0) -> list[Span]:
                     ("state", state.name),
                     ("excluded", "yes" if excluded else "no"),
                 ),
-                (Span(start, end, "ECC" if parity else "data", "", style, Shape.BLOCK),),
+                row=SLOT_ROW,
             )
         )
     return out
@@ -166,4 +168,4 @@ def sector_spans(
                 fields,
             )
         )
-    return out
+    return [assign_rows(s, SECTOR_ROWS) for s in out]

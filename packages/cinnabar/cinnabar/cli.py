@@ -23,8 +23,9 @@ import rich_click as click
 from rich.console import Console
 from tapewyrm_archive.progress import Progress
 
+from cinnabar.annotate import ordered_rows
 from cinnabar.console import make_console, progress_display, setup_logging
-from cinnabar.model import Track, depth, level
+from cinnabar.model import Track, in_row, rows_of
 
 log = logging.getLogger(__name__)
 
@@ -54,16 +55,11 @@ def dump_track(track: Track, *, segment: int | None = None) -> str:
             transitions = track.flux.transition_count(seg.start, seg.end)
             cells = track.flux.cell_count_between(seg.start, seg.end)
             lines.append(f"    flux: {transitions:,} transitions, {cells:,} cells")
-        for lvl in range(depth(seg.records)):
-            name = f"{track.physical} Records" if lvl == 0 else f"{track.physical} Fields"
-            for s in level(seg.records, lvl):
+        spans = seg.records + seg.fields
+        for row in ordered_rows(rows_of(spans)):
+            for s in in_row(spans, row):
                 lines.append(
-                    f"    {name:22} [{fmt(s.start)} .. {fmt(s.end)}] {s.label} {s.sublabel}".rstrip()
-                )
-        for lvl in range(depth(seg.fields)):
-            for s in level(seg.fields, lvl):
-                lines.append(
-                    f"    Fields {lvl:<15} [{fmt(s.start)} .. {fmt(s.end)}] {s.label} {s.sublabel}".rstrip()
+                    f"    {row:24} [{fmt(s.start)} .. {fmt(s.end)}] {s.label} {s.sublabel}".rstrip()
                 )
         total = sum(len(r.data) for r in seg.byte_runs)
         lines.append(f"    Bytes: {total:,} in {len(seg.byte_runs)} runs")
@@ -123,13 +119,14 @@ def cli(
     setup_logging(app.console, verbose, quiet)
     from cinnabar.load import open_path
 
-    tape = open_path(path)
+    with app.progress() as prog:
+        tape = open_path(path, prog)
     first = track_number if track_number is not None else tape.track_numbers[0]
     if first not in tape.track_numbers:
         raise click.BadParameter(f"track {first} is not in {path}", param_hint="--track")
     if dump:
-        with app.progress():
-            track = tape.load(first)
+        with app.progress() as prog:
+            track = tape.load(first, prog)
             if track.decoder is not None:
                 track.decoder.wait()
         click.echo(dump_track(track, segment=segment))

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from click.testing import CliRunner
+from tapewyrm_archive.progress import NULL_PROGRESS
 
 from cinnabar.cli import cli, dump_track
 from cinnabar.load import open_path
@@ -14,7 +15,7 @@ from cinnabar.model import SEGMENT_BYTES, AxisKind, level
 def test_image_tracks_segments_and_holds(image_path: Path):
     tape = open_path(image_path)
     assert tape.kind == "TWTI" and tape.track_numbers[0] == 0
-    track = tape.load(0)
+    track = tape.load(0, NULL_PROGRESS)
     assert track.axis.kind is AxisKind.BYTES and track.physical == "QIC-80"
     assert track.segments[0].start == 0 and track.segments[1].start == SEGMENT_BYTES
     holds = {dict(s.detail)["holds"] for s in track.segments if s.state != "MISSING"}
@@ -38,8 +39,8 @@ def test_dump_lists_every_lane(image_path: Path):
     track = open_path(image_path).load(0)
     text = dump_track(track, segment=0)
     assert "Track 0: bytes axis" in text
-    assert "QIC-80 Records" in text and "Format Parameter Record" in text
-    assert "Fields 1" in text and "tape name" in text
+    assert "TWTI: Sectors" in text and "Format Parameter Record" in text
+    assert "QIC-80: Header fields" in text and "tape name" in text
     result = CliRunner().invoke(cli, ["--dump", "--segment", "0", str(image_path)])
     assert result.exit_code == 0, result.output
     assert "Segment 0" in result.output
@@ -48,7 +49,7 @@ def test_dump_lists_every_lane(image_path: Path):
 def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
     tape = open_path(qic80_capture)
     assert tape.kind == "TWRF"
-    track = tape.load(0)
+    track = tape.load(0, NULL_PROGRESS)
     assert track.axis.kind is AxisKind.TIME and track.physical == "QIC-80"
     assert track.decoder is not None
     assert track.segments[1].state == "decoding"  # placeholders until the workers land
@@ -80,7 +81,7 @@ def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
 
 def test_flux_capture_of_gcr_records(qic100_capture: Path):
     tape = open_path(qic100_capture)
-    track = tape.load(0)
+    track = tape.load(0, NULL_PROGRESS)
     assert track.physical == "QIC-100-MC"
     track.decoder.wait()
     records = [r for seg in track.segments for r in seg.records]
@@ -91,3 +92,29 @@ def test_flux_capture_of_gcr_records(qic100_capture: Path):
     data_seg = next(s for s in track.segments if s.byte_runs)
     assert data_seg.byte_runs[0].data.startswith(b"frame 0 ")
     track.decoder.close()
+
+
+def test_opening_one_capture_takes_its_dump_sidecar(qic80_capture: Path, tmp_path: Path):
+    import json
+    import shutil
+
+    from cinnabar.load import sidecar_captures
+
+    folder = tmp_path / "dump"
+    folder.mkdir()
+    t0 = folder / "track-00.twrf"
+    t1 = folder / "track-01.twrf"
+    shutil.copy(qic80_capture, t0)
+    shutil.copy(qic80_capture, t1)
+    # Paths as tw dump writes them: relative to wherever it ran, plus one file that is gone.
+    lines = [
+        {"track": 1, "path": "../captures/dump/track-01.twrf"},
+        {"track": 0, "path": "captures/dump/track-00.twrf"},
+        {"track": 2, "path": "captures/dump/track-02.twrf"},
+    ]
+    (folder / "dump.jsonl").write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+    assert sidecar_captures(t0) == [t1, t0]
+    tape = open_path(t0)
+    # Both files carry track 0 in their header; the second becomes a numbered pass.
+    assert len(tape.track_numbers) == 2
+    assert sidecar_captures(qic80_capture) == [qic80_capture]  # no sidecar there

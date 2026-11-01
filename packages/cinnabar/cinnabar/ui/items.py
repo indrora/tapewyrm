@@ -26,16 +26,16 @@ from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPolygo
 from cinnabar.model import ByteRun, Flux, Segment, Span  # noqa: F401 -- Segment for BytesItem
 from cinnabar.ui import palette
 
-POINT_PX = 7  # the pointed end of a chevron or hex, in pixels
+POINT_PX = 5  # the pointed end of a chevron or hex, in pixels
 MIN_LABEL_PX = 28  # a span narrower than this gets no label
 BYTE_TEXT_PX = 22  # a byte at least this wide on screen shows its hex value
 _FONT_CACHE: dict[int, QFont] = {}
 
 
-def _font(px: int, bold: bool = False) -> QFont:
-    key = px * 2 + int(bold)
+def _font(px: int, bold: bool = False, family: str | None = None) -> QFont:
+    key = px * 4 + int(bold) * 2 + int(family is not None)
     if key not in _FONT_CACHE:
-        f = QFont(palette.MONO)
+        f = QFont(family or palette.MONO)
         f.setPixelSize(px)
         f.setBold(bold)
         _FONT_CACHE[key] = f
@@ -383,12 +383,90 @@ def _strip(values: np.ndarray) -> QImage:
     return img.copy()  # detach from the numpy buffer
 
 
-class BoundaryItem(_DeviceItem):
-    """Vertical segment boundary lines (every lane) and, with ``labels``, the title row.
+def _nice_step(span: float, target_ticks: int = 8) -> float:
+    """A 1-2-5 step so that ``span`` holds about ``target_ticks`` major ticks."""
+    import math
 
-    The title row is the sketch's header: ``Segment N`` centred over each
-    segment wide enough to carry it, and the boundary's axis position at
-    every line (``340ms``, ``89,088 B``).
+    raw = span / max(target_ticks, 1)
+    mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1.0
+    for m in (1, 2, 5, 10):
+        if m * mag >= raw:
+            return m * mag
+    return 10 * mag
+
+
+class RulerItem(_DeviceItem):
+    """The time (or byte) ruler across the top: 1-2-5 ticks with labels, and segment tags.
+
+    Labels are the axis's own (``+2.680 s``, ``89,088 B``); each segment
+    boundary gets a thin mark and, when the segment is wide enough, its
+    title on the right of the boundary, the way Logic marks captures.
+    """
+
+    def __init__(self, track, x0: float, x1: float) -> None:
+        super().__init__(x0, x1)
+        self._track = track
+
+    def paint(self, p: QPainter, _opt, _widget=None) -> None:
+        vb = self.getViewBox()
+        if vb is None:
+            return
+        (vx0, vx1), _ = vb.viewRange()
+        scale, offset, top, bottom = self._device(p)
+        p.save()
+        p.resetTransform()
+        base = bottom - 1
+        p.setPen(QPen(palette.boundary(), 1))
+        p.drawLine(QPointF(scale * vx0 + offset, base), QPointF(scale * vx1 + offset, base))
+        step = _nice_step(vx1 - vx0)
+        minor = step / 5
+        fmt = self._track.axis.format
+        p.setFont(_font(palette.FONT_PX["boundary"], family=palette.UI))
+        x = (int(vx0 / minor) - 1) * minor
+        k = 0
+        while x <= vx1:
+            dx = scale * x + offset
+            major = abs(x / step - round(x / step)) < 1e-6
+            p.drawLine(QPointF(dx, base), QPointF(dx, base - (9 if major else 4)))
+            if major:
+                p.setPen(QPen(palette.text()))
+                p.drawText(
+                    QRectF(dx + 3, base - 22, 140, 12),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    fmt(x),
+                )
+                p.setPen(QPen(palette.boundary(), 1))
+            x += minor
+            k += 1
+            if k > 2000:
+                break
+        # Segment tags.
+        tag_font = _font(palette.FONT_PX["segment-title"], bold=True, family=palette.UI)
+        for seg in self._track.segments:
+            if seg.end < vx0 or seg.start > vx1:
+                continue
+            dx0 = scale * seg.start + offset
+            dx1 = scale * seg.end + offset
+            p.setPen(QPen(palette.boundary(), 1, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(dx0, top), QPointF(dx0, bottom))
+            if dx1 - dx0 >= 70:
+                # Tags live on the ruler's top line, tick labels on its bottom one.
+                p.setFont(tag_font)
+                p.setPen(QPen(palette.decoder_colour("QIC-80").darker(120)))
+                p.drawText(
+                    QRectF(dx0 + 4, top + 1, min(dx1 - dx0 - 6, 160), 12),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    seg.title,
+                )
+        p.restore()
+
+
+class BoundaryItem(_DeviceItem):
+    """Vertical segment boundary lines across a lane (dashed, hairline).
+
+    With ``labels`` (the axis formatter) it also draws boundary positions
+    and segment titles; the lane stack uses :class:`RulerItem` for that
+    now and keeps this for the lines.
     """
 
     def __init__(self, segments: Sequence[Segment], x0: float, x1: float, *, labels=None) -> None:
@@ -408,7 +486,9 @@ class BoundaryItem(_DeviceItem):
         scale, offset, top, bottom = self._device(p)
         p.save()
         p.resetTransform()
-        p.setPen(QPen(palette.boundary(), 1))
+        pen = QPen(palette.boundary(), 1, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
         lo = max(int(np.searchsorted(self._edges, vx0)) - 1, 0)
         hi = int(np.searchsorted(self._edges, vx1)) + 1
         px_last = -1e9

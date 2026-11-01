@@ -17,7 +17,7 @@ from PySide6.QtCore import QRectF, Signal
 from cinnabar.model import Track
 from cinnabar.ui import palette
 
-HEIGHT = 72
+HEIGHT = 44
 COLUMNS = 1200
 
 

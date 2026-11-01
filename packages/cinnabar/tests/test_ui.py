@@ -9,6 +9,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from tapewyrm_archive.progress import NULL_PROGRESS  # noqa: E402
+
 from cinnabar.load import open_path  # noqa: E402
 from cinnabar.ui import palette  # noqa: E402
 from cinnabar.ui.app import screenshot  # noqa: E402
@@ -23,7 +25,7 @@ def test_screenshot_of_image_in_every_theme(image_path: Path, tmp_path: Path, th
 
 def test_screenshot_of_capture_zoomed_to_bytes(qic80_capture: Path, tmp_path: Path):
     tape = open_path(qic80_capture)
-    track = tape.load(0)
+    track = tape.load(0, NULL_PROGRESS)
     seg = track.segments[2]
     out = tmp_path / "zoom.png"
     screenshot(tape, 0, out, segment=2, window=(seg.start, seg.start + 0.0005))

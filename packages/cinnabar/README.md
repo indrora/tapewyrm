@@ -6,17 +6,27 @@ or TWTZ) in a window and shows one track at a time, segment by segment, as a
 stack of lanes:
 
 ```
-Flux transitions   every transition, the PLL's bitcells, the decoded bits   (captures only)
-QIC-80 Records     one span per MFM sector (or per QIC-100-MC record on a GCR tape)
-QIC-80 Fields      the sector's sync marks, ID field, data field and CRCs
-Fields             what the bytes mean: FPR and bad-sector map, volume-table entries,
-                   directory and data entries, compression extents and frames
-Bytes              the segment's bytes as a heat strip
+Flux                every transition, the PLL's bitcells, the decoded bits   (captures only)
+MFM: Sectors        one span per MFM sector (GCR: Records on a QIC-100-MC tape;
+                    TWTI: Sectors on an image)
+MFM: Fields         the sector's sync marks, ID field, data field and CRCs
+QIC-80: Header      the format parameter record and bad-sector map, and their fields
+QIC-113: ...        volume table, volumes, volume fields; sections, entries, entry parts
+QIC-122: ...        compression extents, frames, frame fields
+Bytes               the segment's bytes as a shade strip, hex values when zoomed in
 ```
 
-and, under them, the whole track as a strip with the viewed window on it.
-Scrub the strip, step tracks with the arrows, hover anything for its decoded
-value.
+Rows are named by the decoder that produced them, like a protocol
+analyzer's; a track shows the rows that occur in it. A ruler runs across
+the top, the whole track is a strip along the bottom with the viewed window
+on it, and a Details panel docks on the right: click any span or byte for
+its decoded fields and a colour-coded hexdump of its bytes, and export them
+or the whole segment to a file. The toolbar and menus step segments and
+tracks, zoom, fit, and switch themes (`--theme sketch|paper|dark|contrast`);
+the status bar shows what the cursor is on and how far decoding has got.
+Keys: Left / Right segment, PageUp / PageDown track, Home / End, Cmd/Ctrl +
+and - zoom, 0 fit segment, Shift+0 fit track; the wheel zooms, dragging
+pans.
 
 ```sh
 # from the repository root

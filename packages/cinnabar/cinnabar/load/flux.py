@@ -42,6 +42,7 @@ import numpy as np
 from qiclib import geometry as geometry_mod
 from qiclib import identify
 from qiclib.types import RawSector
+from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twrf import header_to_dict, parse_body, read_header
 from tapewyrm_archive.types import CaptureHeader
 
@@ -121,14 +122,17 @@ class _Identification:
 class FluxTrack:
     """One capture as a :class:`Track` that fills in as its segments decode."""
 
-    def __init__(self, path: Path, number: int, ident: _Identification) -> None:
+    def __init__(
+        self, path: Path, number: int, ident: _Identification, progress: Progress = NULL_PROGRESS
+    ) -> None:
         self.path = path
         self.number = number
         self.ident = ident
         hdr, flux_at = read_header(path)
         self.header = hdr
-        blob = path.read_bytes()
-        ps = parse_body(blob[flux_at:])
+        with progress.task(f"reading {path.name}", total=None):
+            blob = path.read_bytes()
+        ps = parse_body(blob[flux_at:], progress=progress)
         del blob
         self.sample_hz = ps.sample_clock_hz
         intervals = jobs.intervals_array(ps.intervals)
@@ -152,7 +156,8 @@ class FluxTrack:
         self.titles = titles[: len(self.windows)]
 
         probe = intervals[: self.flux.interval_index(DETECT_S)].tolist()
-        self.physical, bitcell_s = jobs.detect_physical(probe, self.sample_hz, hdr.rate_kbps)
+        with progress.task("detecting the physical format", total=None):
+            self.physical, bitcell_s = jobs.detect_physical(probe, self.sample_hz, hdr.rate_kbps)
         log.info(
             "%s: %s, bitcell %.3f us", path.name, _PHYSICAL_NAMES[self.physical], bitcell_s * 1e6
         )
@@ -358,12 +363,12 @@ def open_captures(paths: Sequence[Path]) -> Tape:
     ident = _Identification()
     open_tracks: dict[int, FluxTrack] = {}
 
-    def load(number: int) -> Track:
+    def load(number: int, progress: Progress = NULL_PROGRESS) -> Track:
         if number not in open_tracks:
             if len(open_tracks) >= 2:  # a track's intervals are big; keep two
                 oldest = next(iter(open_tracks))
                 open_tracks.pop(oldest).close()
-            open_tracks[number] = FluxTrack(by_track[number], number, ident)
+            open_tracks[number] = FluxTrack(by_track[number], number, ident, progress)
         return open_tracks[number].track
 
     tape_detail = (

@@ -108,6 +108,11 @@ class Span:
     shape: Shape = Shape.BLOCK
     detail: tuple[tuple[str, str], ...] = ()
     children: tuple[Span, ...] = ()
+    # The display row this span belongs to, "<decoder>: <what>" ("MFM:
+    # Sectors", "QIC-113: Volumes"), set by the annotator (assign_rows).
+    # Rows, not depths, are what the lanes show, so two decoders can share a
+    # depth without sharing a lane.
+    row: str = ""
 
     @property
     def width(self) -> float:
@@ -136,6 +141,7 @@ class Span:
             self.shape,
             self.detail,
             tuple(child.mapped(fn) for child in self.children),
+            self.row,
         )
 
     def clipped(self, lo: float, hi: float) -> Span | None:
@@ -158,7 +164,42 @@ class Span:
             self.shape,
             self.detail,
             kids,
+            self.row,
         )
+
+
+def assign_rows(span: Span, rows: Sequence[str]) -> Span:
+    """``span`` and its subtree with ``rows[depth]`` as each level's row (the last row repeats)."""
+    row = rows[0] if rows else span.row
+    rest = rows[1:] if len(rows) > 1 else rows
+    return Span(
+        span.start,
+        span.end,
+        span.label,
+        span.sublabel,
+        span.style,
+        span.shape,
+        span.detail,
+        tuple(assign_rows(c, rest) for c in span.children),
+        row,
+    )
+
+
+def rows_of(spans: Sequence[Span]) -> set[str]:
+    """Every row name used anywhere in a forest of spans."""
+    out: set[str] = set()
+    for s in spans:
+        out.add(s.row)
+        out |= rows_of(s.children)
+    return out
+
+
+def in_row(spans: Sequence[Span], row: str) -> Iterator[Span]:
+    """Every span of a forest whose row is ``row``, in order."""
+    for s in spans:
+        if s.row == row:
+            yield s
+        yield from in_row(s.children, row)
 
 
 def depth(spans: Sequence[Span]) -> int:
@@ -487,12 +528,13 @@ class Track:
 class Tape:
     """A whole tape as the viewer sees it: which tracks exist and how to load each.
 
-    Tracks are loaded on demand (``load``) because a flux track takes the PLL
-    and framer tens of seconds; the UI calls it off the main thread and caches.
+    Tracks are loaded on demand (``load(number, progress)``) because a flux
+    track means reading and tokenizing tens of MB; the UI calls it off the
+    main thread and shows the progress it reports.
     """
 
     source: str
     kind: str  # "TWRF" | "TWTI"
     track_numbers: list[int]
-    load: Callable[[int], Track]
+    load: Callable[[int, Any], Track]  # (track number, Progress) -> Track
     detail: tuple[tuple[str, str], ...] = ()

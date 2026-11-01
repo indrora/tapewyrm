@@ -14,7 +14,9 @@ from collections.abc import Sequence
 from qiclib import qic100
 
 from cinnabar.decode.jobs import PlacedRecord
-from cinnabar.model import Shape, Span
+from cinnabar.model import Shape, Span, assign_rows
+
+ROWS = ("GCR: Records", "GCR: Fields")
 
 _STYLE = {
     qic100.RecordType.DATA: "record",
@@ -73,4 +75,4 @@ def record_spans(records: Sequence[PlacedRecord]) -> list[Span]:
                 tuple(fields),
             )
         )
-    return out
+    return [assign_rows(s, ROWS) for s in out]

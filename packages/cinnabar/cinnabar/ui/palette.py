@@ -31,23 +31,42 @@ from dataclasses import dataclass
 import numpy as np
 from PySide6.QtGui import QColor
 
-MONO = "Courier New"
+MONO = "Courier New"  # bytes, hexdumps, span labels: things that line up
+UI = "sans-serif"  # channel names, ruler, panels: the platform's UI face
 FONT_PX = {
-    "record": 18,  # records lane label
-    "record-sub": 15,
-    "field": 12,  # every other span lane
-    "field-sub": 10,
-    "lane-title": 15,  # row labels on the left
-    "boundary": 11,  # axis positions in the header row
-    "segment-title": 14,
-    "track-title": 30,
+    "record": 12,  # records lane label
+    "record-sub": 10,
+    "field": 10,  # every other span lane
+    "field-sub": 9,
+    "lane-title": 11,  # channel names in the header column
+    "lane-sub": 9,  # the decoder tag under a channel name
+    "boundary": 10,  # the time ruler's labels
+    "segment-title": 10,
 }
+
+# Colour of a decoder's tag and stripe in the channel header column, the
+# way Logic colours each channel and PulseView each decoder.
+DECODER_ROLE: dict[str, str] = {
+    "Flux": "grey",
+    "MFM": "primary",
+    "GCR": "purple",
+    "TWTI": "primary",
+    "QIC-80": "teal",
+    "QIC-113": "green",
+    "QIC-122": "amber",
+    "Bytes": "grey",
+}
+
+
+def decoder_colour(decoder: str) -> QColor:
+    return QColor(getattr(_current, DECODER_ROLE.get(decoder, "grey")))
 
 
 @dataclass(frozen=True)
 class Theme:
     name: str
     window_bg: str
+    header_bg: str  # the channel header column
     lane_bg: str
     text: str
     text_on_dark: str
@@ -72,7 +91,8 @@ THEMES: dict[str, Theme] = {
     "sketch": Theme(
         name="sketch",
         window_bg="#ffffff",
-        lane_bg="#e6e6e6",
+        header_bg="#f3f3f3",
+        lane_bg="#ebebeb",
         text="#111111",
         text_on_dark="#f4f4f4",
         boundary="#202020",
@@ -94,6 +114,7 @@ THEMES: dict[str, Theme] = {
     "paper": Theme(
         name="paper",
         window_bg="#f7f3ea",
+        header_bg="#efe9dc",
         lane_bg="#e9e3d6",
         text="#2b2520",
         text_on_dark="#f7f3ea",
@@ -116,6 +137,7 @@ THEMES: dict[str, Theme] = {
     "dark": Theme(
         name="dark",
         window_bg="#16181d",
+        header_bg="#1d2026",
         lane_bg="#23262e",
         text="#e6e6e6",
         text_on_dark="#f4f4f4",
@@ -138,7 +160,8 @@ THEMES: dict[str, Theme] = {
     "contrast": Theme(
         name="contrast",
         window_bg="#ffffff",
-        lane_bg="#f0f0f0",
+        header_bg="#e8e8e8",
+        lane_bg="#f6f6f6",
         text="#000000",
         text_on_dark="#ffffff",
         boundary="#000000",
@@ -253,6 +276,10 @@ def dark(style: str) -> bool:
 
 def lane_bg() -> QColor:
     return QColor(_current.lane_bg)
+
+
+def header_bg() -> QColor:
+    return QColor(_current.header_bg)
 
 
 def window_bg() -> QColor:

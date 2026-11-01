@@ -19,7 +19,9 @@ import struct
 from qiclib import volume as volume_mod
 from tapewyrm_archive.qic80date import decode_short_date
 
-from cinnabar.model import Shape, Span
+from cinnabar.model import Shape, Span, assign_rows
+
+ROWS = ("QIC-80: Header", "QIC-80: Header fields")
 
 # (offset, length, key, label) for the format parameter record, QIC-80-MC
 # Rev N section 7.1. Keys name the VolumeInfo field holding the decoded value.
@@ -181,6 +183,6 @@ def bsm_spans(data: bytes, format_code: int) -> Span:
 def header_spans(data: bytes) -> list[Span]:
     """Level-0 spans of a header segment: the FPR, then the bad-sector map."""
     if len(data) < 256:
-        return [Span(0, max(len(data), 1), "Header (short)", "", "unknown")]
+        return [assign_rows(Span(0, max(len(data), 1), "Header (short)", "", "unknown"), ROWS)]
     format_code = data[4]
-    return [fpr_spans(data), bsm_spans(data, format_code)]
+    return [assign_rows(s, ROWS) for s in (fpr_spans(data), bsm_spans(data, format_code))]
