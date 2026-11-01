@@ -14,7 +14,11 @@ ordinary tar file with the backup's own file names, dates and attributes, and a
 report of anything that could not be recovered.
 
 The firmware is a hard fork of the Greaseweazle firmware. The host software is
-new Python, split into four packages.
+new Python, split into five packages: `tapewyrm-cli` (`tw`, the hardware
+side), `tapewyrm-archive` (the file formats), `qiclib` (the QIC formats),
+`qicsilver` (reading images back to files) and `cinnabar` (a viewer that
+shows a capture or image lane by lane: flux, records, fields, bytes; see
+[packages/cinnabar](packages/cinnabar/README.md)).
 
 ## Status
 

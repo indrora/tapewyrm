@@ -70,16 +70,26 @@ it into one function both call.
 ## 2. Python packages (`packages/*`)
 
 Every Python package in `packages/` follows this section: `tapewyrm-cli`
-(`tw`), `tapewyrm-archive`, `qiclib` and `qicsilver`. Rules written about
-`tw` apply to every CLI (`tw`, `qicsilver`): the same rich-click front end, the
-same global `--progress` / `-v` / `-q` flags, the same stdout/stderr split, and
-the same logging rules in §2.5. Rules written about "library code" apply to
-every non-CLI module in every package.
+(`tw`), `tapewyrm-archive`, `qiclib`, `qicsilver` and `cinnabar`. Rules written
+about `tw` apply to every CLI (`tw`, `qicsilver`, `cinnabar`): the same
+rich-click front end, the same global `--progress` / `-v` / `-q` flags, the
+same stdout/stderr split, and the same logging rules in §2.5. Rules written
+about "library code" apply to every non-CLI module in every package.
 
 Package graph (arrows = "depends on"); nothing may point the other way:
 
     tapewyrm-cli  ──► tapewyrm-archive ◄── qiclib ◄── qicsilver
           └──────────────────────────────► qiclib   (tw convert only)
+    cinnabar ──► tapewyrm-cli (the flux codec only), qiclib, tapewyrm-archive
+
+- **cinnabar** is the viewer, a leaf: a desktop app (PySide6 through
+  pyqtgraph, numpy) that only *reads*, through the libraries above. Nothing
+  depends on it, so `tw` and `qicsilver` never import Qt. Its own split is
+  the same one in miniature: `cinnabar.model` (plain data, no Qt),
+  `cinnabar.load` and `cinnabar.annotate` (readers and decoders, no Qt),
+  `cinnabar.decode` (worker-process decoding, no Qt), `cinnabar.ui` (Qt,
+  knows nothing about QIC). `cinnabar --dump` exercises everything but
+  the window; the window is tested offscreen (`QT_QPA_PLATFORM=offscreen`).
 
 - **tapewyrm-archive** and **qiclib** are libraries and are **stdlib-only**:
   no rich, click, rich-click or any other presentation or CLI library, and no
@@ -88,9 +98,10 @@ Package graph (arrows = "depends on"); nothing may point the other way:
   exception is `backports.zstd` in tapewyrm-archive, and only below Python
   3.14: it is the official backport of the stdlib `compression.zstd` (PEP
   784) that TWTZ images use. Import zstd only via `tapewyrm_archive._zstd`.
-- The CLIs (`tapewyrm-cli`, `qicsilver`) own all terminal presentation. Each
-  has its own `console.py` (rich console, `RichHandler`, progress bars); the
-  two copies are kept identical by hand -- change one, change the other.
+- The CLIs (`tapewyrm-cli`, `qicsilver`, `cinnabar`) own all terminal
+  presentation. Each has its own `console.py` (rich console, `RichHandler`,
+  progress bars); the three copies are kept identical by hand -- change one,
+  change the others.
 - Sibling dependencies use editable path sources:
   `[tool.uv.sources] tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }`.
 - On-disk constants shared with the firmware (TWRF marker opcodes) are copied

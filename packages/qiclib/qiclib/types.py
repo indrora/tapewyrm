@@ -35,6 +35,12 @@ class RawSector:
     id_crc_ok: bool
     data_crc_ok: bool
     deleted: bool  # data address mark was F8 (format-time bad block)
+    # Where the sector was found in the decoded MFM byte stream: the index
+    # of the first sync byte of its ID mark and of its data mark. Set by
+    # tapewyrm.codec.mfm; None when unknown (an image, a fixture, an orphan
+    # data field with no ID). Placement never needs them; cinnabar does.
+    id_at: int | None = None
+    data_at: int | None = None
 
     SIZE = 1024
 

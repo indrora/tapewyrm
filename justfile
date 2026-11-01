@@ -41,7 +41,7 @@ check pkg module:
     cd packages/{{pkg}} && uv run pytest
 
 # every Python package, base first (the same set CI's packages.yml runs)
-host: (check "tapewyrm-archive" "tapewyrm_archive") (check "qiclib" "qiclib") (check "tapewyrm-cli" "tapewyrm") (check "qicsilver" "qicsilver")
+host: (check "tapewyrm-archive" "tapewyrm_archive") (check "qiclib" "qiclib") (check "tapewyrm-cli" "tapewyrm") (check "qicsilver" "qicsilver") (check "cinnabar" "cinnabar")
 
 # just the tests of every package (fast loop)
 test:
@@ -49,6 +49,7 @@ test:
     cd packages/qiclib && uv run pytest -q
     cd packages/tapewyrm-cli && uv run pytest -q
     cd packages/qicsilver && uv run pytest -q
+    cd packages/cinnabar && uv run pytest -q
 
 # lint + typecheck every package without tests
 lint:
@@ -56,6 +57,11 @@ lint:
     cd packages/qiclib && uv run ruff check . && uv run mypy qiclib
     cd packages/tapewyrm-cli && uv run ruff check . && uv run mypy tapewyrm
     cd packages/qicsilver && uv run ruff check . && uv run mypy qicsilver
+    cd packages/cinnabar && uv run ruff check . && uv run mypy cinnabar
+
+# look at a capture or image in the viewer (cinnabar PATH [--track N] [--theme dark])
+cinnabar *args:
+    cd packages/cinnabar && uv run cinnabar {{args}}
 
 # remove build, package, and cache artifacts (keeps the uv venv)
 clean:

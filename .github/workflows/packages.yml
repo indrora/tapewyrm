@@ -20,6 +20,7 @@ jobs:
           - { package: qiclib, module: qiclib }
           - { package: tapewyrm-cli, module: tapewyrm }
           - { package: qicsilver, module: qicsilver }
+          - { package: cinnabar, module: cinnabar }
     defaults:
       run:
         working-directory: packages/${{ matrix.package }}
@@ -29,6 +30,8 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Sync
         run: uv sync --extra dev
+      - name: Qt offscreen
+        run: echo "QT_QPA_PLATFORM=offscreen" >> "$GITHUB_ENV"
       - name: Ruff lint
         run: uv run ruff check .
       - name: Ruff format check

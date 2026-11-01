@@ -230,6 +230,9 @@ def recover_sectors_from_bytes(
 
     An ID mark is paired with the next following data mark. ``id_crc_ok`` /
     ``data_crc_ok`` / ``deleted`` are set from the parsed marks and CRCs.
+    Each sector also records where it was found: ``id_at`` and ``data_at``
+    are the byte indexes in ``decoded`` of the first sync byte of its ID
+    and data marks (``id_at`` is None for an orphan data field).
 
     ``progress`` gets one task in bytes, moved at most every
     ``_PROGRESS_EVERY`` bytes (checked once per mark, never per byte).
@@ -237,7 +240,7 @@ def recover_sectors_from_bytes(
     """
     n = len(decoded)
     pos = 0
-    pending: tuple[int, int, int, bool] | None = None  # (fsd, ftk, fsc, id_crc_ok)
+    pending: tuple[int, int, int, bool, int] | None = None  # (fsd, ftk, fsc, id_crc_ok, mark_at)
     # Per-call tallies, logged once after the scan. The guards below fire per
     # mark (thousands per track), so they are counted rather than logged.
     n_index = n_orphan = n_unknown = n_dropped_id = n_yielded = n_data_bad = 0
@@ -280,7 +283,7 @@ def recover_sectors_from_bytes(
                 ftk, fsd, fsc, _size = field[0], field[1], field[2], field[3]
                 if pending is not None:
                     n_dropped_id += 1  # the previous ID never got its data field
-                pending = (fsd, ftk, fsc, stored == computed)
+                pending = (fsd, ftk, fsc, stored == computed, mark_at)
                 pos = field_start + ID_FIELD_LEN + CRC_LEN
                 continue
 
@@ -304,14 +307,16 @@ def recover_sectors_from_bytes(
                     n_data_bad += 1
                 deleted = mark == DAM_DELETED
 
+                id_at: int | None
                 if pending is not None:
-                    fsd, ftk, fsc, id_crc_ok = pending
+                    fsd, ftk, fsc, id_crc_ok, id_at = pending
                 else:
                     # Orphan data field with no preceding ID; keep it but flag the ID
                     # as unknown/bad so placement can decide what to do.
                     n_orphan += 1
                     fsd = ftk = fsc = 0
                     id_crc_ok = False
+                    id_at = None
                 n_yielded += 1
                 yield RawSector(
                     fsd=fsd,
@@ -321,6 +326,8 @@ def recover_sectors_from_bytes(
                     id_crc_ok=id_crc_ok,
                     data_crc_ok=data_crc_ok,
                     deleted=deleted,
+                    id_at=id_at,
+                    data_at=mark_at,
                 )
                 pending = None
                 pos = field_start + SECTOR_SIZE + CRC_LEN
@@ -413,9 +420,17 @@ def bitcells_to_bytes(cells: bytes | bytearray) -> bytes:
 
 
 def frame_bitcells(
-    cells: bytes | bytearray, *, progress: Progress = NULL_PROGRESS
+    cells: bytes | bytearray,
+    *,
+    progress: Progress = NULL_PROGRESS,
+    positions: list[int] | None = None,
 ) -> tuple[bytes, int]:
     """Decode MFM bitcells (one 0/1 byte per cell) into ``(bytes, sync runs)``.
+
+    ``positions``, when given, receives the index of the first bitcell of
+    every decoded byte, in byte order, so ``positions[i]`` places byte ``i``
+    of the returned stream in the cell stream (16 cells per byte). cinnabar
+    uses it with the PLL's trace to put sectors on the time axis.
 
     MFM has no byte alignment of its own: it comes from the A1 sync marks. We
     find every run of three A1 syncs, decode the bytes that follow *aligned to
@@ -443,6 +458,8 @@ def frame_bitcells(
             for j in range(min(_MAX_FIELD_BYTES, (nxt - s) // 16)):
                 word = text[s + 16 * j : s + 16 * j + 16]
                 out.append(int(word[1::2], 2))
+                if positions is not None:
+                    positions.append(s + 16 * j)
             bar.advance()
     return bytes(out), len(starts)
 

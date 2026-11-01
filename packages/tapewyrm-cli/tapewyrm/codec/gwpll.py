@@ -13,7 +13,12 @@ line. Our changes are only at the edges, each marked ``[tapewyrm]``:
 * inputs are plain tick intervals + sample frequency instead of a GW ``Flux``;
 * output is a ``bytearray`` of 0/1 cells instead of a ``bitarray``;
 * no revolution/index bookkeeping (a tape is one long stream, not revolutions),
-  and no per-bit time array (nothing downstream needs it yet).
+  and no per-bit time array. GW builds one to walk index marks; here a
+  caller that wants to know *when* a bitcell happened (cinnabar, drawing
+  sectors on the time axis) passes a :class:`PllTrace`, which records the
+  stream time, the bit count and the clock at every transition that
+  clocked bits out -- enough to place any cell, at one append per
+  transition instead of one per cell.
 
 For QIC-80 at 500 kbit/s the MFM bitcell is 1 us (data bit = 2 cells), so the
 flux intervals cluster at 2, 3 and 4 cells -- exactly floppy HD timing.
@@ -22,8 +27,9 @@ flux intervals cluster at 2, 3 and 4 cells -- exactly floppy HD timing.
 from __future__ import annotations
 
 import logging
+from array import array
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
@@ -52,6 +58,31 @@ CLOCK_MAX_ADJ = 0.10
 _PROGRESS_EVERY = 1 << 20
 
 
+@dataclass
+class PllTrace:
+    """[tapewyrm] Where the PLL was at each transition that clocked bits out.
+
+    Three parallel arrays, one entry per flux transition that produced at
+    least one bitcell (sub-half-cell transitions merge into the next and
+    record nothing):
+
+    - ``ticks``: the transition's time, cumulative sample ticks from the
+      start of the stream;
+    - ``bits``: how many bitcells had been emitted *after* it (so the cells
+      it clocked out are ``bits[i-1] .. bits[i]-1``);
+    - ``clock``: the PLL's bitcell period, in seconds, after it.
+
+    Cell ``k`` clocked out by transition ``i`` ended about ``(bits[i] - k - 1)``
+    clocks before ``ticks[i] / sample_freq``; the last of them (the 1) is
+    the transition itself. That is good to a fraction of a cell, which is
+    all a picture needs; the PLL's phase correction is not replayed.
+    """
+
+    ticks: array = field(default_factory=lambda: array("q"))
+    bits: array = field(default_factory=lambda: array("q"))
+    clock: array = field(default_factory=lambda: array("d"))
+
+
 def flux_to_bitcells(
     intervals: Iterable[int],
     sample_freq: float,
@@ -59,11 +90,15 @@ def flux_to_bitcells(
     pll: PLL = AGGRESSIVE,
     *,
     progress: Progress = NULL_PROGRESS,
+    trace: PllTrace | None = None,
 ) -> bytearray:
     """Recover MFM bitcells (one 0/1 byte per cell) from flux tick intervals.
 
     ``clock`` is the nominal bitcell time in seconds (1e-6 for 500 kbit/s MFM).
     ``progress`` gets one task counting flux transitions (``[tapewyrm]``).
+    ``trace``, when given, is filled with the PLL's state at every
+    transition that clocked bits out (:class:`PllTrace`); it costs one
+    integer add per transition and three appends per bit-producing one.
     """
     bits = bytearray()  # [tapewyrm] was bitarray(endian='big')
     freq = sample_freq
@@ -88,6 +123,7 @@ def flux_to_bitcells(
     # ---- GW flux_to_bitcells, verbatim from here except where marked ----
     ticks = 0.0
     clock = clock_centre
+    total_ticks = 0  # [tapewyrm] stream time of the current transition, for the trace
 
     # [tapewyrm] GW's loop below runs once per flux transition (hundreds of
     # millions on a long track), so progress is reported from an outer loop
@@ -99,6 +135,7 @@ def flux_to_bitcells(
         for chunk_at in range(0, len(seq), _PROGRESS_EVERY):
             chunk = seq[chunk_at : chunk_at + _PROGRESS_EVERY]
             for x in chunk:
+                total_ticks += x  # [tapewyrm]
                 # Gather enough ticks to generate at least one bitcell.
                 ticks += x / freq
                 if ticks < clock / 2:
@@ -132,6 +169,10 @@ def flux_to_bitcells(
                 clock = min(max(clock, clock_min), clock_max)
 
                 ticks = new_ticks
+                if trace is not None:  # [tapewyrm]
+                    trace.ticks.append(total_ticks)
+                    trace.bits.append(len(bits))
+                    trace.clock.append(clock)
             bar.advance(len(chunk))  # [tapewyrm]
 
     log.debug(
