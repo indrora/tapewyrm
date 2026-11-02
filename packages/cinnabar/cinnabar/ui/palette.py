@@ -54,6 +54,7 @@ DECODER_ROLE: dict[str, str] = {
     "QIC-80": "teal",
     "QIC-113": "green",
     "QIC-122": "amber",
+    "Volume": "teal",
     "Bytes": "grey",
 }
 

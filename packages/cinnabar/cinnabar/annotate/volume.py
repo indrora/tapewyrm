@@ -290,57 +290,64 @@ def _basic_data(stream: bytes, start: int, end: int | None) -> list[Span]:
     return spans
 
 
-def _extended_data(stream: bytes, dir_end: int | None) -> list[Span]:
-    """Extended-OS data entries: signature, 2-byte size, entry, path, data areas."""
+def _extended_data(stream: bytes, dir_at: int | None) -> list[Span]:
+    """Extended-OS data entries, placed from the directory section (QIC-113 section 8).
+
+    An Extended-OS volume's directory (at ``dir_at``, segment aligned at the
+    end) is the authority on where each file's Data Entry sits: entry
+    offsets are running sums of the directory's Data Entry sizes
+    (:func:`qiclib.qic113ext.layout`), and the file's bytes are the DATA
+    area inside it. Walking the data section by each entry's own size
+    does not work: the root entry carries an "unknown" size. Names and
+    paths come from the directory's preorder (:func:`qiclib.qic113ext.directory_paths`).
+    """
+    if dir_at is None or dir_at > len(stream):
+        return []
+    try:
+        entries = qic113ext.parse_directory(stream[dir_at:])
+    except ValueError:
+        return []
+    paths = qic113ext.directory_paths(entries)
     spans: list[Span] = []
-    off = 0
-    limit = len(stream) if dir_end is None else dir_end
-    while off + 6 <= limit and stream[off : off + 4] == qic113ext.DATA_ENTRY_SIG:
-        try:
-            entry, entry_end = qic113ext.parse_entry(stream, off + 4)
-        except ValueError:
+    for place, entry, path in zip(qic113ext.layout(entries, stream), entries, paths, strict=False):
+        off = place.entry_offset
+        if off >= min(dir_at, len(stream)):
             break
-        name = next((d.name for d in entry.descriptions if d.name), "")
-        path_at = entry_end
-        p = path_at + entry.path_entry_size
-        areas: list[Span] = []
-        for d in entry.descriptions:
-            if d.id in qic113ext.NULL_AREA_IDS:
-                continue
-            areas.append(
-                Span(
-                    p,
-                    p + 6 + d.area_size,
-                    "area" if d.id != qic113ext.DD_DATA else "data",
-                    f"{d.area_size:,} B",
-                    "filedata" if d.id == qic113ext.DD_DATA else "data-area",
-                    Shape.BLOCK,
-                    (("data description id", str(d.id)), ("bytes", str(d.area_size))),
-                )
+        end = off + entry.data_entry_size if 0 < entry.data_entry_size < len(stream) else None
+        children: list[Span] = [Span(off, off + 4, "33CC33CC", "", "sig", Shape.HEX)]
+        if place.data_offset is not None and place.data_size:
+            d0 = place.data_offset
+            d1 = min(d0 + place.data_size, len(stream))
+            children.append(Span(off + 4, d0, "entry", entry.name, "dir-entry", Shape.BLOCK))
+            children.append(Span(d0, d1, "data", f"{place.data_size:,} B", "filedata"))
+            if end is None:
+                end = d1
+        else:
+            end = (
+                end or off + 4 + 2 + entry.data_entry_size
+                if entry.data_entry_size < len(stream)
+                else off + 64
             )
-            p += 6 + d.area_size
-        children = (
-            Span(off, off + 4, "33CC33CC", "", "sig", Shape.HEX),
-            Span(off + 4, entry_end, "entry", name, "dir-entry", Shape.BLOCK),
-            Span(path_at, path_at + entry.path_entry_size, "path", "", "path", Shape.HEX),
-            *areas,
+            children.append(Span(off + 4, end, "entry", entry.name, "dir-entry", Shape.BLOCK))
+        kind = "dir" if entry.is_dir else "file"
+        detail = (
+            ("path", path),
+            ("kind", kind),
+            ("bytes", str(place.data_size)),
+            ("modified", str(entry.mtime) if entry.mtime else "(none)"),
         )
-        end = max(p, off + entry.data_entry_size) if entry.data_entry_size else p
         spans.append(
             Span(
                 off,
-                end,
-                name or "(entry)",
-                f"{end - off:,} B",
-                "data-entry",
+                max(end, off + 4),
+                entry.name or "(entry)",
+                f"{place.data_size:,} B" if not entry.is_dir else kind,
+                "data-entry" if not entry.is_dir else "dir-subdir",
                 Shape.CHEVRON,
-                (),
-                children,
+                detail,
+                tuple(children),
             )
         )
-        if entry.data_entry_size <= 0:
-            break
-        off += entry.data_entry_size
     return spans
 
 
@@ -370,7 +377,7 @@ def _extended_directory(stream: bytes, start: int) -> list[Span]:
     return spans
 
 
-def _volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
+def _volume_spans(stream: bytes, vtbl: VtblEntry, *, decompressed: bool = False) -> list[Span]:
     """Level-0 spans of an uncompressed volume's byte stream: its directory and data sections.
 
     Basic-DOS, directory first (QIC-113 section 7):
@@ -379,7 +386,7 @@ def _volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
     A compressed volume has no structure in the stream (see
     :func:`extent_spans`), so this returns nothing for it.
     """
-    if vtbl.compressed:
+    if vtbl.compressed and not decompressed:
         return []
     extended = qic113.is_extended_os(vtbl)
     if extended or vtbl.directory_last:
@@ -454,9 +461,17 @@ def _volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
     return out
 
 
-def volume_spans(stream: bytes, vtbl: VtblEntry) -> list[Span]:
-    """:func:`_volume_spans` with rows assigned: sections, entries, entry parts."""
-    return [assign_rows(s, VOLUME_ROWS) for s in _volume_spans(stream, vtbl)]
+def volume_spans(stream: bytes, vtbl: VtblEntry, *, decompressed: bool = False) -> list[Span]:
+    """:func:`_volume_spans` with rows assigned: sections, entries, entry parts.
+
+    ``decompressed`` says ``stream`` is a compressed volume's bytes *after*
+    QIC-122 (``cinnabar.load.volumes.Volume.decompressed``), which have the
+    same structure as an uncompressed volume's; without it a compressed
+    entry's stream is taken as still-compressed and has no structure to show.
+    """
+    return [
+        assign_rows(s, VOLUME_ROWS) for s in _volume_spans(stream, vtbl, decompressed=decompressed)
+    ]
 
 
 # ---------------------------------------------------------------------------

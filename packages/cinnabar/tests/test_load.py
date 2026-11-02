@@ -9,7 +9,7 @@ from tapewyrm_archive.progress import NULL_PROGRESS
 
 from cinnabar.cli import cli, dump_track
 from cinnabar.load import open_path
-from cinnabar.model import SEGMENT_BYTES, AxisKind, level
+from cinnabar.model import SEGMENT_BYTES, AxisKind, level, rows_of
 
 
 def test_image_tracks_segments_and_holds(image_path: Path):
@@ -118,3 +118,86 @@ def test_opening_one_capture_takes_its_dump_sidecar(qic80_capture: Path, tmp_pat
     # Both files carry track 0 in their header; the second becomes a numbered pass.
     assert len(tape.track_numbers) == 2
     assert sidecar_captures(qic80_capture) == [qic80_capture]  # no sidecar there
+
+
+def _compressed_image(tmp_path: Path) -> Path:
+    """An image whose volume is QIC-122 extents of *raw* frames (no compressor needed)."""
+    import struct
+
+    from qiclib import volume as volume_mod
+    from qiclib.build import build_image
+    from qiclib.testing.builders import (
+        build_header_segment,
+        build_volume_table_segment,
+        build_vtbl_entry,
+        make_segment_from_sectors,
+        segment_raw_sectors,
+    )
+    from tapewyrm_archive import twrf
+
+    from tests.conftest import basic_volume_stream, capture_header
+
+    stream = basic_volume_stream()
+    header = build_header_segment(0)
+    vtbl_at = volume_mod.parse_header(header)[0].first_data_seg or 1
+    # Two extents: the stream split in half, each a raw frame at its offset.
+    half = len(stream) // 2
+    segs = []
+    for k, (off, chunk) in enumerate(((0, stream[:half]), (half, stream[half:]))):
+        extent = struct.pack("<Q", off) + struct.pack("<H", 0x8000 | len(chunk)) + chunk
+        segs.append(
+            make_segment_from_sectors(
+                0,
+                vtbl_at + 1 + k,
+                vtbl_at + 1 + k,
+                [extent[i : i + 1024] for i in range(0, len(extent), 1024)],
+            )
+        )
+    entry = bytearray(
+        build_vtbl_entry(
+            start_seg=vtbl_at + 1, end_seg=vtbl_at + 2, description="PACKED", compressed=True
+        )
+    )
+    entry[96:104] = len(stream).to_bytes(8, "little")  # data section size: the uncompressed length
+    vtbl = build_volume_table_segment(vtbl_at, [bytes(entry)])
+    sectors = [s for seg in (header, vtbl, *segs) for s in segment_raw_sectors(seg)]
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    out = tmp_path / "packed.twti"
+    build_image(
+        [sectors],
+        out,
+        sources=[{"file": "synthetic", "twrf": twrf.header_to_dict(capture_header(0))}],
+    )
+    return out
+
+
+def test_compressed_volume_decompresses_into_files(tmp_path: Path):
+    from cinnabar.model import VOLUME_BASE
+
+    tape = open_path(_compressed_image(tmp_path))
+    assert VOLUME_BASE in tape.track_numbers
+    assert tape.label(VOLUME_BASE) == "Volume 0: PACKED"
+    track = tape.load(VOLUME_BASE, NULL_PROGRESS)
+    assert track.physical == "Volume" and track.axis.kind is AxisKind.BYTES
+    assert [s.title for s in track.segments][:2] and len(track.segments) == 2
+    assert track.segments[0].records[0].row == "Volume: Source segment"
+    rows = rows_of([s for seg in track.segments for s in seg.fields])
+    assert "QIC-113: Sections" in rows and "QIC-113: Entries" in rows
+    names = [s.label for seg in track.segments for s in level(seg.fields, 1)]
+    assert "HELLO.TXT" in names and "DOCS" in names
+    hello = next(
+        s
+        for seg in track.segments
+        for s in level(seg.fields, 1)
+        if s.label == "HELLO.TXT" and s.style == "data-entry"
+    )
+    data = next(c for c in hello.children if c.label == "data")
+    pieces = [p for seg in track.segments for p in seg.bytes_between(data.start, data.end)]
+    assert b"".join(p.data for p in pieces) == b"hello tape\n"
+    text = dump_track(track, segment=1)
+    assert "Volume: Source segment" in text
+    result = CliRunner().invoke(
+        cli, ["--dump", "--volume", "0", "--segment", "0", str(_compressed_image(tmp_path / "b"))]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Directory Section" in result.output

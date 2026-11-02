@@ -34,6 +34,7 @@ ROW_ORDER: tuple[str, ...] = (
     "GCR: Records",
     "GCR: Fields",
     "TWTI: Sectors",
+    "Volume: Source segment",
     "QIC-80: Header",
     "QIC-80: Header fields",
     "QIC-113: Volume table",

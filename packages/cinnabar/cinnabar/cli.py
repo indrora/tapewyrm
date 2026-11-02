@@ -25,7 +25,7 @@ from tapewyrm_archive.progress import Progress
 
 from cinnabar.annotate import ordered_rows
 from cinnabar.console import make_console, progress_display, setup_logging
-from cinnabar.model import Track, in_row, rows_of
+from cinnabar.model import VOLUME_BASE, Track, in_row, rows_of
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,13 @@ def dump_track(track: Track, *, segment: int | None = None) -> str:
 @click.version_option(package_name="cinnabar", prog_name="cinnabar")
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("--track", "track_number", type=int, default=None, help="track to open first")
+@click.option(
+    "--volume",
+    "volume_index",
+    type=int,
+    default=None,
+    help="open volume N's decompressed stream (its index in the volume table) instead of a track",
+)
 @click.option("--segment", type=int, default=None, help="with --dump: only this segment")
 @click.option("--dump", is_flag=True, help="print the track's lanes as text and exit (no window)")
 @click.option(
@@ -104,6 +111,7 @@ def dump_track(track: Track, *, segment: int | None = None) -> str:
 def cli(
     path: Path,
     track_number: int | None,
+    volume_index: int | None,
     segment: int | None,
     dump: bool,
     screenshot: Path | None,
@@ -122,8 +130,16 @@ def cli(
     with app.progress() as prog:
         tape = open_path(path, prog)
     first = track_number if track_number is not None else tape.track_numbers[0]
+    if volume_index is not None:
+        first = VOLUME_BASE + volume_index
+        if first not in tape.track_numbers and tape.kind == "TWRF":
+            # A flux tape's volumes appear once track 0 has decoded and identified it.
+            with app.progress() as prog:
+                track0 = tape.load(tape.track_numbers[0], prog)
+                if track0.decoder is not None:
+                    track0.decoder.wait()
     if first not in tape.track_numbers:
-        raise click.BadParameter(f"track {first} is not in {path}", param_hint="--track")
+        raise click.BadParameter(f"{tape.label(first)} is not in {path}", param_hint="--track")
     if dump:
         with app.progress() as prog:
             track = tape.load(first, prog)

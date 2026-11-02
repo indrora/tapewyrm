@@ -50,10 +50,12 @@ from cinnabar.annotate import qic100 as qic100_ann
 from cinnabar.annotate import sectors as sectors_mod
 from cinnabar.decode import jobs
 from cinnabar.decode.track import TrackDecoder
-from cinnabar.load.volumes import Layout
+from cinnabar.load.volumes import Layout, volume_track
 from cinnabar.model import (
+    PASS_BASE,
     SECTOR_BYTES,
     SEGMENT_BYTES,
+    VOLUME_BASE,
     Axis,
     AxisKind,
     ByteMap,
@@ -84,6 +86,7 @@ class _Identification:
         self.ftk_per_side = geometry_mod.FTK_PER_SIDE
         self._tried_with = 0
         self._lock = threading.Lock()
+        self.on_identified: list[Callable[[Layout], None]] = []
 
     def attempt(self, sectors: Sequence[RawSector], header: CaptureHeader, *, final: bool) -> bool:
         """Try to identify from ``sectors``; True when the layout is new."""
@@ -116,7 +119,9 @@ class _Identification:
                 info.vol.tape_name.strip(),
                 len(self.layout.entries),
             )
-            return True
+        for listener in self.on_identified:
+            listener(self.layout)
+        return True
 
 
 class FluxTrack:
@@ -168,7 +173,7 @@ class FluxTrack:
             intervals, self.sample_hz, self.physical, bitcell_s, self.windows
         )
         self.track = Track(
-            f"Track {number}" if number < 1000 else f"Pass {number - 1000}",
+            f"Track {number}" if number < PASS_BASE else f"Pass {number - PASS_BASE}",
             number,
             Axis(AxisKind.TIME),
             _PHYSICAL_NAMES[self.physical],
@@ -356,14 +361,31 @@ def open_captures(paths: Sequence[Path]) -> Tape:
     by_track: dict[int, Path] = {}
     for i, p in enumerate(paths):
         t = headers[p].track
-        by_track[t if t >= 0 and t not in by_track else 1000 + i] = p
+        by_track[t if t >= 0 and t not in by_track else PASS_BASE + i] = p
     numbers = sorted(by_track)
     first = headers[by_track[numbers[0]]]
     source = str(paths[0].parent if len(paths) > 1 else paths[0])
     ident = _Identification()
     open_tracks: dict[int, FluxTrack] = {}
+    labels: dict[int, str] = {}
+
+    def volumes_known(layout: Layout) -> None:
+        for k, vol in enumerate(layout.volumes):
+            number = VOLUME_BASE + k
+            labels[number] = f"Volume {k}: {vol.entry.description.strip() or '(unnamed)'}"
+            if number not in tape.track_numbers:
+                tape.track_numbers.append(number)
+        tape.labels.update(labels)
+
+    ident.on_identified.append(volumes_known)
 
     def load(number: int, progress: Progress = NULL_PROGRESS) -> Track:
+        if number >= VOLUME_BASE:
+            if ident.layout is None:
+                raise ValueError("the tape has not been identified yet; decode track 0 first")
+            vol = ident.layout.volumes[number - VOLUME_BASE]
+            with progress.task(f"decompressing volume {number - VOLUME_BASE}", total=None):
+                return volume_track(vol, number, labels[number])
         if number not in open_tracks:
             if len(open_tracks) >= 2:  # a track's intervals are big; keep two
                 oldest = next(iter(open_tracks))
@@ -377,7 +399,8 @@ def open_captures(paths: Sequence[Path]) -> Tape:
         ("drive", f"vendor {first.drive_vendor_id}" if first.drive_vendor_id else "(unknown)"),
         ("tape format", first.tape_format.name),
     )
-    return Tape(source, "TWRF", numbers, load, tape_detail)
+    tape = Tape(source, "TWRF", numbers, load, tape_detail)
+    return tape
 
 
 def open_directory(path: Path) -> Tape:

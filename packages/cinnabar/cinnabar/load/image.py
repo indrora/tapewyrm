@@ -24,8 +24,18 @@ from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twti import SegmentState, TapeImage
 
 from cinnabar.annotate import sectors as sectors_mod
-from cinnabar.load.volumes import Layout
-from cinnabar.model import SEGMENT_BYTES, Axis, AxisKind, ByteMap, ByteRun, Segment, Tape, Track
+from cinnabar.load.volumes import Layout, volume_track
+from cinnabar.model import (
+    SEGMENT_BYTES,
+    VOLUME_BASE,
+    Axis,
+    AxisKind,
+    ByteMap,
+    ByteRun,
+    Segment,
+    Tape,
+    Track,
+)
 
 log = logging.getLogger(__name__)
 
@@ -115,8 +125,18 @@ def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
             (("track", str(track)), ("segments", str(len(segments)))),
         )
 
+    labels = {
+        VOLUME_BASE + k: f"Volume {k}: {v.entry.description.strip() or '(unnamed)'}"
+        for k, v in enumerate(layout.volumes)
+    }
+
     def load(track: int, progress: Progress = NULL_PROGRESS) -> Track:
+        if track >= VOLUME_BASE:
+            vol = layout.volumes[track - VOLUME_BASE]
+            with progress.task(f"decompressing volume {track - VOLUME_BASE}", total=None):
+                return volume_track(vol, track, labels[track])
         with progress.task(f"placing track {track}", total=None):
             return _load(track)
 
-    return Tape(str(path), kind, list(range(tracks)), load, detail)
+    numbers = list(range(tracks)) + sorted(labels)
+    return Tape(str(path), kind, numbers, load, detail, labels)

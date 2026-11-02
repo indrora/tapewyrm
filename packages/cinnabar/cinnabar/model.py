@@ -557,3 +557,19 @@ class Tape:
     track_numbers: list[int]
     load: Callable[[int, Any], Track]  # (track number, Progress) -> Track
     detail: tuple[tuple[str, str], ...] = ()
+    # Display names for numbers that are not plain tape tracks: a volume's
+    # decompressed stream is a "track" too (VOLUME_BASE + its table index),
+    # named after the volume. A loader may add numbers after opening (a flux
+    # tape's volumes appear once its header and volume table have decoded).
+    labels: dict[int, str] = field(default_factory=dict)
+
+    def label(self, number: int) -> str:
+        if number in self.labels:
+            return self.labels[number]
+        if number >= PASS_BASE:
+            return f"Pass {number - PASS_BASE}"
+        return f"Track {number}"
+
+
+PASS_BASE = 1000  # a capture whose header names no usable track
+VOLUME_BASE = 2000  # VOLUME_BASE + k: the decompressed stream of volume k

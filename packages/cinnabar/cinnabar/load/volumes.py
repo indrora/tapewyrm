@@ -16,15 +16,38 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
-from qiclib import identify
+from qiclib import identify, qic122
 from qiclib.volume import VtblEntry
+from tapewyrm_archive.twvl import SparseVolume
 
 from cinnabar.annotate import header as header_mod
 from cinnabar.annotate import volume as volume_ann
-from cinnabar.model import SEGMENT_BYTES, ByteMap, Span
+from cinnabar.model import (
+    SEGMENT_BYTES,
+    Axis,
+    AxisKind,
+    ByteMap,
+    ByteRun,
+    Segment,
+    Shape,
+    Span,
+    Track,
+)
 
 log = logging.getLogger(__name__)
+
+SOURCE_ROW = "Volume: Source segment"
+
+
+@dataclass(frozen=True)
+class VolumePiece:
+    """One tape segment's contribution to a volume's byte stream, decompressed."""
+
+    offset: int  # in the volume's (uncompressed) byte stream
+    data: bytes
+    seg_abs: int  # the tape segment it came from
 
 
 class Volume:
@@ -59,6 +82,53 @@ class Volume:
             data = self._fetch(seg_abs)
             out[off : off + min(len(data), SEGMENT_BYTES)] = data[:SEGMENT_BYTES]
         return bytes(out)
+
+    # -- the decompressed stream ---------------------------------------------
+
+    def pieces(self) -> list[VolumePiece]:
+        """The volume's byte stream as pieces, one per readable tape segment, in stream order.
+
+        Uncompressed: each segment's data at its running offset (BSM-bad
+        segments take no room, missing ones leave a hole). Compressed: each
+        segment is a QIC-122 Compression Extent whose leading field says
+        where its bytes go in the uncompressed stream (QIC-113 section 9);
+        it is decompressed the way ``qicsilver extract`` does it
+        (:func:`qiclib.qic122.decode_extent`, with the volume profile's
+        offset width), and one that will not decode is a hole.
+        """
+        out: list[VolumePiece] = []
+        for seg_abs, off in sorted(self.base.items(), key=lambda kv: kv[1]):
+            data = self._fetch(seg_abs)
+            if not data:
+                continue
+            if not self.entry.compressed:
+                out.append(VolumePiece(off, data[:SEGMENT_BYTES], seg_abs))
+                continue
+            try:
+                ext = qic122.decode_extent(data, offset_bytes=self.offset_bytes)
+            except qic122.Qic122Error as exc:
+                log.debug("segment %d: extent did not decode: %s", seg_abs, exc)
+                continue
+            if ext.data:
+                out.append(VolumePiece(ext.uncompressed_offset, ext.data, seg_abs))
+        return sorted(out, key=lambda p: p.offset)
+
+    def stream_size(self, pieces: list[VolumePiece]) -> int:
+        """The volume's length: the table's section sizes, or the pieces' extent if larger."""
+        e = self.entry
+        table = (e.data_section_size or 0) + (e.dir_section_size or 0)
+        seen = max((p.offset + len(p.data) for p in pieces), default=0)
+        return max(table, seen) if e.compressed else max(self.length, seen)
+
+    def decompressed(self) -> tuple[bytes, list[VolumePiece]]:
+        """The whole stream (holes zero-filled) and its pieces."""
+        pieces = self.pieces()
+        size = self.stream_size(pieces)
+        sparse = SparseVolume(size=size)
+        for p in pieces:
+            sparse.add(p.offset, p.data)
+        body, _missing = sparse.read(0, size)
+        return body, pieces
 
     def spans(self) -> list[Span]:
         """The volume's structure in stream offsets, parsed on first use."""
@@ -145,3 +215,77 @@ class Layout:
             if clipped is not None:
                 out.append(clipped.mapped(place))
         return out
+
+
+def volume_track(vol: Volume, number: int, label: str) -> Track:
+    """A volume's decompressed byte stream as a byte-axis track.
+
+    Each readable tape segment's piece is a segment of the track, titled
+    by the tape segment it came from, so a hole (a lost tape segment) is
+    a gap you can see. The QIC-113 rows come from the stream (directory
+    and data entries: the files), a "Source segment" row says which tape
+    segment each stretch came from, and the Bytes lane is the decompressed
+    data, so a click on a data entry's ``data`` child is that file's bytes
+    and "Export these bytes" writes the file.
+    """
+    body, pieces = vol.decompressed()
+    size = max(len(body), 1)
+    try:
+        structure = volume_ann.volume_spans(body, vol.entry, decompressed=True)
+    except Exception:  # noqa: BLE001 -- a damaged volume still shows its pieces
+        log.exception("volume %r: decompressed structure not parsed", vol.entry.description)
+        structure = []
+    segments: list[Segment] = []
+    for k, piece in enumerate(pieces):
+        start = piece.offset
+        end = pieces[k + 1].offset if k + 1 < len(pieces) else size
+        if end <= start:
+            end = start + len(piece.data)
+        bmap = ByteMap.identity(float(start), end - start)
+        fields = [c for s in structure if (c := s.clipped(start, end)) is not None]
+        source = Span(
+            start,
+            start + len(piece.data),
+            f"segment {piece.seg_abs}",
+            f"{len(piece.data):,} B",
+            "extent",
+            Shape.CHEVRON,
+            (("tape segment", str(piece.seg_abs)), ("bytes", str(len(piece.data)))),
+            row=SOURCE_ROW,
+        )
+        hole = end - (start + len(piece.data))
+        state = "clean" if hole <= 0 else "partial"
+        segments.append(
+            Segment(
+                k,
+                float(start),
+                float(end),
+                f"Seg {piece.seg_abs}",
+                [source],
+                fields,
+                [ByteRun(float(start), float(start + len(piece.data)), piece.data, start)],
+                state,
+                (
+                    ("tape segment", str(piece.seg_abs)),
+                    ("stream offset", f"{start:,}"),
+                    ("bytes", f"{len(piece.data):,}"),
+                    ("hole after", f"{hole:,} B" if hole > 0 else "none"),
+                ),
+            )
+        )
+        del bmap
+    return Track(
+        label,
+        number,
+        Axis(AxisKind.BYTES),
+        "Volume",
+        segments,
+        [s.state_token() for s in segments],
+        (
+            ("volume", vol.entry.description.strip()),
+            ("compressed", str(bool(vol.entry.compressed))),
+            ("stream bytes", f"{size:,}"),
+            ("pieces", str(len(pieces))),
+            ("tape segments", f"{vol.entry.start_seg}-{vol.entry.end_seg}"),
+        ),
+    )

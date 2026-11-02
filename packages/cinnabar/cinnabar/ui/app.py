@@ -113,10 +113,6 @@ def _icon(theme_name: str, fallback: QStyle.StandardPixmap, style: QStyle) -> QI
     return icon if not icon.isNull() else style.standardIcon(fallback)
 
 
-def _track_name(n: int) -> str:
-    return f"Track {n}" if n < 1000 else f"Pass {n - 1000}"
-
-
 class MainWindow(QMainWindow):
     def __init__(self, tape: Tape, first: int) -> None:
         super().__init__()
@@ -318,13 +314,23 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
         bar.addWidget(QLabel(" Track "))
         self.track_box = QComboBox()
-        self.track_box.setMinimumWidth(100)
-        for n in self.tape.track_numbers:
-            self.track_box.addItem(_track_name(n), n)
+        self.track_box.setMinimumWidth(160)
+        self._fill_track_box()
         self.track_box.currentIndexChanged.connect(self._track_chosen)
         bar.addWidget(self.track_box)
         bar.addAction(self.act_prev_track)
         bar.addAction(self.act_next_track)
+
+    def _fill_track_box(self) -> None:
+        """The track selector lists the tape's tracks, then its volumes (decompressed streams)."""
+        current = self.track_box.currentData()
+        self.track_box.blockSignals(True)
+        self.track_box.clear()
+        for n in self.tape.track_numbers:
+            self.track_box.addItem(self.tape.label(n), n)
+        if current is not None and (i := self.track_box.findData(current)) >= 0:
+            self.track_box.setCurrentIndex(i)
+        self.track_box.blockSignals(False)
 
     def _statusbar(self) -> None:
         sb = self.statusBar()
@@ -385,11 +391,7 @@ class MainWindow(QMainWindow):
         self.track = None
         self.status_source.setText(Path(tape.source).name)
         self.setWindowTitle(f"{Path(tape.source).name} - cinnabar")
-        self.track_box.blockSignals(True)
-        self.track_box.clear()
-        for n in tape.track_numbers:
-            self.track_box.addItem(_track_name(n), n)
-        self.track_box.blockSignals(False)
+        self._fill_track_box()
         self.open_track(tape.track_numbers[0])
 
     def _about(self) -> None:
@@ -406,7 +408,7 @@ class MainWindow(QMainWindow):
         if number not in self.tape.track_numbers or self._pending is not None:
             return
         self._pending = number
-        self.statusBar().showMessage(f"Loading {_track_name(number).lower()}...")
+        self.statusBar().showMessage(f"Loading {self.tape.label(number)}...")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         job = _Load(self.tape, number, self.progress_source)
         job.signals.done.connect(self._loaded)
@@ -419,6 +421,7 @@ class MainWindow(QMainWindow):
         self._pending = None
         self.track = track
         self.statusBar().clearMessage()
+        self._fill_track_box()
         idx = self.track_box.findData(track.number)
         if idx >= 0:
             self.track_box.blockSignals(True)
@@ -527,6 +530,8 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self.lanes.refresh()
         self.overview.set_track(self.track)
+        if self.track_box.count() != len(self.tape.track_numbers):
+            self._fill_track_box()  # a flux tape's volumes appear once identified
         self._status()
 
     def _status(self) -> None:
