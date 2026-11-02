@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QScrollArea,
     QStyle,
     QToolBar,
     QVBoxLayout,
@@ -82,6 +83,18 @@ class _Load(QRunnable):
         except Exception as exc:  # noqa: BLE001 -- shown in the window, logged with trace
             log.exception("track %d failed to load", self.number)
             self.signals.failed.emit(f"track {self.number}: {exc}")
+
+
+class _WarmUp(QRunnable):
+    """Spawns the decode worker processes in the background at start-up."""
+
+    def run(self) -> None:
+        from cinnabar.decode.track import warm_up
+
+        try:
+            warm_up()
+        except Exception:  # noqa: BLE001 -- the first decode will try again
+            log.exception("decode pool warm-up failed")
 
 
 class _OpenSignals(QObject):
@@ -134,14 +147,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{Path(tape.source).name} - cinnabar")
         self.resize(1500, 900)
 
-        # Central: the channel stack over the track strip.
+        # Central: the channel stack (in a scroll area, since zoomed rows can
+        # outgrow the window) over the track strip.
         self.lanes = LaneStack()
         self.overview = Overview()
+        self.lane_scroll = QScrollArea()  # not "scroll": QWidget.scroll() is a method
+        self.lane_scroll.setWidget(self.lanes)
+        self.lane_scroll.setWidgetResizable(True)
+        self.lane_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.lane_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.lane_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        bar = self.lane_scroll.verticalScrollBar()
+        self.lanes.scroll_by = lambda dy: bar.setValue(bar.value() + dy)
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.lanes, 1)
+        layout.addWidget(self.lane_scroll, 1)
         layout.addWidget(self.overview)
         self.setCentralWidget(central)
 
@@ -165,6 +187,7 @@ class MainWindow(QMainWindow):
         self.overview.window_moved.connect(self.lanes.set_range)
         self.lanes.hovered.connect(self._hovered)
         self.lanes.clicked.connect(self._clicked)
+        self._pool.start(_WarmUp())
         self.open_track(first)
 
     # -- actions, menus, toolbar, status bar ---------------------------------
@@ -256,6 +279,10 @@ class MainWindow(QMainWindow):
             icon=_icon("go-down", sp.SP_ArrowDown, st),
             shortcut=sk.MoveToNextPage,
         )
+        self.act_wide = QAction("&Wide lanes", self)
+        self.act_wide.setCheckable(True)
+        self.act_wide.setShortcut("W")
+        self.act_wide.toggled.connect(self.lanes.set_wide)
         self.act_about = action("&About cinnabar", self._about, role=QAction.MenuRole.AboutRole)
 
     def _menus(self) -> None:
@@ -273,6 +300,16 @@ class MainWindow(QMainWindow):
         view.addAction(self.act_zoom_out)
         view.addAction(self.act_fit_segment)
         view.addAction(self.act_fit_track)
+        view.addSeparator()
+        view.addAction(self.act_wide)
+        heights = view.addMenu("Lane &height")
+        self._height_actions = []
+        for pct in (100, 125, 150, 200, 250):
+            act = heights.addAction(f"{pct}%")
+            act.setCheckable(True)
+            act.setChecked(pct == 100)
+            act.triggered.connect(lambda _checked=False, p=pct: self.set_vscale(p / 100))
+            self._height_actions.append(act)
         view.addSeparator()
         view.addAction(self.dock.toggleViewAction())
         view.addSeparator()
@@ -320,6 +357,16 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.track_box)
         bar.addAction(self.act_prev_track)
         bar.addAction(self.act_next_track)
+        bar.addSeparator()
+        bar.addAction(self.act_wide)
+        bar.addWidget(QLabel(" Height "))
+        self.height_box = QComboBox()
+        for pct in (100, 125, 150, 200, 250):
+            self.height_box.addItem(f"{pct}%", pct)
+        self.height_box.currentIndexChanged.connect(
+            lambda i: self.set_vscale(self.height_box.itemData(i) / 100)
+        )
+        bar.addWidget(self.height_box)
 
     def _fill_track_box(self) -> None:
         """The track selector lists the tape's tracks, then its volumes (decompressed streams)."""
@@ -344,6 +391,20 @@ class MainWindow(QMainWindow):
         self.progress.setFormat("decoding %v/%m")
         self.progress.hide()
         sb.addPermanentWidget(self.progress)
+
+    # -- lane height --------------------------------------------------------
+
+    def set_vscale(self, scale: float) -> None:
+        """The vertical zoom, 1x to 2.5x, from the toolbar box or the View menu."""
+        self.lanes.set_vscale(scale)
+        pct = int(round(self.lanes.vscale * 100))
+        for act in getattr(self, "_height_actions", []):
+            act.setChecked(act.text() == f"{pct}%")
+        box = getattr(self, "height_box", None)
+        if box is not None and box.currentData() != pct and (i := box.findData(pct)) >= 0:
+            box.blockSignals(True)
+            box.setCurrentIndex(i)
+            box.blockSignals(False)
 
     # -- theme -------------------------------------------------------------
 
@@ -377,7 +438,6 @@ class MainWindow(QMainWindow):
             return
         self._pending = -1
         self.statusBar().showMessage(f"Opening {Path(path).name}...")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         job = _Open(Path(path), self.progress_source)
         job.signals.done.connect(self._opened)
         job.signals.failed.connect(self._failed)
@@ -385,7 +445,6 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _opened(self, tape: Tape) -> None:
-        QApplication.restoreOverrideCursor()
         self._pending = None
         self.tape = tape
         self.track = None
@@ -408,8 +467,9 @@ class MainWindow(QMainWindow):
         if number not in self.tape.track_numbers or self._pending is not None:
             return
         self._pending = number
+        # No wait cursor: on macOS that is the beachball, and the window is
+        # not stuck, it is loading on a worker. The status bar says so.
         self.statusBar().showMessage(f"Loading {self.tape.label(number)}...")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         job = _Load(self.tape, number, self.progress_source)
         job.signals.done.connect(self._loaded)
         job.signals.failed.connect(self._failed)
@@ -417,7 +477,6 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _loaded(self, track: Track) -> None:
-        QApplication.restoreOverrideCursor()
         self._pending = None
         self.track = track
         self.statusBar().clearMessage()
@@ -437,7 +496,6 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _failed(self, message: str) -> None:
-        QApplication.restoreOverrideCursor()
         self._pending = None
         self.statusBar().showMessage(message)
         QMessageBox.warning(self, "cinnabar", message)

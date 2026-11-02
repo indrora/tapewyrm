@@ -169,9 +169,10 @@ class FluxTrack:
 
         self.sectors_by_segment: dict[int, list[RawSector]] = {}
         self._listeners: list[Callable[[int], None]] = []
-        self.decoder = TrackDecoder(
-            intervals, self.sample_hz, self.physical, bitcell_s, self.windows
-        )
+        with progress.task(f"queueing {len(self.windows)} segments", total=None):
+            self.decoder = TrackDecoder(
+                intervals, self.sample_hz, self.physical, bitcell_s, self.windows
+            )
         self.track = Track(
             f"Track {number}" if number < PASS_BASE else f"Pass {number - PASS_BASE}",
             number,
@@ -192,7 +193,8 @@ class FluxTrack:
             self,
         )
         self.decoder.on_result(self._landed)
-        self.decoder.submit_all(0)
+        with progress.task("starting decode workers", total=None):
+            self.decoder.submit_all(0)
 
     # -- the Track.decoder protocol ------------------------------------------
 

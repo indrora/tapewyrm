@@ -34,17 +34,34 @@ log = logging.getLogger(__name__)
 
 _POOL: ProcessPoolExecutor | None = None
 _POOL_LOCK = threading.Lock()
+_WORKERS = max(1, (os.cpu_count() or 2) - 1)
 
 
 def pool() -> ProcessPoolExecutor:
     global _POOL
     with _POOL_LOCK:
         if _POOL is None:
-            workers = max(1, (os.cpu_count() or 2) - 1)
+            workers = _WORKERS
             _POOL = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
             atexit.register(_POOL.shutdown, wait=False, cancel_futures=True)
             log.debug("decode pool: %d workers", workers)
         return _POOL
+
+
+def warm_up() -> None:
+    """Spawn every worker process now, so the first track's decode does not pay for it.
+
+    ``ProcessPoolExecutor`` starts a process per submitted job until it has
+    its full count, and with the spawn start method each one takes a
+    quarter of a second to come up and import numpy and the codec: the
+    first track's ``submit_all`` used to block for three seconds right
+    after its progress bar said done. Submitting one no-op per worker
+    from a thread at start-up overlaps that with parsing the file.
+    """
+    executor = pool()
+    futures = [executor.submit(jobs.noop) for _ in range(_WORKERS)]
+    for f in futures:
+        f.result()
 
 
 class TrackDecoder:

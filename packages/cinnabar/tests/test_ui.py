@@ -79,3 +79,51 @@ def test_row_heights_persist_across_rebuilds(image_path: Path):
     stack.set_track(track)
     vb = next(vb for name, vb, _ in stack._lanes if name == "TWTI: Sectors")
     assert vb.maximumHeight() == 90
+
+
+def test_wide_lanes_and_vertical_zoom(image_path: Path):
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.lanes import HEIGHTS, WIDE_HEIGHTS, LaneStack
+
+    QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.set_track(track)
+
+    def height(name: str) -> int:
+        return next(vb.maximumHeight() for n, vb, _ in stack._lanes if n == name)
+
+    assert height("TWTI: Sectors") == HEIGHTS["records"]
+    stack.set_wide(True)
+    assert (
+        height("TWTI: Sectors") == WIDE_HEIGHTS["records"]
+        and height("Bytes") == WIDE_HEIGHTS["Bytes"]
+    )
+    stack.set_vscale(2.5)
+    assert height("Bytes") == round(WIDE_HEIGHTS["Bytes"] * 2.5)
+    stack.set_vscale(9.0)  # clamped
+    assert stack.vscale == 2.5
+    stack.set_wide(False)
+    stack.set_vscale(1.0)
+    assert height("TWTI: Sectors") == HEIGHTS["records"]
+
+
+def test_stack_reports_its_height_and_scrolls_on_drag(image_path: Path):
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.lanes import LaneStack
+
+    QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.set_track(track)
+    one_x = stack.total_height()
+    assert stack.minimumHeight() == one_x
+    stack.set_vscale(2.5)
+    assert stack.total_height() > 2 * one_x and stack.minimumHeight() == stack.total_height()
+    scrolled: list[int] = []
+    stack.scroll_by = scrolled.append
+    _, vb, _ = stack._lanes[0]
+    vb._scroll(-7)  # what a 7 px upward drag hands the window
+    assert scrolled == [-7]

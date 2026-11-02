@@ -296,5 +296,9 @@ def detect_physical(intervals: list[int], sample_hz: int, rate_kbps: int) -> tup
     return "qic80", mfm_cell
 
 
+def noop() -> None:
+    """A job that does nothing: submitted once per worker to make the pool spawn them early."""
+
+
 def intervals_array(intervals: array | list[int]) -> np.ndarray:
     return np.asarray(intervals, dtype=np.int32)

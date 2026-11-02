@@ -49,6 +49,10 @@ from cinnabar.ui.items import (
 
 HEADER_WIDTH = 150
 HEIGHTS = {"ruler": 38, "Flux": 64, "Stream": 96, "records": 36, "row": 26, "Bytes": 24}
+# "Wide lanes": the taller defaults, with room for a label and a sublabel in
+# every row and three readable rows of flux (the ruler stays).
+WIDE_HEIGHTS = {"ruler": 38, "Flux": 110, "Stream": 150, "records": 60, "row": 44, "Bytes": 40}
+VSCALE_MIN, VSCALE_MAX = 1.0, 2.5  # the vertical zoom's range
 NON_SPAN_ROWS = ("Flux", "Flux: Stream", "Bytes")
 ROW_HEIGHT_MIN, ROW_HEIGHT_MAX = 14, 400
 GRIP_PX = 6  # the band along a header's bottom edge that drags the row's height
@@ -139,6 +143,28 @@ class _Header(QGraphicsWidget):
             )
 
 
+class _LaneBox(pg.ViewBox):
+    """A lane's view box: a drag pans x through the view and y through the stack's scroll bar.
+
+    pyqtgraph pans only the axes that are mouse-enabled, and y is locked
+    on every lane (the rows are fixed height). With the lanes zoomed taller
+    than the window a drag still has to move you up and down, so the
+    vertical part of the drag goes to ``scroll`` in pixels, which the
+    window ties to the scroll area holding the stack.
+    """
+
+    def __init__(self, scroll: _Callable[[int], None] | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._scroll = scroll
+
+    def mouseDragEvent(self, ev, axis=None) -> None:  # noqa: N802 (Qt/pyqtgraph API)
+        if self._scroll is not None and ev.button() == Qt.MouseButton.LeftButton:
+            dy = ev.screenPos().y() - ev.lastScreenPos().y()
+            if dy:
+                self._scroll(int(-dy))
+        super().mouseDragEvent(ev, axis)
+
+
 class LaneStack(pg.GraphicsLayoutWidget):
     hovered = Signal(object, str, float)  # Span | None, row name, x in axis units
     clicked = Signal(object, str, float)  # the same, on a left click
@@ -157,6 +183,39 @@ class LaneStack(pg.GraphicsLayoutWidget):
         self._ruler: pg.ViewBox | None = None
         # Row heights the user dragged, by row name; kept across rebuilds and tracks.
         self.heights: dict[str, int] = {}
+        self.wide = False  # View > Wide lanes: taller defaults
+        self.vscale = 1.0  # View > Lane height: every row's height times this
+        # Set by the window: scroll the stack vertically by so many pixels (2D drag).
+        self.scroll_by: _Callable[[int], None] | None = None
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def total_height(self) -> int:
+        """The height all rows need; the window sizes the stack to it so it can scroll."""
+        spacing = 1
+        rows = [self._ruler] + [vb for _, vb, _ in self._lanes] if self._ruler is not None else []
+        return sum(int(vb.maximumHeight()) for vb in rows) + spacing * max(len(rows) - 1, 0) + 4
+
+    def row_height(self, key: str, kind: str) -> int:
+        """A row's height now: a dragged height, else the (wide) default, times the vertical zoom."""
+        base = self.heights.get(key, (WIDE_HEIGHTS if self.wide else HEIGHTS)[kind])
+        return int(round(base * self.vscale))
+
+    def set_wide(self, wide: bool) -> None:
+        self.wide = wide
+        self.heights.clear()  # dragged heights belong to the other set of defaults
+        self._rebuild_keeping_view()
+
+    def set_vscale(self, scale: float) -> None:
+        self.vscale = min(max(scale, VSCALE_MIN), VSCALE_MAX)
+        self._rebuild_keeping_view()
+
+    def _rebuild_keeping_view(self) -> None:
+        if self.track is None:
+            return
+        a, b = self.view_range()
+        self.set_track(self.track)
+        self.set_range(a, b)
         self.scene().sigMouseMoved.connect(self._mouse_moved)
         self.scene().sigMouseClicked.connect(self._mouse_clicked)
 
@@ -188,7 +247,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
             vb = self._row(
                 "Flux",
                 "transitions / cells / bits",
-                self.heights.get("Flux", HEIGHTS["Flux"]),
+                self.row_height("Flux", "Flux"),
                 anchor=anchor,
                 key="Flux",
             )
@@ -196,7 +255,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
             vb = self._row(
                 "Stream",
                 "interval vs time",
-                self.heights.get("Flux: Stream", HEIGHTS["Stream"]),
+                self.row_height("Flux: Stream", "Stream"),
                 anchor=anchor,
                 key="Flux: Stream",
             )
@@ -207,7 +266,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
             decoder = decoder_of(row)
             name = row.split(":", 1)[1].strip() if ":" in row else row
             is_record = row in RECORD_ROWS
-            height = self.heights.get(row, HEIGHTS["records"] if is_record else HEIGHTS["row"])
+            height = self.row_height(row, "records" if is_record else "row")
             vb = self._row(name, decoder, height, anchor=anchor, key=row)
             item = SpanLaneItem(
                 list(in_row(spans, row)),
@@ -220,14 +279,13 @@ class LaneStack(pg.GraphicsLayoutWidget):
             )
             self._lane(vb, item, row, track)
 
-        vb = self._row(
-            "Bytes", "", self.heights.get("Bytes", HEIGHTS["Bytes"]), anchor=anchor, key="Bytes"
-        )
+        vb = self._row("Bytes", "", self.row_height("Bytes", "Bytes"), anchor=anchor, key="Bytes")
         self._lane(vb, BytesItem(track.segments, x0, x1), "Bytes", track)
 
         for vb_ in [self._ruler] + [vb for _, vb, _ in self._lanes]:
             vb_.setLimits(xMin=x0, xMax=x1, minXRange=track.axis.min_window)
         self._ruler.sigXRangeChanged.connect(self._x_changed)
+        self.setMinimumHeight(self.total_height())
 
     def _row(
         self,
@@ -240,17 +298,19 @@ class LaneStack(pg.GraphicsLayoutWidget):
         key: str | None = None,
     ) -> pg.ViewBox:
         row = self.ci.layout.rowCount()
-        vb = pg.ViewBox(enableMenu=False)
+        vb = _LaneBox(lambda dy: self.scroll_by(dy) if self.scroll_by else None, enableMenu=False)
         header: _Header | None = None
 
         def resize(new_height: int) -> None:
             if key is not None:
-                self.heights[key] = new_height
+                # Stored unscaled, so the vertical zoom still applies on top.
+                self.heights[key] = int(round(new_height / self.vscale))
             for widget in (header, vb):
                 if widget is not None:
                     widget.setMinimumHeight(new_height)
                     widget.setMaximumHeight(new_height)
             self.ci.layout.invalidate()
+            self.setMinimumHeight(self.total_height())
 
         header = _Header(name, decoder, height, resize if key is not None else None)
         self.ci.addItem(header, row=row, col=0)
