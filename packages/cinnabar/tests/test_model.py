@@ -83,3 +83,16 @@ def test_tick_labels_gain_decimals_as_the_step_shrinks():
     assert t.format_tick(2.6792, 0.0002) == "2.6792s"
     assert t.format_tick(2.67921, 0.00001) == "2.67921s"
     assert Axis(AxisKind.BYTES).format_tick(59_392.0, 200) == "59,392 B"
+
+
+def test_zoom_ceiling_and_stream_intervals():
+    from cinnabar.model import ZOOM_MAX_BYTES
+
+    assert Axis(AxisKind.BYTES).min_window == ZOOM_MAX_BYTES
+    assert abs(Axis(AxisKind.TIME).min_window - ZOOM_MAX_BYTES * 16e-6) < 1e-12
+    intervals = np.array([144, 216, 288] * 1000, dtype=np.int32)  # 2, 3, 4 us at 72 MHz
+    flux = Flux(intervals, 72_000_000)
+    times, gaps = flux.intervals_between(0.0, flux.duration + 1e-6)  # the window end is exclusive
+    assert len(times) == 3000 and abs(gaps[0] - 2e-6) < 1e-12 and abs(gaps[2] - 4e-6) < 1e-12
+    assert abs(times[0] - 2e-6) < 1e-12
+    assert 4e-6 < flux.interval_ceiling() < 5e-6

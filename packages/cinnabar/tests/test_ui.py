@@ -55,11 +55,8 @@ def test_palette_roles_cover_every_style_the_annotators_emit():
 def test_zoom_floor_and_boundary_fade():
     import numpy as np
 
-    from cinnabar.model import Axis, AxisKind
     from cinnabar.ui.items import BOUNDARY_FADE_PX, boundary_colour
 
-    assert Axis(AxisKind.BYTES).min_window == 128
-    assert abs(Axis(AxisKind.TIME).min_window - 0.002048) < 1e-9
     edges = np.arange(0, 10) * 29_696.0
     lo, hi = BOUNDARY_FADE_PX
     assert boundary_colour(edges, hi / 29_696.0).alphaF() == 1.0  # 60 px apart: solid

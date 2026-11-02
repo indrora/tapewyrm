@@ -43,11 +43,13 @@ from cinnabar.ui.items import (
     FluxItem,
     RulerItem,
     SpanLaneItem,
+    StreamItem,
     _DeviceItem,
 )
 
 HEADER_WIDTH = 150
-HEIGHTS = {"ruler": 38, "Flux": 64, "records": 36, "row": 26, "Bytes": 24}
+HEIGHTS = {"ruler": 38, "Flux": 64, "Stream": 96, "records": 36, "row": 26, "Bytes": 24}
+NON_SPAN_ROWS = ("Flux", "Flux: Stream", "Bytes")
 ROW_HEIGHT_MIN, ROW_HEIGHT_MAX = 14, 400
 GRIP_PX = 6  # the band along a header's bottom edge that drags the row's height
 RECORD_ROWS = {"MFM: Sectors", "GCR: Records", "TWTI: Sectors"}
@@ -191,6 +193,14 @@ class LaneStack(pg.GraphicsLayoutWidget):
                 key="Flux",
             )
             self._lane(vb, FluxItem(track.flux, x0, x1), "Flux", track)
+            vb = self._row(
+                "Stream",
+                "interval vs time",
+                self.heights.get("Flux: Stream", HEIGHTS["Stream"]),
+                anchor=anchor,
+                key="Flux: Stream",
+            )
+            self._lane(vb, StreamItem(track.flux, x0, x1), "Flux: Stream", track)
 
         spans = [s for seg in track.segments for s in seg.records + seg.fields]
         for row in self.rows(track):
@@ -270,7 +280,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
             return
         track = self.track
         wanted = self.rows(track)
-        have = [name for name, _, _ in self._lanes if name not in ("Flux", "Bytes")]
+        have = [name for name, _, _ in self._lanes if name not in NON_SPAN_ROWS]
         if wanted != have:
             a, b = self.view_range()
             self.set_track(track)

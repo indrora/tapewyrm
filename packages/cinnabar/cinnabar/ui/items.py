@@ -295,6 +295,81 @@ class FluxItem(_DeviceItem):
                 p.drawLine(QPointF(dx, b - 3), QPointF(dx, b))
 
 
+class StreamItem(_DeviceItem):
+    """The stream view: every transition as a dot at (time, interval), like HxC's.
+
+    An MFM stream falls into bands at 2, 3 and 4 cells; a GCR one at 1, 2
+    and 3; jitter widens the bands, a speed change bends them, a dropout
+    is a hole and noise is dots between bands. Up to ``DOTS_MAX`` points
+    in view are drawn as dots; more than that becomes a density image
+    (one cell per pixel, darker where more transitions fall), so the
+    bands still show over a whole track. The y axis runs from 0 to the
+    track's :meth:`Flux.interval_ceiling`, with a hairline per microsecond.
+    """
+
+    DOTS_MAX = 200_000
+
+    def __init__(self, flux: Flux, x0: float, x1: float) -> None:
+        super().__init__(x0, x1)
+        self._flux = flux
+        self._ceiling = flux.interval_ceiling()
+
+    def paint(self, p: QPainter, _opt, _widget=None) -> None:
+        vb = self.getViewBox()
+        if vb is None:
+            return
+        (vx0, vx1), _ = vb.viewRange()
+        scale, offset, top, bottom = self._device(p)
+        p.save()
+        p.resetTransform()
+        h = bottom - top
+        y0, y1 = top + h * 0.06, bottom - h * 0.06  # inset; y grows upward in interval
+        px0, px1 = scale * vx0 + offset, scale * vx1 + offset
+        width = max(int(px1 - px0), 1)
+        height = max(int(y1 - y0), 1)
+        ceiling = self._ceiling
+        # Microsecond guide lines.
+        guide = QColor(palette.text())
+        guide.setAlphaF(0.12)
+        p.setPen(QPen(guide, 1))
+        us = 1e-6
+        while us < ceiling:
+            gy = y1 - (us / ceiling) * (y1 - y0)
+            p.drawLine(QPointF(px0, gy), QPointF(px1, gy))
+            us += 1e-6
+        times, intervals = self._flux.intervals_between(vx0, vx1)
+        if not len(times):
+            p.restore()
+            return
+        ys = y1 - np.clip(intervals / ceiling, 0, 1) * (y1 - y0)
+        xs = scale * times + offset
+        col = palette.colour("flux").darker(140)
+        if len(times) <= self.DOTS_MAX:
+            p.setPen(QPen(col, 2.5))
+            p.drawPoints(
+                QPolygonF([QPointF(float(x), float(y)) for x, y in zip(xs, ys, strict=True)])
+            )
+        else:
+            counts, _, _ = np.histogram2d(
+                xs, ys, bins=(width, height), range=((px0, px1), (y0, y1))
+            )
+            peak = float(np.log1p(np.amax(counts))) if counts.size else 1.0
+            shade = np.log1p(counts.T) / max(peak, 1e-9)  # rows = y
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            rgba[..., 0], rgba[..., 1], rgba[..., 2] = col.red(), col.green(), col.blue()
+            rgba[..., 3] = (shade * 255).astype(np.uint8)
+            img = QImage(rgba.tobytes(), width, height, width * 4, QImage.Format.Format_RGBA8888)
+            p.drawImage(QRectF(px0, y0, width, height), img.copy())
+        # Ceiling label, so the bands have a scale.
+        p.setPen(QPen(palette.text()))
+        p.setFont(_font(palette.FONT_PX["field-sub"], family=palette.UI))
+        p.drawText(
+            QRectF(px0 + 3, top, 80, 12), Qt.AlignmentFlag.AlignLeft, f"{ceiling * 1e6:.1f} us"
+        )
+        p.drawText(QRectF(px0 + 3, bottom - 13, 80, 12), Qt.AlignmentFlag.AlignLeft, "0")
+        p.restore()
+
+
 class BytesItem(_DeviceItem):
     """The Bytes lane: each run's bytes as a shade strip, 0x00 pale to 0xFF dark.
 

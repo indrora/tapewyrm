@@ -52,6 +52,12 @@ SEGMENT_BYTES = 29_696
 SECTOR_BYTES = 1_024
 
 
+# The zoom maximum, in bytes of view width (see Axis.min_window). Raise it
+# to zoom closer; the span items draw ticks and the Bytes lane prints hex
+# at any width, so nothing else needs to change.
+ZOOM_MAX_BYTES = 8
+
+
 class AxisKind(Enum):
     """What the x axis measures: time (a flux capture) or bytes (an image)."""
 
@@ -65,13 +71,18 @@ class Axis:
 
     @property
     def min_window(self) -> float:
-        """The narrowest view worth showing: 128 bytes, or their time at QIC-80's 16 us a byte.
+        """The narrowest view the lanes allow: :data:`ZOOM_MAX_BYTES` bytes, or their time.
 
-        Past this the device-pixel maths runs out of float precision (a 2 ms
-        window at 2.6 s is already 1e-3 of the value) and nothing draws, so
-        the view boxes clamp here (``ViewBox.setLimits(minXRange=...)``).
+        THIS IS THE ZOOM MAXIMUM. The view boxes clamp their x range here
+        (``ViewBox.setLimits(minXRange=...)`` in ``cinnabar.ui.lanes``),
+        so the wheel, the zoom actions and the ruler all stop at it. On the
+        time axis a byte is taken as QIC-80's 16 us (8 MFM data bits at 1 us
+        a cell); 8 bytes is 128 us, which shows single bitcells at about
+        ten pixels each on a wide window. float64 keeps 1e-14 s of
+        precision at the far end of a long track, so the floor is about
+        what is useful to see, not about arithmetic.
         """
-        return 128.0 if self.kind is AxisKind.BYTES else 128 * 16e-6
+        return float(ZOOM_MAX_BYTES) if self.kind is AxisKind.BYTES else ZOOM_MAX_BYTES * 16e-6
 
     def format(self, value: float) -> str:
         """A boundary label: ``340ms`` on the time axis, ``89,088 B`` on the byte axis."""
@@ -385,6 +396,27 @@ class Flux:
 
     def transition_count(self, t0: float, t1: float) -> int:
         return max(self.interval_index(t1) - self.interval_index(t0), 0)
+
+    def intervals_between(self, t0: float, t1: float) -> tuple[np.ndarray, np.ndarray]:
+        """(transition times, the interval that ended at each) in ``[t0, t1]``, seconds.
+
+        The stream view's data: each transition as a point at (when, how
+        long since the previous one).
+        """
+        i0 = self.interval_index(t0)
+        i1 = self.interval_index(t1)
+        if i1 <= i0:
+            return np.zeros(0), np.zeros(0)
+        ticks = self.intervals[i0:i1].astype(np.int64)
+        base = self.ticks_before(i0)
+        return (np.cumsum(ticks) + base) / self.sample_hz, ticks / self.sample_hz
+
+    def interval_ceiling(self, sample: int = 1_000_000) -> float:
+        """A y ceiling for the stream view: just above the 99.5th percentile of a sample, seconds."""
+        if not len(self.intervals):
+            return 1e-5
+        head = self.intervals[:sample].astype(np.float64)
+        return float(np.percentile(head, 99.5)) / self.sample_hz * 1.15
 
     def add_chunk(
         self,
