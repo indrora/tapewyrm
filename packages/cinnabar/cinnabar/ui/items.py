@@ -155,7 +155,9 @@ class SpanLaneItem(_DeviceItem):
                 p.setPen(QPen(col, 1))
                 p.drawLine(QPointF(dx0, t), QPointF(dx0, b))
                 continue
-            p.setPen(QPen(col.darker(130), 1))
+            # Outlines only once a span is wide enough to be a shape; packed
+            # thin spans with outlines read as a solid dark bar.
+            p.setPen(QPen(col.darker(130), 1) if w >= 6 else Qt.PenStyle.NoPen)
             p.setBrush(
                 QBrush(
                     col,
@@ -383,6 +385,27 @@ def _strip(values: np.ndarray) -> QImage:
     return img.copy()  # detach from the numpy buffer
 
 
+BOUNDARY_FADE_PX = (12.0, 60.0)  # boundaries this close fade: invisible at 12 px apart, full at 60
+
+
+def boundary_colour(edges: np.ndarray, scale: float) -> QColor | None:
+    """The boundary pen colour for this zoom, faded by how close the lines sit; None when invisible.
+
+    Zoomed out, 150 segment lines over a thousand pixels are a picket fence
+    that hides the lanes, so they fade with their spacing and are gone once
+    they are a dozen pixels apart (the track strip still shows the segments).
+    """
+    if len(edges) < 2:
+        return palette.boundary()
+    spacing = float(np.median(np.diff(edges))) * scale
+    lo, hi = BOUNDARY_FADE_PX
+    if spacing <= lo:
+        return None
+    colour = QColor(palette.boundary())
+    colour.setAlphaF(min(1.0, (spacing - lo) / (hi - lo)))
+    return colour
+
+
 def _nice_step(span: float, target_ticks: int = 8) -> float:
     """A 1-2-5 step so that ``span`` holds about ``target_ticks`` major ticks."""
     import math
@@ -420,7 +443,11 @@ class RulerItem(_DeviceItem):
         p.drawLine(QPointF(scale * vx0 + offset, base), QPointF(scale * vx1 + offset, base))
         step = _nice_step(vx1 - vx0)
         minor = step / 5
-        fmt = self._track.axis.format
+        axis = self._track.axis
+
+        def fmt(value: float) -> str:
+            return axis.format_tick(value, step)
+
         p.setFont(_font(palette.FONT_PX["boundary"], family=palette.UI))
         x = (int(vx0 / minor) - 1) * minor
         k = 0
@@ -440,14 +467,16 @@ class RulerItem(_DeviceItem):
             k += 1
             if k > 2000:
                 break
-        # Segment tags.
+        # Segment tags, faded with the boundaries.
         tag_font = _font(palette.FONT_PX["segment-title"], bold=True, family=palette.UI)
+        edges = np.array([s.start for s in self._track.segments])
+        colour = boundary_colour(edges, scale)
         for seg in self._track.segments:
-            if seg.end < vx0 or seg.start > vx1:
+            if colour is None or seg.end < vx0 or seg.start > vx1:
                 continue
             dx0 = scale * seg.start + offset
             dx1 = scale * seg.end + offset
-            p.setPen(QPen(palette.boundary(), 1, Qt.PenStyle.DashLine))
+            p.setPen(QPen(colour, 1, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(dx0, top), QPointF(dx0, bottom))
             if dx1 - dx0 >= 70:
                 # Tags live on the ruler's top line, tick labels on its bottom one.
@@ -486,7 +515,11 @@ class BoundaryItem(_DeviceItem):
         scale, offset, top, bottom = self._device(p)
         p.save()
         p.resetTransform()
-        pen = QPen(palette.boundary(), 1, Qt.PenStyle.DashLine)
+        colour = boundary_colour(self._edges, scale)
+        if colour is None:
+            p.restore()
+            return
+        pen = QPen(colour, 1, Qt.PenStyle.DashLine)
         pen.setCosmetic(True)
         p.setPen(pen)
         lo = max(int(np.searchsorted(self._edges, vx0)) - 1, 0)

@@ -75,3 +75,11 @@ def test_flux_transitions_and_chunks():
     # cell 0 starts two clocks before transition 0, cell 1 one clock before.
     assert abs(starts[0] - 0.1) < 1e-9 and abs(starts[1] - 0.100001) < 1e-9
     assert flux.cells_between(0.5, 0.6)[0].size == 0
+
+
+def test_tick_labels_gain_decimals_as_the_step_shrinks():
+    t = Axis(AxisKind.TIME)
+    assert t.format_tick(2.68, 0.1) == "2.680s"
+    assert t.format_tick(2.6792, 0.0002) == "2.6792s"
+    assert t.format_tick(2.67921, 0.00001) == "2.67921s"
+    assert Axis(AxisKind.BYTES).format_tick(59_392.0, 200) == "59,392 B"

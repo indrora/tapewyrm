@@ -9,6 +9,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtWidgets import QApplication  # noqa: E402
 from tapewyrm_archive.progress import NULL_PROGRESS  # noqa: E402
 
 from cinnabar.load import open_path  # noqa: E402
@@ -49,3 +50,35 @@ def test_palette_roles_cover_every_style_the_annotators_emit():
         if t in known or t.startswith(("slot-", "vtbl-", "dir-", "frame-", "record-"))
     }
     assert tokens <= known, tokens - known
+
+
+def test_zoom_floor_and_boundary_fade():
+    import numpy as np
+
+    from cinnabar.model import Axis, AxisKind
+    from cinnabar.ui.items import BOUNDARY_FADE_PX, boundary_colour
+
+    assert Axis(AxisKind.BYTES).min_window == 128
+    assert abs(Axis(AxisKind.TIME).min_window - 0.002048) < 1e-9
+    edges = np.arange(0, 10) * 29_696.0
+    lo, hi = BOUNDARY_FADE_PX
+    assert boundary_colour(edges, hi / 29_696.0).alphaF() == 1.0  # 60 px apart: solid
+    mid = boundary_colour(edges, (lo + hi) / 2 / 29_696.0)
+    assert mid is not None and 0.4 < mid.alphaF() < 0.6
+    assert boundary_colour(edges, lo / 29_696.0) is None  # 12 px apart: gone
+    assert boundary_colour(np.array([0.0]), 1e-9) is not None  # one boundary never fades
+
+
+def test_row_heights_persist_across_rebuilds(image_path: Path):
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.lanes import LaneStack
+
+    QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.set_track(track)
+    stack.heights["TWTI: Sectors"] = 90
+    stack.set_track(track)
+    vb = next(vb for name, vb, _ in stack._lanes if name == "TWTI: Sectors")
+    assert vb.maximumHeight() == 90

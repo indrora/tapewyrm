@@ -27,6 +27,7 @@ under the cursor.
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections.abc import Callable as _Callable
 
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -47,19 +48,60 @@ from cinnabar.ui.items import (
 
 HEADER_WIDTH = 150
 HEIGHTS = {"ruler": 38, "Flux": 64, "records": 36, "row": 26, "Bytes": 24}
+ROW_HEIGHT_MIN, ROW_HEIGHT_MAX = 14, 400
+GRIP_PX = 6  # the band along a header's bottom edge that drags the row's height
 RECORD_ROWS = {"MFM: Sectors", "GCR: Records", "TWTI: Sectors"}
 
 
 class _Header(QGraphicsWidget):
-    """A channel's header cell: colour stripe, name, decoder tag."""
+    """A channel's header cell: colour stripe, name, decoder tag; drag its bottom edge to resize.
 
-    def __init__(self, name: str, decoder: str, height: int) -> None:
+    The bottom ``GRIP_PX`` of the cell is a grip (the cursor says so): a
+    drag there changes the row's height through ``on_resize``, the way a
+    channel's border drags in Logic.
+    """
+
+    def __init__(
+        self, name: str, decoder: str, height: int, on_resize: _Callable[[int], None] | None = None
+    ) -> None:
         super().__init__()
         self.name, self.decoder = name, decoder
+        self._on_resize = on_resize
+        self._drag: tuple[float, float] | None = None  # (scene y at press, height at press)
         self.setMinimumHeight(height)
         self.setMaximumHeight(height)
         self.setMinimumWidth(HEADER_WIDTH)
         self.setMaximumWidth(HEADER_WIDTH)
+        if on_resize is not None:
+            self.setAcceptHoverEvents(True)
+
+    def _in_grip(self, pos: QPointF) -> bool:
+        return self._on_resize is not None and pos.y() >= self.rect().bottom() - GRIP_PX
+
+    def hoverMoveEvent(self, ev) -> None:  # noqa: N802 (Qt API)
+        self.setCursor(
+            Qt.CursorShape.SizeVerCursor if self._in_grip(ev.pos()) else Qt.CursorShape.ArrowCursor
+        )
+
+    def hoverLeaveEvent(self, _ev) -> None:  # noqa: N802 (Qt API)
+        self.unsetCursor()
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802 (Qt API)
+        if ev.button() == Qt.MouseButton.LeftButton and self._in_grip(ev.pos()):
+            self._drag = (ev.scenePos().y(), self.rect().height())
+            ev.accept()
+        else:
+            ev.ignore()
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802 (Qt API)
+        if self._drag is None or self._on_resize is None:
+            return
+        y0, h0 = self._drag
+        height = int(min(max(h0 + ev.scenePos().y() - y0, ROW_HEIGHT_MIN), ROW_HEIGHT_MAX))
+        self._on_resize(height)
+
+    def mouseReleaseEvent(self, _ev) -> None:  # noqa: N802 (Qt API)
+        self._drag = None
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
         r = self.rect()
@@ -111,6 +153,8 @@ class LaneStack(pg.GraphicsLayoutWidget):
         self.track: Track | None = None
         self._lanes: list[tuple[str, pg.ViewBox, _DeviceItem]] = []
         self._ruler: pg.ViewBox | None = None
+        # Row heights the user dragged, by row name; kept across rebuilds and tracks.
+        self.heights: dict[str, int] = {}
         self.scene().sigMouseMoved.connect(self._mouse_moved)
         self.scene().sigMouseClicked.connect(self._mouse_clicked)
 
@@ -139,7 +183,13 @@ class LaneStack(pg.GraphicsLayoutWidget):
         anchor = self._ruler
 
         if track.flux is not None:
-            vb = self._row("Flux", "transitions / cells / bits", HEIGHTS["Flux"], anchor=anchor)
+            vb = self._row(
+                "Flux",
+                "transitions / cells / bits",
+                self.heights.get("Flux", HEIGHTS["Flux"]),
+                anchor=anchor,
+                key="Flux",
+            )
             self._lane(vb, FluxItem(track.flux, x0, x1), "Flux", track)
 
         spans = [s for seg in track.segments for s in seg.records + seg.fields]
@@ -147,8 +197,8 @@ class LaneStack(pg.GraphicsLayoutWidget):
             decoder = decoder_of(row)
             name = row.split(":", 1)[1].strip() if ":" in row else row
             is_record = row in RECORD_ROWS
-            height = HEIGHTS["records"] if is_record else HEIGHTS["row"]
-            vb = self._row(name, decoder, height, anchor=anchor)
+            height = self.heights.get(row, HEIGHTS["records"] if is_record else HEIGHTS["row"])
+            vb = self._row(name, decoder, height, anchor=anchor, key=row)
             item = SpanLaneItem(
                 list(in_row(spans, row)),
                 x0,
@@ -160,19 +210,40 @@ class LaneStack(pg.GraphicsLayoutWidget):
             )
             self._lane(vb, item, row, track)
 
-        vb = self._row("Bytes", "", HEIGHTS["Bytes"], anchor=anchor)
+        vb = self._row(
+            "Bytes", "", self.heights.get("Bytes", HEIGHTS["Bytes"]), anchor=anchor, key="Bytes"
+        )
         self._lane(vb, BytesItem(track.segments, x0, x1), "Bytes", track)
 
         for vb_ in [self._ruler] + [vb for _, vb, _ in self._lanes]:
-            vb_.setLimits(xMin=x0, xMax=x1)
+            vb_.setLimits(xMin=x0, xMax=x1, minXRange=track.axis.min_window)
         self._ruler.sigXRangeChanged.connect(self._x_changed)
 
     def _row(
-        self, name: str, decoder: str, height: int, *, anchor=None, transparent=False
+        self,
+        name: str,
+        decoder: str,
+        height: int,
+        *,
+        anchor=None,
+        transparent=False,
+        key: str | None = None,
     ) -> pg.ViewBox:
         row = self.ci.layout.rowCount()
-        self.ci.addItem(_Header(name, decoder, height), row=row, col=0)
         vb = pg.ViewBox(enableMenu=False)
+        header: _Header | None = None
+
+        def resize(new_height: int) -> None:
+            if key is not None:
+                self.heights[key] = new_height
+            for widget in (header, vb):
+                if widget is not None:
+                    widget.setMinimumHeight(new_height)
+                    widget.setMaximumHeight(new_height)
+            self.ci.layout.invalidate()
+
+        header = _Header(name, decoder, height, resize if key is not None else None)
+        self.ci.addItem(header, row=row, col=0)
         vb.setMouseEnabled(x=True, y=False)
         vb.setYRange(0, 1, padding=0)
         vb.disableAutoRange()

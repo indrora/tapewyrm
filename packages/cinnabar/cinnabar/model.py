@@ -63,6 +63,16 @@ class AxisKind(Enum):
 class Axis:
     kind: AxisKind
 
+    @property
+    def min_window(self) -> float:
+        """The narrowest view worth showing: 128 bytes, or their time at QIC-80's 16 us a byte.
+
+        Past this the device-pixel maths runs out of float precision (a 2 ms
+        window at 2.6 s is already 1e-3 of the value) and nothing draws, so
+        the view boxes clamp here (``ViewBox.setLimits(minXRange=...)``).
+        """
+        return 128.0 if self.kind is AxisKind.BYTES else 128 * 16e-6
+
     def format(self, value: float) -> str:
         """A boundary label: ``340ms`` on the time axis, ``89,088 B`` on the byte axis."""
         if self.kind is AxisKind.TIME:
@@ -70,6 +80,15 @@ class Axis:
                 return f"{value * 1000:.0f}ms"
             return f"{value:.3f}s"
         return f"{int(value):,} B"
+
+    def format_tick(self, value: float, step: float) -> str:
+        """A ruler label at a tick spacing of ``step``: enough decimals to tell neighbours apart."""
+        if self.kind is AxisKind.BYTES:
+            return f"{int(round(value)):,} B"
+        import math
+
+        decimals = max(3, min(9, int(math.ceil(-math.log10(step))) if step > 0 else 3))
+        return f"{value:.{decimals}f}s"
 
     def format_delta(self, value: float) -> str:
         """A width label: the same units, with sub-millisecond precision when it matters."""
