@@ -9,6 +9,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from tapewyrm_archive.progress import NULL_PROGRESS  # noqa: E402
 
@@ -144,6 +145,51 @@ def test_shared_logical_lanes_announce_their_rows(image_path: Path):
     stack.set_range(header_seg.start, vtbl_seg.end)
     stack._update_headers()
     assert stack._headers["Logical 0"].name == "Header \u2192 Volume table"
+
+
+def test_clicks_report_from_the_first_build_and_once_per_click(image_path: Path):
+    """Hover and click are wired once, at construction: not only after a wide/height rebuild."""
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.lanes import LaneStack
+
+    app = QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.resize(1200, 600)
+    stack.show()
+    stack.set_track(track)
+    app.processEvents()
+    sectors_vb = next(vb for name, vb, _ in stack._lanes if name == "TWTI: Sectors")
+    pos = sectors_vb.sceneBoundingRect().center()
+
+    class _Click:
+        def button(self):
+            return Qt.MouseButton.LeftButton
+
+        def double(self):
+            return False
+
+        def scenePos(self):  # noqa: N802 (Qt API)
+            return pos
+
+    clicks: list[str] = []
+    stack.clicked.connect(lambda span, row, x: clicks.append(row))
+    stack.scene().sigMouseClicked.emit(_Click())
+    assert clicks == ["TWTI: Sectors"]
+    stack.set_wide(True)
+    stack.set_vscale(1.5)
+    app.processEvents()
+    pos = (
+        next(vb for name, vb, _ in stack._lanes if name == "TWTI: Sectors")
+        .sceneBoundingRect()
+        .center()
+    )
+    stack.scene().sigMouseClicked.emit(_Click())
+    assert clicks == ["TWTI: Sectors", "TWTI: Sectors"]
+    stack.close()
+    stack.deleteLater()  # a shown stack torn down at interpreter exit upsets Qt
+    app.processEvents()
 
 
 def test_stack_reports_its_height_and_scrolls_on_drag(image_path: Path):

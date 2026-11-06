@@ -218,6 +218,13 @@ class LaneStack(pg.GraphicsLayoutWidget):
         self.scroll_by: _Callable[[int], None] | None = None
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The scene outlives every rebuild (clear() drops the items, not the
+        # scene), so hover and click are wired once, here. They used to be
+        # wired in _rebuild_keeping_view only: a fresh window took no clicks
+        # until Wide lanes or Lane height was toggled, and each toggle wired
+        # them again, so a click then reported once per toggle.
+        self.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.scene().sigMouseClicked.connect(self._mouse_clicked)
 
     def total_height(self) -> int:
         """The height all rows need; the window sizes the stack to it so it can scroll."""
@@ -245,8 +252,6 @@ class LaneStack(pg.GraphicsLayoutWidget):
         a, b = self.view_range()
         self.set_track(self.track)
         self.set_range(a, b)
-        self.scene().sigMouseMoved.connect(self._mouse_moved)
-        self.scene().sigMouseClicked.connect(self._mouse_clicked)
 
     # -- building ---------------------------------------------------------
 
