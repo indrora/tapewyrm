@@ -86,23 +86,26 @@ def fpr_spans(data: bytes) -> Span:
                 off,
                 off + length,
                 label,
-                value if length >= 4 else "",
+                value,
                 "fpr-field",
                 Shape.HEX if length <= 2 else Shape.BLOCK,
                 (("field", key), ("offset", f"{off}-{off + length - 1}"), ("value", value)),
             )
         )
     name = _value(data, 30, 44, "tape_name")
-    return Span(
-        0,
-        256,
-        "Format Parameter Record",
-        name,
-        "fpr",
-        Shape.BLOCK,
-        (("tape name", name), ("format code", _value(data, 4, 1, "format_code"))),
-        tuple(fields),
+    # One click on the record shows the whole of it: every field under its
+    # VolumeInfo name, then the geometry the sector-placing code derives
+    # from it (Rev N 7.1: tracks x segments per track, and the largest
+    # floppy coordinates a sector ID on this tape can carry).
+    detail = tuple(
+        (key.replace("_", " "), field.sublabel)
+        for (_off, _length, key, _label), field in zip(_FPR_FIELDS, fields, strict=True)
     )
+    detail += (
+        ("geometry", f"{data[26]} tracks x {int.from_bytes(data[24:26], 'little')} segments"),
+        ("max fsd / ftk / fsc", f"{data[27]} / {data[28]} / {data[29]}"),
+    )
+    return Span(0, 256, "Format Parameter Record", name, "fpr", Shape.BLOCK, detail, tuple(fields))
 
 
 def bsm_spans(data: bytes, format_code: int) -> Span:

@@ -488,6 +488,7 @@ class MainWindow(QMainWindow):
             self.track_box.blockSignals(False)
         self.lanes.set_track(track)
         self.overview.set_track(track)
+        self.details.set_overview(self.tape, track)
         self.details.clear()
         if track.decoder is not None:
             track.decoder.on_segment(self._decode_signals.landed.emit)
@@ -588,6 +589,7 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self.lanes.refresh()
         self.overview.set_track(self.track)
+        self.details.set_overview(self.tape, self.track)  # identification adds rows
         if self.track_box.count() != len(self.tape.track_numbers):
             self._fill_track_box()  # a flux tape's volumes appear once identified
         self._status()

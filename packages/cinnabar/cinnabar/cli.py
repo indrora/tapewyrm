@@ -46,6 +46,7 @@ class AppContext:
 def dump_track(track: Track, *, segment: int | None = None) -> str:
     """One track as text: every lane of every (or one) segment, one span per line."""
     lines = [f"{track.label}: {track.axis.kind.value} axis, {len(track.segments)} segments"]
+    lines += [f"  {k}: {v}" for k, v in track.detail]
     fmt = track.axis.format
     for seg in track.segments:
         if segment is not None and seg.index != segment:
@@ -145,6 +146,9 @@ def cli(
             track = tape.load(first, prog)
             if track.decoder is not None:
                 track.decoder.wait()
+        # The tape's rows first (a flux tape's are complete once track 0 has
+        # decoded and identified it), then the track's and its lanes.
+        click.echo("\n".join(f"{k}: {v}" for k, v in tape.detail))
         click.echo(dump_track(track, segment=segment))
         return
     if screenshot is not None:

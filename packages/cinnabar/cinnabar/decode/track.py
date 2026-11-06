@@ -7,8 +7,8 @@ from a focus segment; ``focus`` re-orders what has not started yet
 (pending futures are cancelled and resubmitted, which is cheap); each
 result is handed to the listeners from the pool's completion thread, so a
 Qt listener must hop to the main thread itself (``cinnabar.ui.app`` does,
-through a signal). ``wait`` blocks until everything has landed, for
-``--dump`` and the tests.
+through a signal). ``wait`` blocks until everything has landed and every
+listener has run, for ``--dump`` and the tests.
 
 One pool is shared by every decoder in the process (one per track being
 viewed), sized to the machine; the shared-memory blocks are unlinked when
@@ -88,6 +88,15 @@ class TrackDecoder:
         self._results: dict[int, jobs.SegmentResult] = {}
         self._listeners: list[Callable[[jobs.SegmentResult], None]] = []
         self._lock = threading.Lock()
+        # Indexes every listener has finished with. A result is stored in
+        # ``_results`` before its listeners run, so "every result is in" is
+        # not "every segment has been handled": ``wait`` used to return on the
+        # first, and its caller then raced the pool's completion thread over
+        # the last few segments (the window identified the tape on the main
+        # thread while the header segment was still being annotated on the
+        # other, and that segment came up with no logical lanes).
+        self._delivered: set[int] = set()
+        self._delivered_cv = threading.Condition()
         self._closed = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -142,8 +151,13 @@ class TrackDecoder:
             return
         with self._lock:
             self._results[res.index] = res
-        for listener in self._listeners:
-            listener(res)
+        try:
+            for listener in self._listeners:
+                listener(res)
+        finally:
+            with self._delivered_cv:
+                self._delivered.add(res.index)
+                self._delivered_cv.notify_all()
 
     def submit_all(self, focus: int = 0) -> None:
         order = sorted(range(len(self.windows)), key=lambda i: abs(i - focus))
@@ -169,13 +183,18 @@ class TrackDecoder:
             return sum(1 for i in range(len(self.windows)) if i not in self._results)
 
     def wait(self) -> None:
+        """Block until every segment has landed and its listeners have run with it."""
         while True:
             with self._lock:
                 futs = [f for i, f in self._futures.items() if i not in self._results]
             if not futs:
-                return
+                break
             for f in futs:
                 try:
                     f.result()
                 except Exception:  # noqa: BLE001 -- logged in _done
                     pass
+        with self._lock:
+            landed = set(self._results)
+        with self._delivered_cv:
+            self._delivered_cv.wait_for(lambda: self._delivered >= landed)

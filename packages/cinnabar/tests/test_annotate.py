@@ -30,6 +30,23 @@ def test_header_spans_cover_fpr_fields_and_bsm():
     assert bsm.start == (volume_mod.BSM_OFFSET if data[4] == 4 else volume_mod.FIXED_BSM_OFFSET)
 
 
+def test_fpr_span_lists_every_field_and_the_geometry():
+    """One click on the record shows all of it; short fields carry their value as sublabel."""
+    from qiclib import segment as seg_mod
+    from qiclib.testing.builders import build_header_segment
+
+    data = seg_mod.segment_data(build_header_segment(0))
+    fpr = header_mod.fpr_spans(data)
+    rows = dict(fpr.detail)
+    assert rows["segments per track"] == str(int.from_bytes(data[24:26], "little"))
+    assert rows["tracks"] == str(data[26])
+    assert rows["geometry"] == f"{data[26]} tracks x {rows['segments per track']} segments"
+    assert rows["max fsd / ftk / fsc"] == f"{data[27]} / {data[28]} / {data[29]}"
+    short = {c.label: c.sublabel for c in fpr.children if c.end - c.start <= 2}
+    assert short["seg/trk"] == rows["segments per track"]
+    assert short["fmt"] == rows["format code"]
+
+
 def test_vtbl_spans_show_entries_and_the_terminator():
     e1 = build_vtbl_entry(start_seg=3, end_seg=10, description="FIRST", flags=0x20)
     e2 = build_vtbl_entry(start_seg=11, end_seg=12, description="SECOND", compressed=True)

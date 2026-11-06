@@ -63,21 +63,14 @@ def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
         if e.state not in (SegmentState.MISSING, SegmentState.BAD) and e.data_len
     ]
     layout = Layout(
-        info, present, img.segment, dup_header=img.qic80_segment("dup_header_seg", required=False)
+        info, img.segment, dup_header=img.qic80_segment("dup_header_seg", required=False)
     )
-    fpr = img.header.get("qic80_header", {})
     kind = twti.sniff(path) or "TWTI"
-    detail = (
-        ("file", path.name),
-        ("format", kind),
-        ("tape name", str(fpr.get("tape_name", ""))),
-        ("format code", str(fpr.get("format_code", ""))),
-        ("geometry", f"{tracks} tracks x {spt} segments"),
-        ("header segment", str(info.header_seg)),
-        ("volume table", str(layout.vtbl_seg)),
-        ("volumes", str(len(layout.entries))),
-        ("volume profile", layout.profile),
-    )
+    detail = (("file", path.name), ("format", kind), *layout.summary())
+    if (tracks, spt) != (info.vol.tracks, info.vol.segments_per_track):
+        # The slots are laid out by the image's own geometry member, which
+        # tw convert may have calibrated past what the header says.
+        detail += (("image geometry", f"{tracks} tracks x {spt} segments"),)
 
     @lru_cache(maxsize=4)
     def _load(track: int) -> Track:

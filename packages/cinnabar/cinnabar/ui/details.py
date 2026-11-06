@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cinnabar.model import BytePiece, Segment, Span, Track
+from cinnabar.model import BytePiece, Segment, Span, Tape, Track
 from cinnabar.ui import palette
 from cinnabar.ui.lanes import describe
 
@@ -107,8 +107,16 @@ def _table(rows: list[str], mono: str) -> str:
     )
 
 
+HINT = "Click a span or a byte for its details."
+
+
 class DetailsPanel(QWidget):
-    """The right-hand panel. ``show`` takes what the lanes reported on a click."""
+    """The right-hand panel. ``show`` takes what the lanes reported on a click.
+
+    While nothing is selected it shows the tape's and the track's rows
+    (``set_overview``): for a flux capture that is where the header's
+    geometry and the volumes appear once the tape has been identified.
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -117,7 +125,8 @@ class DetailsPanel(QWidget):
         self.segment: Segment | None = None
         self.span: Span | None = None
         self._bytes: list[BytePiece] = []
-        self.title = QLabel("Click a span or a byte for its details.")
+        self._overview = ""  # the tape's and track's rows, shown while nothing is selected
+        self.title = QLabel(HINT)
         self.title.setTextFormat(Qt.TextFormat.RichText)
         self.title.setWordWrap(True)
         self.title.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -146,9 +155,24 @@ class DetailsPanel(QWidget):
     def clear(self) -> None:
         self.track = self.segment = self.span = None
         self._bytes = []
-        self.title.setText("Click a span or a byte for its details.")
+        self.title.setText(self._overview or HINT)
         self.dump.clear()
         self._enable(False)
+
+    def set_overview(self, tape: Tape, track: Track | None) -> None:
+        """What the panel shows while nothing is selected: the tape's rows, then the track's.
+
+        A flux tape's rows grow once it is identified (name, format,
+        geometry, volumes), so the window calls this on every refresh; the
+        text on screen only changes while nothing is selected.
+        """
+        parts = [f"<b>{html.escape(Path(tape.source).name)}</b>", _rows(tape.detail)]
+        if track is not None:
+            parts += [f"<b>{html.escape(track.label)}</b>", _rows(track.detail)]
+        parts.append(f"<span style='color:#666'>{HINT}</span>")
+        self._overview = f"<div style='font-family:{palette.UI}'>{''.join(parts)}</div>"
+        if self.span is None and self.segment is None:
+            self.title.setText(self._overview)
 
     def show(self, track: Track, span: Span | None, lane: str, x: float) -> None:  # type: ignore[override]
         """Show ``span`` (from ``lane``, clicked at ``x``) of ``track``."""

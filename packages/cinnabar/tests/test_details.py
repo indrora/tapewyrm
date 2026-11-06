@@ -59,6 +59,27 @@ def test_hexdump_colours_bytes_by_deepest_span():
     assert hexdump_html([], colour_at).count("no bytes") == 1
 
 
+def test_overview_shows_tape_and_track_rows_until_something_is_clicked():
+    """The idle panel is the tape's identification; a later set_overview updates it in place."""
+    from PySide6.QtWidgets import QApplication
+
+    from cinnabar.model import Axis, AxisKind, Tape, Track
+    from cinnabar.ui.details import HINT, DetailsPanel
+
+    QApplication.instance() or QApplication([])
+    tape = Tape("/x/demo.twtz", "TWTI", [0], lambda n, p: None, (("format", "TWTI"),))
+    track = Track("Track 0", 0, Axis(AxisKind.BYTES), "QIC-80", [], detail=(("file", "demo.twtz"),))
+    panel = DetailsPanel()
+    assert panel.title.text() == HINT
+    panel.set_overview(tape, track)
+    assert "demo.twtz" in panel.title.text() and "Track 0" in panel.title.text()
+    tape.detail += (("geometry", "28 tracks x 100 segments"),)
+    panel.set_overview(tape, track)
+    assert "28 tracks x 100 segments" in panel.title.text() and HINT in panel.title.text()
+    panel.clear()
+    assert "28 tracks x 100 segments" in panel.title.text()
+
+
 def test_write_pieces_keeps_offsets(tmp_path: Path):
     seg = _segment()
     out = tmp_path / "seg.bin"

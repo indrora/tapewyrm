@@ -10,12 +10,20 @@ VTBL range covers it. :class:`Layout` answers "what is segment N" from a
 builds each volume's byte stream the way :func:`qiclib.volume.volume_streams`
 does (data areas end to end, BSM-bad segments skipped, missing ones zero)
 so the volume annotators see the bytes ``qicsilver extract`` would.
+
+A flux capture's segments land one at a time, and the tape is identified
+as soon as its header has (long before most of them), so the layout covers
+every segment of a volume's range from the start, reads each through
+``fetch`` when asked (nothing yet for one that has not landed), and
+re-parses a volume's structure, throttled, as its segments arrive
+(:meth:`Volume.spans`).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from qiclib import identify, qic122
@@ -39,6 +47,7 @@ from cinnabar.model import (
 log = logging.getLogger(__name__)
 
 SOURCE_ROW = "Volume: Source segment"
+REPARSE_S = 2.0  # at most one re-parse of a volume's structure per this many seconds
 
 
 @dataclass(frozen=True)
@@ -56,7 +65,6 @@ class Volume:
     def __init__(
         self,
         entry: VtblEntry,
-        present: Iterable[int],
         bad: set[int],
         fetch: Callable[[int], bytes],
         offset_bytes: int,
@@ -64,17 +72,24 @@ class Volume:
         self.entry = entry
         self.offset_bytes = offset_bytes
         self._fetch = fetch
-        self.base: dict[int, int] = {}  # absolute segment -> offset in the stream
-        have = set(present)
+        # Absolute segment -> offset in the stream, for every segment of the
+        # range: one that has not landed yet still has its place (and its
+        # length; ``fetch`` gives nothing for it until it does). This used to
+        # hold only the segments present at identification, which was fine
+        # while that came late and left every later landing unlabelled once
+        # it came as soon as the header did. Only a BSM-bad segment has no
+        # place: it contributes no bytes (TWS-2 section 5.2).
+        self.base: dict[int, int] = {}
         off = 0
         for seg_abs in range(entry.start_seg, entry.end_seg + 1):
             if seg_abs in bad:
-                continue  # a BSM-bad segment contributes no bytes (TWS-2 section 5.2)
-            if seg_abs in have:
-                self.base[seg_abs] = off
-            off += SEGMENT_BYTES  # a missing segment still occupies its length
+                continue
+            self.base[seg_abs] = off
+            off += SEGMENT_BYTES
         self.length = off
         self._spans: list[Span] | None = None
+        self._dirty = False  # a segment landed since the structure was parsed
+        self._parsed_at = 0.0
 
     def stream(self) -> bytes:
         out = bytearray(self.length)
@@ -130,18 +145,40 @@ class Volume:
         body, _missing = sparse.read(0, size)
         return body, pieces
 
+    def landed(self) -> None:
+        """A segment of this volume just arrived: the structure is stale."""
+        self._dirty = True
+
+    def invalidate(self) -> None:
+        """Parse the structure afresh on the next ``spans`` (the decode is complete)."""
+        self._spans = None
+        self._dirty = False
+
     def spans(self) -> list[Span]:
-        """The volume's structure in stream offsets, parsed on first use."""
-        if self._spans is None:
-            if self.entry.compressed:
+        """The volume's structure in stream offsets, parsed on first use.
+
+        A flux capture's segments land one at a time, so the structure is
+        re-parsed as they do (``landed``), but at most every ``REPARSE_S``:
+        a parse rebuilds the whole stream, hundreds of megabytes for a long
+        volume, and landings come many per second. Between parses a landing
+        segment gets the structure as last parsed, clipped to it, and the
+        loader re-annotates every segment once the decode is complete
+        (``invalidate``), so what is on screen is right in the end.
+        """
+        if self._spans is not None:
+            if not self._dirty or time.monotonic() - self._parsed_at < REPARSE_S:
+                return self._spans
+        self._dirty = False
+        self._parsed_at = time.monotonic()
+        if self.entry.compressed:
+            self._spans = []
+        else:
+            log.debug("parsing volume %r (%d bytes)", self.entry.description, self.length)
+            try:
+                self._spans = volume_ann.volume_spans(self.stream(), self.entry)
+            except Exception:  # noqa: BLE001 -- a damaged volume still shows its segments
+                log.exception("volume %r: structure not parsed", self.entry.description)
                 self._spans = []
-            else:
-                log.debug("parsing volume %r (%d bytes)", self.entry.description, self.length)
-                try:
-                    self._spans = volume_ann.volume_spans(self.stream(), self.entry)
-                except Exception:  # noqa: BLE001 -- a damaged volume still shows its segments
-                    log.exception("volume %r: structure not parsed", self.entry.description)
-                    self._spans = []
         return self._spans
 
 
@@ -151,7 +188,6 @@ class Layout:
     def __init__(
         self,
         info: identify.TapeInfo,
-        present: Iterable[int],
         fetch: Callable[[int], bytes],
         *,
         dup_header: int | None = None,
@@ -162,8 +198,7 @@ class Layout:
         self.profile = verdict.profile.name if verdict is not None else "(none)"
         offset_bytes = verdict.profile.extent_offset_bytes if verdict is not None else 8
         bad = set(info.bsm.bad_segments)
-        present = list(present)
-        self.volumes = [Volume(e, present, bad, fetch, offset_bytes) for e in self.entries]
+        self.volumes = [Volume(e, bad, fetch, offset_bytes) for e in self.entries]
         self.by_segment: dict[int, Volume] = {}
         for vol in self.volumes:
             for seg_abs in vol.base:
@@ -174,6 +209,50 @@ class Layout:
         elif info.vol.dup_header_seg:
             self.header_segs.add(info.vol.dup_header_seg)
         self.vtbl_seg = info.vtbl_seg
+
+    def summary(self) -> tuple[tuple[str, str], ...]:
+        """The identification as detail rows: what the header and volume table said.
+
+        Shared by both loaders' tape rows and the window's details panel, so
+        a flux capture and an image of the same tape read alike. The
+        geometry rows are the header's own numbers (QIC-80-MC Rev N 7.1);
+        the cartridge is :mod:`qiclib.cartridge`'s guess from them.
+        """
+        info, vol = self.info, self.info.vol
+        guess = info.cartridge
+        cartridge = "(unknown)"
+        if guess.cartridge is not None:
+            cartridge = guess.cartridge.description
+            if not guess.exact:
+                cartridge += f" ({guess.basis})"
+        vtbl = "(none)" if info.vtbl_seg is None else f"segment {info.vtbl_seg}"
+        rows = (
+            ("tape name", vol.tape_name.strip() or "(none)"),
+            ("format code", str(vol.format_code)),
+            ("header revision", f"0x{vol.revision:02x}"),
+            ("standard", info.standard or "(unknown)"),
+            ("cartridge", cartridge),
+            ("geometry", f"{vol.tracks} tracks x {vol.segments_per_track} segments"),
+            ("max fsd / ftk / fsc", f"{vol.max_fsd} / {vol.max_ftk} / {vol.max_fsc}"),
+            ("header segment", f"{info.header_seg} ({info.header_state})"),
+            ("duplicate header", str(vol.dup_header_seg)),
+            ("data segments", f"{vol.first_data_seg} - {vol.last_data_seg}"),
+            ("volume table", f"{vtbl} ({info.vtbl_state})"),
+            ("volumes", str(len(self.entries))),
+            ("volume profile", self.profile),
+        )
+        return rows + tuple(("note", note) for note in info.notes)
+
+    def landed(self, seg_abs: int) -> None:
+        """A segment just arrived (a flux capture): its volume's structure is stale."""
+        vol = self.by_segment.get(seg_abs)
+        if vol is not None:
+            vol.landed()
+
+    def invalidate(self) -> None:
+        """Every volume's structure is parsed afresh on its next use."""
+        for vol in self.volumes:
+            vol.invalidate()
 
     def holds(self, seg_abs: int) -> str:
         """A short name for the segment's content, for labels: Header, Volume Table, a volume."""

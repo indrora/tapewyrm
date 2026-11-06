@@ -44,6 +44,7 @@ def test_dump_lists_every_lane(image_path: Path):
     result = CliRunner().invoke(cli, ["--dump", "--segment", "0", str(image_path)])
     assert result.exit_code == 0, result.output
     assert "Segment 0" in result.output
+    assert "geometry: " in result.output and "volume table: " in result.output
 
 
 def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
@@ -74,9 +75,41 @@ def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
     assert [s.label for s in volume.fields] == ["Directory Section", "Data Section"]
     assert track.overview[1:] == ["clean", "clean", "clean"]
     assert track.flux is not None and track.flux.cell_count_between(track.start, track.end) > 0
+    # The identification is on the tape's rows (and the header's segment count on the track's).
+    rows = dict(tape.detail)
+    assert rows["tape name"] and rows["volumes"] == "1" and rows["volume table"].endswith("(clean)")
+    assert rows["geometry"].endswith(" segments")
+    assert dict(track.detail)["segments per track (header)"] == rows["geometry"].split()[3]
     text = dump_track(track, segment=2)
     assert "flux:" in text and "Volume Table" in text
+    assert "segments per track (header)" in text
     track.decoder.close()
+
+
+def test_identification_fires_on_the_header_and_again_for_the_volume_table():
+    """The tape is identified the moment its header lands, and completed when the volume table does."""
+    from qiclib.testing.builders import segment_raw_sectors
+
+    from cinnabar.load.flux import _Identification
+    from tests.conftest import capture_header, tape_segments
+
+    header, vtbl, volume = tape_segments()
+    hdr = capture_header(0)
+    h, t, v = (segment_raw_sectors(s) for s in (header, vtbl, volume))
+    ident = _Identification()
+    # A data segment on its own is no reason to try: it cannot be the header.
+    assert not ident.attempt(v, hdr, final=False, fresh=v)
+    assert ident.layout is None
+    # The header: identified at once, with no volumes yet and the table wanted.
+    assert ident.attempt([*v, *h], hdr, final=False, fresh=h)
+    assert ident.layout is not None and ident.layout.entries == []
+    assert ident.wanted == {vtbl.seg}
+    # Another data segment changes nothing; the table's landing completes it.
+    assert not ident.attempt([*v, *h], hdr, final=False, fresh=v)
+    assert ident.attempt([*v, *h, *t], hdr, final=False, fresh=t)
+    assert [e.description.strip() for e in ident.layout.entries] == ["TEST BACKUP"]
+    assert ident.wanted == set()
+    assert not ident.attempt([*v, *h, *t], hdr, final=True)
 
 
 def test_flux_capture_of_gcr_records(qic100_capture: Path):
