@@ -164,13 +164,22 @@ def drive_status(app: AppContext) -> None:
     with _drive_session(app) as d:
         if d.last_error is not None:
             click.echo(f"{'cleared on wake':<13}: {_decode_error(d.last_error.raw)}")
-        click.echo(f"{'drive status':<13}: {_fmt_status(d.status())}")
+        st = d.status()
+        click.echo(f"{'drive status':<13}: {_fmt_status(st)}")
         for label, name, bits, decode in reports:
             try:
                 val = d.report(commands.TABLE[name], bits)
             except LinkError as exc:
                 log.debug("%s (%s) not acknowledged: %r; clearing status", label, name, exc)
-                click.echo(f"{label:<13}: not supported by this drive (no ACK)")
+                # Rev J Table 2a gates Report Error Code (7) on Ready; a drive
+                # mid-seek (the TEAC's held auto Seek Load Point) rejects it, and
+                # that is not "unsupported".
+                why = (
+                    "no answer (drive not Ready; Rev J Table 2a gates it)"
+                    if not st.ready
+                    else "not supported by this drive (no ACK)"
+                )
+                click.echo(f"{label:<13}: {why}")
                 d.status()  # clear whatever the unsupported command latched
                 continue
             click.echo(f"{label:<13}: 0x{val:0{bits // 4}x} -> {decode(val)}")
@@ -205,7 +214,14 @@ def drive_load_point(app: AppContext) -> None:
     from tapewyrm.qic117 import commands
 
     with _drive_session(app) as d:
-        click.echo(f"status : {_fmt_status(d.command(commands.SEEK_LOAD_POINT))}")
+        before = d.last_error
+        st = d.command(commands.SEEK_LOAD_POINT)
+        # The Ready poll reads and clears any latched error on the way out
+        # (status() does, once Ready); the status printed is the one that still
+        # shows the bits, so say what was cleared rather than hide it.
+        if d.last_error is not None and d.last_error is not before:
+            click.echo(f"cleared: {_decode_error(d.last_error.raw)}")
+        click.echo(f"status : {_fmt_status(st)}")
 
 
 @drive.command("fwd")

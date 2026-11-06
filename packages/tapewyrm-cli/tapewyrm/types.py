@@ -48,7 +48,15 @@ class TimingParams:
     terminate_gap_us: int = 3000  # > 2.9 ms ends a command train (< -> Soft Reset)
     report_settle_us: int = 900  # report bit appears within 900 us of 2nd pulse (fw TBIT)
     motion_timeout_s: int = 20  # generic motion wait-ready ceiling (seeks 15s, stop 8s)
-    tack_us: int = 2500  # max wait for a report's ACK bit (QIC-117 TACK)
+    # Max wait for a report's ACK bit, polled AFTER terminate_gap_us (firmware
+    # qic_report), so the window from the last STEP pulse is gap + tack. Rev J
+    # Table 1 puts the ACK at TTIMEOUT (<= 2.9 ms) + TACK (2.5 ms) = 5.4 ms worst
+    # case, which 3000 + 2500 cleared by 0.1 ms; a drive knocked into Alternate
+    # Command Time-out (cmd 5) answers at 6.2-6.9 ms + TACK and was invisible.
+    # Waiting longer costs nothing on a drive that answers (TRK0 is level, held
+    # until the next pulse train) and only slows the no-drive path; ftape waits
+    # 300 ms. 10 ms covers both time-outs with margin (TEAC FT-3010 bench).
+    tack_us: int = 10000
     report_on_index: bool = False  # fw waits for an INDEX cue per bit instead of a fixed settle
 
 
@@ -112,6 +120,11 @@ class DriveProfile:
     bit_order: str = "lsb"  # "msb" | "lsb"
     report_strategy: str = "fixed_settle"  # "fixed_settle" (bench-proven) | "index_edge"
     quirks: frozenset[str] = frozenset()
+    # ftape wake-up method name the profile declared ("none" | "colorado" |
+    # "mountain" | "insight"), or None when it spelled out wake_sequence itself.
+    wakeup: str | None = None
+    # Report Vendor ID (32) words this profile was written for (profile.py).
+    vendor_ids: tuple[int, ...] = ()
 
     @classmethod
     def default(cls) -> DriveProfile:

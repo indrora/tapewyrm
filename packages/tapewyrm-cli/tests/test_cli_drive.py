@@ -10,6 +10,7 @@ from tapewyrm.cli import app as app_mod
 from tapewyrm.cli import drive as drive_mod
 from tapewyrm.cli import session as session_mod
 from tapewyrm.qic117 import commands
+from tapewyrm.qic117.drive import REPORT_RESYNC_RNBS
 
 
 class _StubDrive:
@@ -83,7 +84,7 @@ def test_status_shows_every_report_and_survives_unsupported(monkeypatch):
     assert res.exit_code == 0, res.output
     out = res.output
     assert "last error   : 0x2f29 -> 41 Drive Wakeup Reset Occurred (from cmd 47" in out
-    assert "500 kbps, QIC-80 mode" in out
+    assert "500 kbps, QIC-80 bit set" in out
     assert "version 88" in out
     assert "vendor id    : not supported by this drive (no ACK)" in out
     assert "format QIC80, 205 ft or 425+ ft, 550 Oe tape" in out  # still read after the miss
@@ -300,6 +301,12 @@ def board(monkeypatch):
     return _FakeBoard.instances
 
 
+# An unanswered Report Drive Status is followed by the drive layer's resync
+# (18 bare Report Next Bit; see test_drive.py), then ftape's 4-try rule.
+RESYNC = [2] * REPORT_RESYNC_RNBS
+NO_ANSWER = [6, *RESYNC] * 4
+
+
 def test_default_auto_selects_a_colorado_and_logs_the_attempt(board):
     res = CliRunner(env={"COLUMNS": "200"}).invoke(cli_mod.cli, ["drive", "report", "rom version"])
     assert res.exit_code == 0, res.output
@@ -309,7 +316,7 @@ def test_default_auto_selects_a_colorado_and_logs_the_attempt(board):
     assert "auto: trying colorado: phantom select 0, enter primary mode" in res.stderr
     assert "using profile 'colorado'" in res.stderr
     assert "auto: trying mountain" not in res.stderr  # stopped at the answer
-    assert board[0].codes == [6, 6, 6, 6, 46, 2, 30, 6, 6, 9]
+    assert board[0].codes == [*NO_ANSWER, 46, 2, 30, 6, 6, 9]
 
 
 def test_explicit_colorado_profile_wakes_without_probing(board):
@@ -340,7 +347,7 @@ def test_explicit_profile_skips_the_probe(board):
     )
     assert res.exit_code != 0
     assert "auto:" not in res.stderr
-    assert board[0].codes == [6]  # wake's status read only, unanswered
+    assert board[0].codes == [6, *RESYNC]  # wake's status read only, unanswered
 
 
 def test_auto_with_no_drive_fails_with_a_hint(board, monkeypatch):
@@ -348,9 +355,8 @@ def test_auto_with_no_drive_fails_with_a_hint(board, monkeypatch):
     res = CliRunner(env={"COLUMNS": "200"}).invoke(cli_mod.cli, ["drive", "report", "9"])
     assert res.exit_code != 0
     assert "tried: default, colorado, mountain, insight" in res.output
-    no_answer = [6, 6, 6, 6]
     # ftape's methods in ftape's order; no 47/24 undo between them (ftape sends none).
-    assert board[0].codes == [*no_answer, 46, 2, 30, *no_answer, 23, 20, *no_answer, *no_answer]
+    assert board[0].codes == [*NO_ANSWER, 46, 2, 30, *NO_ANSWER, 23, 20, *NO_ANSWER, *NO_ANSWER]
     # Motor-on: select + motor, then (no answer) motor off + deselect.
     assert board[0].lines[1:4] == [
         ("select", "ibmpc", 0, True),

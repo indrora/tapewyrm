@@ -206,7 +206,7 @@ def test_set_timing_binary_layout():
     t.queue_response(Txn.SET_TIMING, b"")
     link.set_timing(TimingParams(pulse_us=5, report_on_index=True))
     # pulse, inter_pulse, terminate_gap, tack, tbit (u16) + report_on_index (u8)
-    expect = struct.pack("<5HB", 5, 2000, 3000, 2500, 900, 1)
+    expect = struct.pack("<5HB", 5, 2000, 3000, 10000, 900, 1)  # tack default is 10 ms
     assert t.sent_frames == [(int(Txn.SET_TIMING), expect)]
 
 

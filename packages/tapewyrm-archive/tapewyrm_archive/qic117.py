@@ -141,6 +141,28 @@ VENDOR_MAKES: dict[int, str] = {
 LEGACY_VENDOR_IDS: dict[int, str] = {71: "Colorado Memory Systems (legacy ID)"}
 
 
+# Whole-word vendor IDs -> model, from ftape's vendor table (Linux 2.6.19
+# include/linux/ftape-vendors.h, ``vendors[]``), which keyed its wake-up method
+# and drive name on exactly this word. Partial: only the entries checked
+# against that file so far (the make-7 block and TEAC); extend as drives reach
+# the bench. The TEAC FT-3010 on the bench reports 0x01cc, i.e. TEAC shipped
+# the "Teac 700" generation under the Wangtek 3200 ID.
+VENDOR_IDS: dict[int, str] = {
+    0x01C1: "Wangtek 3040F",
+    0x01C8: "Wangtek 3080F",
+    0x01CA: "Wangtek 3080F (new)",
+    0x01CC: "Wangtek 3200 / Teac 700",
+    0x01CD: "Reveal TB1400",
+    0x03CE: "Teac 800",
+    0x03CF: "Teac FT3010TR",
+}
+
+
+def vendor_model_name(value: int) -> str | None:
+    """ftape's model name for a Report Vendor ID word, or None if unlisted."""
+    return VENDOR_IDS.get(value)
+
+
 def decode_vendor_id(value: int) -> tuple[int, int, str]:
     """Split a Report Vendor ID word: bits 6-15 make, 0-5 model (Rev J p.15).
 

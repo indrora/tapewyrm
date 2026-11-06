@@ -133,7 +133,15 @@ def _decode_config(b: int) -> str:
 
     cfg = DriveConfig.decode(b)
     rate = f"{cfg.rate_kbps} kbps" + (" (or 4 Mbps)" if cfg.rate_ambiguous else "")
-    parts = [rate, "QIC-80 mode" if cfg.qic80_mode else "QIC-40 mode"]
+    # Rev J (8): the QIC-80/QIC-40 bit is the auto-detected compatibility mode
+    # only "for drives complying with QIC-117 revision B and earlier"; Rev C
+    # and later put the format in Report Tape Status (33), and a QIC-3010
+    # drive on the bench cleared it with a 3010 tape in. Report the bit, not a
+    # mode, and point at the report that knows.
+    parts = [
+        rate,
+        "QIC-80 bit set" if cfg.qic80_mode else "QIC-80 bit clear (format: see tape status)",
+    ]
     if cfg.extra_length:
         parts.append("extra-length tape")
     return ", ".join(parts)
@@ -144,12 +152,21 @@ def _decode_rom(b: int) -> str:
 
 
 def _decode_vendor(w: int) -> str:
-    from tapewyrm_archive.qic117 import LEGACY_VENDOR_IDS, decode_vendor_id
+    from tapewyrm_archive.qic117 import LEGACY_VENDOR_IDS, decode_vendor_id, vendor_model_name
+
+    from tapewyrm.qic117.profile import profiles_for_vendor
 
     make, model, name = decode_vendor_id(w)
-    if w in LEGACY_VENDOR_IDS:
-        return name
-    return f"make {make} {name}, model {model}"
+    text = name if w in LEGACY_VENDOR_IDS else f"make {make} {name}, model {model}"
+    # The make code only names a family; ftape's vendor table knows the model
+    # (where tw has copied it), and a profile may claim the word outright.
+    known = vendor_model_name(w)
+    if known:
+        text += f" ({known})"
+    matches = profiles_for_vendor(w)
+    if matches:
+        text += f" -> profile {', '.join(matches)}"
+    return text
 
 
 def _decode_tape(b: int) -> str:

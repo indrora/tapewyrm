@@ -251,11 +251,44 @@ class Qic117Drive:
         """
         if not self._polling:
             log.debug("report %r (code %d), %d bits", cmd.name, cmd.code, nbits)
-        raw = self.link.command_txn(cmd.code, report_bits=nbits)
+        try:
+            raw = self.link.command_txn(cmd.code, report_bits=nbits)
+        except _LINK_FATAL:
+            raise
+        except LinkError:
+            # The drive may well have answered -- just later than the firmware
+            # waited, or with a Final bit we misread -- and then it is sitting
+            # in the report subcontext expecting Report Next Bit. Anything else
+            # we send next is an "illegal command in report subcontext" (Rev J
+            # §3.4), and on the TEAC FT-3010 a few of those left the drive
+            # dark on every output until a power cycle. Put it back in a known
+            # state before the caller retries or gives up.
+            self._resync_report()
+            raise
         value = bits_to_int(raw, self.profile.bit_order)
         if not self._polling:
             log.debug("report %r -> raw %s = 0x%x", cmd.name, raw.hex(), value)
         return value
+
+    def _resync_report(self) -> None:
+        """Finish whatever report the drive may be in the middle of (Rev J §1.4.2).
+
+        Report Next Bit (2) is the one command that is legal inside the report
+        subcontext and "ignored outside the report subcontext" (§1.4.2), so a
+        run of them is safe whatever state the drive is in: if a report was
+        pending they clock it out through its Final bit, and the last one is
+        the clearing Report Next Bit the firmware normally sends. The count is
+        the longest report (16 bits) plus Final plus that clear. Sent as bare
+        pulse trains, no report, so a dead drive just costs ~18 x 7 ms.
+        """
+        log.debug("report failed; resyncing with %d Report Next Bit", REPORT_RESYNC_RNBS)
+        try:
+            for _ in range(REPORT_RESYNC_RNBS):
+                self.link.command_txn(commands.REPORT_NEXT_BIT.code)
+        except _LINK_FATAL:
+            raise
+        except LinkError as exc:
+            log.debug("resync failed (%s); the original error stands", exc)
 
     # --- status / error ---
 
@@ -318,11 +351,34 @@ class Qic117Drive:
         nominal placeholders until their drives reach the bench.
         """
         self.run_wake_steps()
-        # Read status last: it also reads+clears any latched error / new-cartridge
-        # state (power-on leaves error 26 latched), without which the drive
-        # rejects many later commands (QIC-117 Rev J §3).
-        log.debug("wake: reading status to clear latched error/new-cartridge")
-        self.status()
+        self.settle()
+
+    def settle(self) -> DriveStatus:
+        """Read status after a wake, wait out a busy drive, clear the latches.
+
+        The status read is what clears a latched error / new-cartridge state
+        (power-on leaves error 26 latched), without which the drive rejects
+        many later commands (QIC-117 Rev J §3) -- ``status()`` does that read
+        and clear, but only while Ready, because the Error Detected bit "is not
+        valid unless the Drive Ready bit is asserted" and Report Error Code
+        clears the latch only "after the drive indicates ready".
+
+        And the first status after power-on may be what starts the drive: Rev J
+        cmd 14 lets a drive hold its automatic Seek Load Point "until the
+        receipt of a Report Status command which will initiate the operation
+        and report NOT Ready until completion". The TEAC FT-3010 does exactly
+        that (~45 s), and a Seek Load Point sent meanwhile was rejected with the
+        new-cartridge latch still set. So if the drive is busy, wait for Ready
+        with the Seek Load Point time-out (Table 2d), polling status, which
+        clears the latches on the first Ready it sees. ftape does the same
+        (ftape_ready_wait after wake-up).
+        """
+        log.debug("settle: reading status to clear latched error/new-cartridge")
+        st = self.status()
+        if st.ready:
+            return st
+        log.info("drive busy after wake (%s); waiting for Ready", st)
+        return self.wait_ready(self._ready_timeout(commands.SEEK_LOAD_POINT))
 
     def run_wake_steps(self) -> None:
         """Push the profile's timing and run its wake steps, without reading status.
@@ -487,6 +543,10 @@ _LINK_FATAL = (LinkClosed, LinkTimeout, LinkVersionError)
 #: ftape_report_raw_drive_status: one try plus up to three retries.
 _STATUS_TRIES = 4
 
+#: Report Next Bit commands ``Qic117Drive._resync_report`` sends after a failed
+#: report: the widest report (16 bits) + Final + the clearing one.
+REPORT_RESYNC_RNBS = 16 + 1 + 1
+
 
 def _describe_wake(profile: DriveProfile) -> str:
     """One readable line for a wake sequence, e.g. "phantom select 0, enter primary mode"."""
@@ -587,7 +647,7 @@ def auto_wake(link: DeviceLink, candidates: Sequence[DriveProfile]) -> Qic117Dri
             why = str(exc)
         if why is None:
             log.info("auto: drive answered %s; using profile %r", profile.name, profile.name)
-            drive.status()  # as wake() ends: clear the power-on / new-cartridge latch
+            drive.settle()  # as wake() ends: Ready, power-on / new-cartridge latch cleared
             return drive
         log.info("auto: %s: no answer (%s)", profile.name, why)
         tried.append(profile.name)

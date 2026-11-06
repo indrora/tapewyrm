@@ -24,3 +24,11 @@ def test_colorado_legacy_vendor_id_is_not_mis_split():
 )
 def test_tape_types(code, text):
     assert TAPE_TYPES[code] == text
+
+
+def test_vendor_model_name_from_ftape_table():
+    from tapewyrm_archive.qic117 import vendor_model_name
+
+    assert vendor_model_name(0x01CC) == "Wangtek 3200 / Teac 700"
+    assert vendor_model_name(0x03CF) == "Teac FT3010TR"
+    assert vendor_model_name(0x0000) is None

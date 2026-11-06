@@ -13,7 +13,7 @@ from collections import deque
 import pytest
 
 from tapewyrm.qic117 import commands
-from tapewyrm.qic117.drive import DriveError, Qic117Drive, bits_to_int
+from tapewyrm.qic117.drive import REPORT_RESYNC_RNBS, DriveError, Qic117Drive, bits_to_int
 from tapewyrm.types import DriveProfile
 
 
@@ -441,7 +441,12 @@ class MotorBusLink(BusLink):
         self.calls.append(("deselect",))
 
 
-NO_ANSWER = [6, 6, 6, 6]  # ftape_report_raw_drive_status: 4 tries, then give up
+# Every unanswered report is followed by the drive layer's resync: 18 bare
+# Report Next Bit so a drive that ACKed late is not left mid-report
+# (Qic117Drive._resync_report; the TEAC FT-3010 went dark without it).
+RESYNC = [2] * REPORT_RESYNC_RNBS
+MISS = [6, *RESYNC]  # one Report Drive Status that got no ACK
+NO_ANSWER = [*MISS] * 4  # ftape_report_raw_drive_status: 4 tries, then give up
 INSIGHT_ON = ("select", "ibmpc", 0, True)
 INSIGHT_OFF = [("motor", 0, False), ("deselect",)]
 
@@ -571,7 +576,7 @@ def test_auto_retries_status_like_ftape():
     link = SlowToAnswer(kind="listening")
     drive = auto_wake(link, [DriveProfile.default()])
     assert drive.profile.name == "default"
-    assert link.events() == [6, 6, 6, 6]  # 2 misses, the answer, then status()
+    assert link.events() == [*MISS, *MISS, 6, 6]  # 2 misses, the answer, then status()
 
 
 def test_auto_rejects_status_ff_without_retrying():
@@ -646,3 +651,46 @@ def test_motor_on_wake_step_selects_and_releases(monkeypatch):
     assert link.events() == [INSIGHT_ON, 6] and drive.motor_unit == 0
     drive.release_lines()
     assert link.events()[-2:] == INSIGHT_OFF and drive.motor_unit is None
+
+
+# ---------------------------------------------------------------------------
+# Report resync and post-wake settle (TEAC FT-3010 bench, 2026-11-05)
+# ---------------------------------------------------------------------------
+
+
+def test_report_failure_resyncs_with_report_next_bit():
+    """A failed report is followed by 18 bare Report Next Bit, then re-raised."""
+    from tapewyrm.link.device import LinkError
+    from tapewyrm.qic117.drive import REPORT_RESYNC_RNBS
+
+    class DeafLink(MockLink):
+        def command_txn(self, n: int, report_bits: int = 0) -> bytes:
+            if report_bits:
+                self.calls.append(("command_txn", n, report_bits))
+                raise LinkError(f"command {n}: no ACK bit (timed out)")
+            return super().command_txn(n, report_bits)
+
+    link = DeafLink()
+    drive = Qic117Drive(link, DriveProfile.default())
+    with pytest.raises(LinkError):
+        drive.status()
+    assert link.command_codes() == [6] + [2] * REPORT_RESYNC_RNBS
+
+
+def test_wake_waits_for_ready_then_clears_the_new_cartridge_latch(monkeypatch):
+    """A drive busy after the wake status (held auto Seek Load Point) is polled
+    to Ready, and the first Ready status clears the error/new-cartridge latch."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    prof = DriveProfile(
+        name="t",
+        wake_sequence=(("enter primary mode", None, 0),),
+        timing=DriveProfile.default().timing,
+    )
+    drive, link = _drive(prof)
+    link.queue_report(0x1E, 1)  # busy: error, cartridge, wp, new cartridge, not Ready
+    link.queue_report(0x1E, 1)  # still busy
+    link.queue_report(0x5F, 1)  # Ready with new cartridge + error still latched
+    link.queue_report(0x0000, 2)  # Report Error Code read+clear
+    drive.wake()
+    assert link.command_codes() == [30, 6, 6, 6, 7]
+    assert drive.last_error is not None and drive.last_error.code == 0

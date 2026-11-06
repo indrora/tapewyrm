@@ -1,0 +1,27 @@
+# generic: the base every drive profile should inherit from (`inherits = "generic"`).
+#
+# QIC-117 Rev J Table 1 nominals, nothing drive-specific, no wake. Loaded on its
+# own it behaves like `default` (no wake steps) but with these timings pushed.
+#
+# The firmware measures inter_pulse_us from the TRAILING edge of STEP
+# (qic_step_pulse: assert, pulse_us, release, gap), so the leading-edge period
+# the drive sees is pulse_us + inter_pulse_us. 200 + 1800 = Rev J's 2.0 ms
+# nominal TSTEP (0.9-2.1 ms allowed; the drive's command time-out is >= 2.2 ms).
+# The older profiles carry 2000 here, a 2.2 ms period over the spec maximum
+# and exactly on the time-out minimum; the Colorados tolerate it, the TEAC
+# FT-3010 did not (teac.toml). The terminate gap likewise reads 200 + 3000 =
+# 3.2 ms from the last leading edge, past the 2.9 ms time-out maximum.
+
+name = "generic"
+wakeup = "none"
+bit_order = "lsb"                 # QIC-117 reports clock LSB-first off TRK0 (DESIGN.md §2.1)
+report_strategy = "fixed_settle"  # sample TBIT after the 2nd Report Next Bit pulse
+quirks = []
+
+[timing]
+pulse_us = 200              # STEP pulse width (TSTEPW 1-1100 us)
+inter_pulse_us = 1800       # trailing-edge gap -> 2.0 ms leading-edge period (TSTEP nominal)
+terminate_gap_us = 3000     # 3.2 ms from the last leading edge > TTIMEOUT max 2.9 ms
+tack_us = 10000             # ACK window after the gap; see TimingParams.tack_us for the why
+report_settle_us = 900      # report bit appears within TBIT 900 us of the 2nd pulse
+motion_timeout_s = 20       # generic motion wait-ready ceiling; Table 2d covers the rest
