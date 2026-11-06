@@ -192,6 +192,49 @@ def test_clicks_report_from_the_first_build_and_once_per_click(image_path: Path)
     app.processEvents()
 
 
+def test_viewport_clamps_pixels_to_the_band_around_the_view():
+    """Axis positions far outside the view map to the band's edges, never to whole-track pixels."""
+    import numpy as np
+
+    from cinnabar.ui.items import MARGIN_PX, Viewport
+
+    v = Viewport(scale=1e7, offset=-2e9, top=0.0, bottom=10.0, vx0=200.0, vx1=200.0001)
+    assert v.left == pytest.approx(0.0) and v.right == pytest.approx(1000.0)
+    assert v.px(200.00005) == pytest.approx(500.0)
+    assert v.px(0.0) == pytest.approx(-MARGIN_PX)  # 2e9 px to the left, clamped
+    assert v.px(212.0) == pytest.approx(1000.0 + MARGIN_PX)
+    assert list(v.px_array(np.array([0.0, 200.00005]))) == pytest.approx([-MARGIN_PX, 500.0])
+    assert v.lo == pytest.approx(200.0 - MARGIN_PX / 1e7) and v.hi > 200.0001
+
+
+def test_items_follow_the_view_and_are_bounded_by_the_band_around_it(image_path: Path):
+    """At a deep zoom an item's rectangle is the view plus the margin, not the whole track."""
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.items import MARGIN_PX
+    from cinnabar.ui.lanes import LaneStack
+
+    app = QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.resize(1200, 600)
+    stack.show()
+    stack.set_track(track)
+    app.processEvents()
+    vb, item = next((vb, item) for name, vb, item in stack._lanes if name == "Logical 0")
+    assert item.boundingRect().left() == track.start  # the whole track until the view moves
+    stack.set_range(track.end - 8.0, track.end)
+    app.processEvents()
+    rect = item.boundingRect()
+    margin = 8.0 / vb.width() * MARGIN_PX
+    assert rect.right() == pytest.approx(track.end)  # never past the track
+    assert rect.left() == pytest.approx(track.end - 8.0 - margin, abs=1e-6)
+    assert rect.left() > track.start
+    stack.close()
+    stack.deleteLater()
+    app.processEvents()
+
+
 def test_stack_reports_its_height_and_scrolls_on_drag(image_path: Path):
     from tapewyrm_archive.progress import NULL_PROGRESS
 

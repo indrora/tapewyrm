@@ -17,10 +17,11 @@ moves, so ``ViewBox.sigRangeChanged`` is connected to ``update``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QPolygonF
 
 from cinnabar.annotate import decoder_of, row_title
@@ -30,6 +31,8 @@ from cinnabar.ui import palette
 POINT_PX = 5  # the pointed end of a chevron or hex, in pixels
 MIN_LABEL_PX = 28  # a span narrower than this gets no label
 BYTE_TEXT_PX = 22  # a byte at least this wide on screen shows its hex value
+MARGIN_PX = 2048  # the band either side of the viewport that items are bounded by and draw into
+TICK_PX = 1.5  # a span narrower than this on screen is a tick, drawn once per pixel column
 # The type strip along the top of a shared logical lane (SpanLaneItem(strip=True)).
 STRIP_PX = 10  # its height; the spans draw below it
 STRIP_FONT_PX = 9
@@ -47,30 +50,99 @@ def _font(px: int, bold: bool = False, family: str | None = None) -> QFont:
     return _FONT_CACHE[key]
 
 
+@dataclass(frozen=True)
+class Viewport:
+    """The view in axis units and in device pixels, and the band around it that gets drawn.
+
+    ``px`` maps an axis position to a device pixel clamped to the view plus
+    ``MARGIN_PX`` either side: a span reaching past the band is drawn to
+    the band's edge, which is off screen and so looks the same, and its
+    label lands in the part of it that is on screen. ``lo``/``hi`` are the
+    band in axis units, for culling. :class:`_DeviceItem` says why the
+    painter never sees whole-track pixels.
+    """
+
+    scale: float  # device pixels per axis unit
+    offset: float  # device x of axis 0
+    top: float
+    bottom: float
+    vx0: float
+    vx1: float
+
+    @property
+    def left(self) -> float:
+        return self.scale * self.vx0 + self.offset
+
+    @property
+    def right(self) -> float:
+        return self.scale * self.vx1 + self.offset
+
+    @property
+    def lo(self) -> float:
+        return self.vx0 - MARGIN_PX / self.scale
+
+    @property
+    def hi(self) -> float:
+        return self.vx1 + MARGIN_PX / self.scale
+
+    def px(self, x: float) -> float:
+        return min(max(self.scale * x + self.offset, self.left - MARGIN_PX), self.right + MARGIN_PX)
+
+    def px_array(self, xs: np.ndarray) -> np.ndarray:
+        return np.clip(self.scale * xs + self.offset, self.left - MARGIN_PX, self.right + MARGIN_PX)
+
+
 class _DeviceItem(pg.GraphicsObject):
-    """Base: draws in device pixels over the view's current x range."""
+    """Base: holds a whole track in axis units and shows Qt only the band around the viewport.
+
+    Physical and logical coordinates are kept apart on purpose. At the
+    128 us zoom maximum a second of tape is millions of device pixels, so
+    a whole track is billions: past 32-bit arithmetic. Qt maps an item's
+    ``boundingRect`` to device pixels to decide whether and where to paint
+    it, and an item bounded by its track stopped being painted at all once
+    the view sat far enough along it (every lane went blank near the end
+    of a long capture, ruler and flux included); a shape handed to the
+    painter at such an x was dropped the same way. So the rectangle is the
+    view plus ``MARGIN_PX`` either side, moved along with the view
+    (``follow``, wired to the view box's range changes), and ``paint``
+    maps axis positions through a :class:`Viewport` that clamps to that
+    same band. Only the segment or so around the view is ever thought
+    about in pixels.
+    """
 
     def __init__(self, x0: float, x1: float) -> None:
         super().__init__()
-        self._x0, self._x1 = x0, x1
+        self._x0, self._x1 = x0, x1  # the track's range: the band never exceeds it
+        self._band = (x0, x1)  # the whole track until the first follow(): fine at the opening zoom
 
     def boundingRect(self) -> QRectF:  # noqa: N802 (Qt API)
-        return QRectF(self._x0, 0.0, max(self._x1 - self._x0, 1e-9), 1.0)
+        a, b = self._band
+        return QRectF(a, 0.0, max(b - a, 1e-9), 1.0)
 
     def set_range(self, x0: float, x1: float) -> None:
         self.prepareGeometryChange()
         self._x0, self._x1 = x0, x1
+        self._band = (x0, x1)
         self.update()
 
-    @staticmethod
-    def _device(p: QPainter) -> tuple[float, float, float, float]:
-        """(scale, offset, top, bottom): device x = scale * view x + offset."""
+    def follow(self, vb: pg.ViewBox) -> None:
+        """The view moved or zoomed: bound the item to the band around it and repaint."""
+        (vx0, vx1), _ = vb.viewRange()
+        margin = (vx1 - vx0) / max(float(vb.width()), 1.0) * MARGIN_PX
+        self.prepareGeometryChange()
+        self._band = (max(vx0 - margin, self._x0), min(vx1 + margin, self._x1))
+        self.update()
+
+    def _viewport(self, p: QPainter) -> Viewport | None:
+        """The painter's view, or None when the item has no view box yet."""
+        vb = self.getViewBox()
+        if vb is None:
+            return None
+        (vx0, vx1), _ = vb.viewRange()
         tr = p.transform()
         a = tr.map(QPointF(0.0, 0.0))
         b = tr.map(QPointF(1.0, 1.0))
-        scale = b.x() - a.x()
-        top, bottom = min(a.y(), b.y()), max(a.y(), b.y())
-        return scale, a.x(), top, bottom
+        return Viewport(b.x() - a.x(), a.x(), min(a.y(), b.y()), max(a.y(), b.y()), vx0, vx1)
 
 
 def shape_polygon(x0: float, x1: float, top: float, bottom: float, shape: str) -> QPolygonF:
@@ -131,12 +203,17 @@ class SpanLaneItem(_DeviceItem):
         self.runs: list[tuple[float, float, str]] = []  # (start, end, row) of each run of a row
         self._run_starts = np.zeros(0)
         self._run_ends = np.zeros(0)
+        self._style_names: list[str] = []  # the styles in use; _style_ids indexes them
+        self._style_ids = np.zeros(0, dtype=np.int32)
         self.set_spans(spans)
 
     def set_spans(self, spans: Sequence[Span]) -> None:
         self.spans = sorted(spans, key=lambda s: s.start)
         self._starts = np.array([s.start for s in self.spans])
         self._ends = np.array([s.end for s in self.spans])
+        self._style_names = sorted({s.style for s in self.spans})
+        index = {name: i for i, name in enumerate(self._style_names)}
+        self._style_ids = np.array([index[s.style] for s in self.spans], dtype=np.int32)
         runs: list[tuple[float, float, str]] = []
         for s in self.spans:
             if runs and runs[-1][2] == s.row:
@@ -163,65 +240,65 @@ class SpanLaneItem(_DeviceItem):
         return None
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None or not self.spans:
+        v = self._viewport(p)
+        if v is None or not self.spans:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
         p.save()
         p.resetTransform()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        top, bottom = v.top, v.bottom
         if self.strip:
-            self._paint_strip(p, scale, offset, top, vx0, vx1)
+            self._paint_strip(p, v)
             top += STRIP_PX
         h = bottom - top
         t = top + h * self._inset
         b = bottom - h * self._inset
-        lo = int(np.searchsorted(self._ends, vx0, side="right"))
-        hi = int(np.searchsorted(self._starts, vx1, side="left"))
-        # Thin spans collapse into ticks; many ticks on one pixel are one tick.
-        last_tick = -1e9
-        for s in self.spans[lo:hi]:
-            dx0 = scale * s.start + offset
-            dx1 = scale * s.end + offset
-            w = dx1 - dx0
-            col = palette.colour(s.style)
-            if w < 1.5:
-                if dx0 - last_tick < 1.0:
-                    continue
-                last_tick = dx0
-                p.setPen(QPen(col, 1))
-                p.drawLine(QPointF(dx0, t), QPointF(dx0, b))
-                continue
-            # Outlines only once a span is wide enough to be a shape; packed
-            # thin spans with outlines read as a solid dark bar.
-            p.setPen(QPen(col.darker(130), 1) if w >= 6 else Qt.PenStyle.NoPen)
-            p.setBrush(
-                QBrush(
-                    col,
-                    Qt.BrushStyle.BDiagPattern
-                    if s.style == "pending"
-                    else Qt.BrushStyle.SolidPattern,
+        lo = int(np.searchsorted(self._ends, v.vx0, side="right"))
+        hi = int(np.searchsorted(self._starts, v.vx1, side="left"))
+        if hi > lo:
+            x0s = v.px_array(self._starts[lo:hi])
+            x1s = v.px_array(self._ends[lo:hi])
+            thin = (x1s - x0s) < TICK_PX
+            # Elision: a span too narrow to be a shape is a tick, and the
+            # ticks are placed with numpy, one per pixel column per style,
+            # without visiting each span: a track-wide view holds a hundred
+            # thousand sector fields, and that loop is what made zooming out
+            # crawl. Zoomed in, the few wide spans get shapes and labels.
+            ids = self._style_ids[lo:hi]
+            for sid in np.unique(ids[thin]):
+                cols = np.unique(np.floor(x0s[thin & (ids == sid)])) + 0.5
+                p.setPen(QPen(palette.colour(self._style_names[sid]), 1))
+                p.drawLines([QLineF(c, t, c, b) for c in cols.tolist()])
+            for i in np.flatnonzero(~thin).tolist():
+                s = self.spans[lo + i]
+                dx0, dx1 = float(x0s[i]), float(x1s[i])
+                w = dx1 - dx0
+                col = palette.colour(s.style)
+                # Outlines only once a span is wide enough to be a shape; packed
+                # thin spans with outlines read as a solid dark bar.
+                p.setPen(QPen(col.darker(130), 1) if w >= 6 else Qt.PenStyle.NoPen)
+                p.setBrush(
+                    QBrush(
+                        col,
+                        Qt.BrushStyle.BDiagPattern
+                        if s.style == "pending"
+                        else Qt.BrushStyle.SolidPattern,
+                    )
                 )
-            )
-            p.drawPolygon(shape_polygon(dx0, dx1, t, b, s.shape.value))
-            if w >= MIN_LABEL_PX and s.label:
-                self._label(p, s, dx0, dx1, t, b)
+                p.drawPolygon(shape_polygon(dx0, dx1, t, b, s.shape.value))
+                if w >= MIN_LABEL_PX and s.label:
+                    self._label(p, s, dx0, dx1, t, b)
         p.restore()
 
-    def _paint_strip(
-        self, p: QPainter, scale: float, offset: float, top: float, vx0: float, vx1: float
-    ) -> None:
+    def _paint_strip(self, p: QPainter, v: Viewport) -> None:
         """The type strip: a fading band and the row's name for every run in view."""
-        lo = int(np.searchsorted(self._run_ends, vx0, side="right"))
-        hi = int(np.searchsorted(self._run_starts, vx1, side="left"))
-        band = QRectF(0, top + 1, 0, STRIP_PX - 2)
-        left_edge = scale * vx0 + offset
+        lo = int(np.searchsorted(self._run_ends, v.vx0, side="right"))
+        hi = int(np.searchsorted(self._run_starts, v.vx1, side="left"))
+        band = QRectF(0, v.top + 1, 0, STRIP_PX - 2)
         p.setFont(_font(STRIP_FONT_PX, True, palette.UI))
         metrics = p.fontMetrics()
         for i, (x0, x1, row) in enumerate(self.runs[lo:hi], lo):
-            dx0 = scale * x0 + offset
-            dx1 = scale * x1 + offset
+            dx0, dx1 = v.px(x0), v.px(x1)
             col = palette.decoder_colour(decoder_of(row))
             solid, faint = QColor(col), QColor(col)
             solid.setAlpha(200)
@@ -243,11 +320,11 @@ class SpanLaneItem(_DeviceItem):
             # lane, as far as the next run's start.
             title = row_title(row)
             width = metrics.horizontalAdvance(title)
-            lx = max(dx0, left_edge) + 4
-            room = scale * self.runs[i + 1][0] + offset if i + 1 < len(self.runs) else float("inf")
+            lx = max(dx0, v.left) + 4
+            room = v.px(self.runs[i + 1][0]) if i + 1 < len(self.runs) else float("inf")
             if lx + width + 4 > max(dx1, room):
                 continue
-            tag = QRectF(lx - 3, top + 1, width + 6, STRIP_PX - 2)
+            tag = QRectF(lx - 3, v.top + 1, width + 6, STRIP_PX - 2)
             p.fillRect(tag, solid)
             dark = col.lightness() < 150
             p.setPen(QPen(palette.text_on_dark() if dark else palette.text()))
@@ -302,11 +379,10 @@ class FluxItem(_DeviceItem):
         self._flux = flux
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None:
+        v = self._viewport(p)
+        if v is None:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
+        vx0, vx1, scale, offset, top, bottom = v.vx0, v.vx1, v.scale, v.offset, v.top, v.bottom
         p.save()
         p.resetTransform()
         h = bottom - top
@@ -390,6 +466,11 @@ class StreamItem(_DeviceItem):
     """
 
     DOTS_MAX = 200_000
+    # Past this many transitions per pixel column the density image is
+    # drawn from a uniform stride of them: it is statistics, and the rest
+    # cost time (77 million transitions took three seconds to histogram for
+    # a track-wide view) without changing the picture.
+    DENSITY_PER_PX = 200
 
     def __init__(self, flux: Flux, x0: float, x1: float) -> None:
         super().__init__(x0, x1)
@@ -397,11 +478,10 @@ class StreamItem(_DeviceItem):
         self._ceiling = flux.interval_ceiling()
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None:
+        v = self._viewport(p)
+        if v is None:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
+        vx0, vx1, scale, offset, top, bottom = v.vx0, v.vx1, v.scale, v.offset, v.top, v.bottom
         p.save()
         p.resetTransform()
         h = bottom - top
@@ -423,10 +503,16 @@ class StreamItem(_DeviceItem):
         if not len(times):
             p.restore()
             return
+        dense = len(times) > self.DOTS_MAX
+        if dense:
+            step = max(
+                1, len(times) // (width * self.DENSITY_PER_PX)
+            )  # elision, see DENSITY_PER_PX
+            times, intervals = times[::step], intervals[::step]
         ys = y1 - np.clip(intervals / ceiling, 0, 1) * (y1 - y0)
         xs = scale * times + offset
         col = palette.colour("flux").darker(140)
-        if len(times) <= self.DOTS_MAX:
+        if not dense:
             p.setPen(QPen(col, 2.5))
             p.drawPoints(
                 QPolygonF([QPointF(float(x), float(y)) for x, y in zip(xs, ys, strict=True)])
@@ -474,6 +560,10 @@ class BytesItem(_DeviceItem):
         )
         self._starts = np.array([r.start for r in self._runs])
         self._ends = np.array([r.end for r in self._runs])
+        # Each run's mean byte, for the zoomed-out column it becomes (paint).
+        self._means = np.array(
+            [np.frombuffer(r.data, dtype=np.uint8).mean() for r in self._runs], dtype=np.float64
+        )
         self.update()
 
     def byte_at(self, x: float) -> tuple[int, int] | None:
@@ -487,23 +577,34 @@ class BytesItem(_DeviceItem):
         return k, run.data[k]
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None or not self._runs:
+        v = self._viewport(p)
+        if v is None or not self._runs:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
+        vx0, vx1, scale, offset, top, bottom = v.vx0, v.vx1, v.scale, v.offset, v.top, v.bottom
         p.save()
         p.resetTransform()
         h = bottom - top
         t, b = top + h * 0.1, bottom - h * 0.1
         lo = int(np.searchsorted(self._ends, vx0, side="right"))
         hi = int(np.searchsorted(self._starts, vx1, side="left"))
-        for run in self._runs[lo:hi]:
+        last_column = -1
+        for i, run in enumerate(self._runs[lo:hi], lo):
             buf = np.frombuffer(run.data, dtype=np.uint8)
             per_byte = scale * (run.end - run.start) / len(buf)  # pixels per byte
             dx0 = scale * run.start + offset
             dx1 = scale * run.end + offset
             if per_byte < 1.0:
+                if dx1 - dx0 < 2.0:
+                    # Zoomed right out: a run is a pixel column or less, so it
+                    # is one column of its mean shade, and the runs sharing a
+                    # column share the one column. Nothing is resampled for a
+                    # sector narrower than a pixel (elision).
+                    column = int(dx0)
+                    if column == last_column:
+                        continue
+                    last_column = column
+                    p.drawImage(QRectF(column, t, 1.0, b - t), _strip(self._means[i : i + 1]))
+                    continue
                 # Zoomed out: resample to one column per pixel.
                 width = max(int(dx1 - dx0), 1)
                 edges = np.linspace(0, len(buf), width + 1).astype(int)
@@ -588,11 +689,10 @@ class RulerItem(_DeviceItem):
         self._track = track
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None:
+        v = self._viewport(p)
+        if v is None:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
+        vx0, vx1, scale, offset, top, bottom = v.vx0, v.vx1, v.scale, v.offset, v.top, v.bottom
         p.save()
         p.resetTransform()
         base = bottom - 1
@@ -631,16 +731,18 @@ class RulerItem(_DeviceItem):
         for seg in self._track.segments:
             if colour is None or seg.end < vx0 or seg.start > vx1:
                 continue
-            dx0 = scale * seg.start + offset
-            dx1 = scale * seg.end + offset
+            dx0, dx1 = v.px(seg.start), v.px(seg.end)
             p.setPen(QPen(colour, 1, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(dx0, top), QPointF(dx0, bottom))
-            if dx1 - dx0 >= 70:
+            # The tag sits at the segment's start, or at the view's edge once
+            # that has scrolled off, so a deep zoom still says where it is.
+            tag_x = max(dx0, v.left) + 4
+            if dx1 - tag_x >= 66:
                 # Tags live on the ruler's top line, tick labels on its bottom one.
                 p.setFont(tag_font)
                 p.setPen(QPen(palette.decoder_colour("QIC-80").darker(120)))
                 p.drawText(
-                    QRectF(dx0 + 4, top + 1, min(dx1 - dx0 - 6, 160), 12),
+                    QRectF(tag_x, top + 1, min(dx1 - tag_x - 2, 160), 12),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                     seg.title,
                 )
@@ -665,11 +767,10 @@ class BoundaryItem(_DeviceItem):
         self._labels = labels  # Axis.format, or None for a line-only item
 
     def paint(self, p: QPainter, _opt, _widget=None) -> None:
-        vb = self.getViewBox()
-        if vb is None or not self._segments:
+        v = self._viewport(p)
+        if v is None or not self._segments:
             return
-        (vx0, vx1), _ = vb.viewRange()
-        scale, offset, top, bottom = self._device(p)
+        vx0, vx1, scale, offset, top, bottom = v.vx0, v.vx1, v.scale, v.offset, v.top, v.bottom
         p.save()
         p.resetTransform()
         colour = boundary_colour(self._edges, scale)
@@ -700,8 +801,7 @@ class BoundaryItem(_DeviceItem):
         if self._labels is not None:
             p.setFont(_font(palette.FONT_PX["segment-title"], bold=True))
             for seg in self._segments[lo : hi + 1]:
-                dx0 = scale * seg.start + offset
-                dx1 = scale * seg.end + offset
+                dx0, dx1 = v.px(seg.start), v.px(seg.end)
                 if dx1 - dx0 < 90:
                     continue
                 p.drawText(QRectF(dx0, top, dx1 - dx0, 20), Qt.AlignmentFlag.AlignCenter, seg.title)

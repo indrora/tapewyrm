@@ -278,7 +278,9 @@ class LaneStack(pg.GraphicsLayoutWidget):
         x0, x1 = track.start, track.end
 
         self._ruler = self._row("", "", HEIGHTS["ruler"], transparent=True)
-        self._ruler.addItem(RulerItem(track, x0, x1))
+        ruler_item = RulerItem(track, x0, x1)
+        self._ruler.addItem(ruler_item)
+        self._ruler.sigRangeChanged.connect(lambda *_: ruler_item.follow(self._ruler))
         anchor = self._ruler
 
         if track.flux is not None:
@@ -402,8 +404,15 @@ class LaneStack(pg.GraphicsLayoutWidget):
 
     def _lane(self, vb: pg.ViewBox, item: _DeviceItem, name: str, track: Track) -> None:
         vb.addItem(item)
-        vb.addItem(BoundaryItem(track.segments, track.start, track.end))
-        vb.sigRangeChanged.connect(lambda *_: item.update())
+        boundary = BoundaryItem(track.segments, track.start, track.end)
+        vb.addItem(boundary)
+
+        def follow(*_: object) -> None:
+            # Every item follows the view: bounded by the band around it, repainted.
+            item.follow(vb)
+            boundary.follow(vb)
+
+        vb.sigRangeChanged.connect(follow)
         self._lanes.append((name, vb, item))
 
     def refresh(self) -> None:
