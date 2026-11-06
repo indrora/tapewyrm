@@ -86,6 +86,29 @@ def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
     track.decoder.close()
 
 
+def test_header_read_from_the_duplicate_still_labels_the_first_copy():
+    """Segments land in any order: identified from the duplicate, segment 0 is still the header."""
+    from qiclib.testing.builders import build_header_segment, segment_raw_sectors
+
+    from cinnabar.load.flux import _Identification
+    from tests.conftest import capture_header
+
+    hdr = capture_header(0)
+    first, dup = (
+        segment_raw_sectors(build_header_segment(0)),
+        segment_raw_sectors(build_header_segment(1)),
+    )
+    ident = _Identification()
+    assert ident.attempt(dup, hdr, final=False, fresh=dup)
+    layout = ident.layout
+    assert layout is not None and layout.info.header_seg == 1
+    assert layout.holds(0) == "Header" and layout.holds(1) == "Header"
+    assert 0 in ident.wanted  # the first copy is the one to read, once it lands
+    assert ident.attempt([*dup, *first], hdr, final=False, fresh=first)
+    assert ident.layout is not None and ident.layout.info.header_seg == 0
+    assert 0 not in ident.wanted
+
+
 def test_identification_fires_on_the_header_and_again_for_the_volume_table():
     """The tape is identified the moment its header lands, and completed when the volume table does."""
     from qiclib.testing.builders import segment_raw_sectors

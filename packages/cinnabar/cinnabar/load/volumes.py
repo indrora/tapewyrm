@@ -203,7 +203,12 @@ class Layout:
         for vol in self.volumes:
             for seg_abs in vol.base:
                 self.by_segment.setdefault(seg_abs, vol)
-        self.header_segs = {info.header_seg}
+        # The header is wherever the record says it is (bytes 6-7, normally
+        # segment 0) and at its duplicate, whichever copy the identification
+        # happened to read: a flux capture's segments land in any order, and
+        # when the duplicate landed first the layout used to know only it,
+        # so the real header segment came up "(unknown)" and stayed so.
+        self.header_segs = {info.header_seg, info.vol.header_seg}
         if dup_header is not None:
             self.header_segs.add(dup_header)
         elif info.vol.dup_header_seg:

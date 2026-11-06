@@ -101,11 +101,21 @@ def _may_hold_header(sectors: Sequence[RawSector]) -> bool:
 
 
 def _still_wanted(info: identify.TapeInfo) -> set[int]:
-    """The volume-table segment, when the identification had to go without it."""
-    if info.vtbl_seg is not None and info.vtbl_state in ("clean", "corrected"):
-        return set()
-    seg = info.vtbl_seg if info.vtbl_seg is not None else info.vol.first_data_seg
-    return {seg} if seg else set()
+    """Segments whose landing should redo the identification.
+
+    The volume-table segment, when the identification had to go without
+    it; and the header segment itself, when what was read was its
+    duplicate (the duplicate is a copy, but the first copy is the one
+    locate_header prefers, and it may be the cleaner read).
+    """
+    wanted: set[int] = set()
+    if info.vtbl_seg is None or info.vtbl_state not in ("clean", "corrected"):
+        seg = info.vtbl_seg if info.vtbl_seg is not None else info.vol.first_data_seg
+        if seg:
+            wanted.add(seg)
+    if info.header_seg != info.vol.header_seg:
+        wanted.add(info.vol.header_seg)
+    return wanted
 
 
 class _Identification:

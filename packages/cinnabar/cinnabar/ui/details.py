@@ -220,10 +220,12 @@ class DetailsPanel(QWidget):
         else:
             pieces = self._bytes
             label = (self.span.label if self.span is not None else "bytes").lower()
+            # "id=0/0/1" -> "id0-0-1": no "=" or "/" in a file name.
             stem = (
                 f"{self.track.label}-{self.segment.title}-{label}".lower()
                 .replace(" ", "-")
                 .replace("/", "-")
+                .replace("=", "")
             )
         path, _ = QFileDialog.getSaveFileName(
             self, "Export bytes", f"{stem}.bin", "Binary (*.bin);;All files (*)"
