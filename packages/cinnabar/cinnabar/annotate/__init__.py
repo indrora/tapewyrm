@@ -18,10 +18,13 @@ parsed** (a segment's data, a volume's byte stream). The loaders in
   GCR records with preamble, markers, data field, ID field, CRCC and
   postamble (QIC-100-MC Rev F section 6), from :mod:`qiclib.qic100`.
 
-Every span carries a **row** name, ``"<decoder>: <what>"``, and the lanes
-of the display are those rows, in :data:`ROW_ORDER`: the decoder that
-produced a span names the lane it sits in, the way a protocol decoder's
-rows are labelled in PulseView ("I2C: Address/Data") and Logic.
+Every span carries a **row** name, ``"<decoder>: <what>"``, the way a
+protocol decoder's rows are labelled in PulseView ("I2C: Address/Data")
+and Logic. ``--dump`` lists a track by those rows, in :data:`ROW_ORDER`.
+The window gives each physical row its own lane but stacks the logical
+rows into one lane per depth (:data:`LOGICAL_FAMILIES`): a segment holds
+one logical structure at a time, so the lanes would otherwise sit empty
+most of the way along a track.
 """
 
 # Display order of every row an annotator can emit. A track shows the
@@ -48,6 +51,37 @@ ROW_ORDER: tuple[str, ...] = (
     "QIC-122: Frame fields",
     "Bytes",
 )
+
+# The logical rows, grouped by the structure they describe and ordered by
+# depth within it: ``LOGICAL_FAMILIES[k][d]`` is family ``k``'s row at
+# depth ``d``. A segment holds one such structure at a time (the header,
+# the volume table, a volume's data area, a compression extent), so the
+# window stacks one shared lane per depth and every family draws in them,
+# each run of a row announced by a type strip along the lane's top
+# (:class:`cinnabar.ui.lanes.LaneStack`); ``level_of`` says which lane a
+# row goes to. The physical rows (sectors, GCR records, image slots, a
+# volume track's source segments) are not here: each is its own lane.
+# These tuples repeat the annotators' own ROWS constants rather than
+# import them (the annotators import this package); test_annotate keeps
+# them in step.
+LOGICAL_FAMILIES: tuple[tuple[str, ...], ...] = (
+    ("QIC-80: Header", "QIC-80: Header fields"),
+    ("QIC-113: Volume table", "QIC-113: Volumes", "QIC-113: Volume fields"),
+    ("QIC-113: Sections", "QIC-113: Entries", "QIC-113: Entry parts"),
+    ("QIC-113: Extent", "QIC-122: Frames", "QIC-122: Frame fields"),
+)
+LOGICAL_DEPTH = max(len(family) for family in LOGICAL_FAMILIES)
+_LEVEL = {row: depth for family in LOGICAL_FAMILIES for depth, row in enumerate(family)}
+
+
+def level_of(row: str) -> int | None:
+    """The shared logical lane (a depth) a row is drawn in; None for a physical row."""
+    return _LEVEL.get(row)
+
+
+def row_title(row: str) -> str:
+    """A row name without its decoder tag: ``"QIC-113: Volumes"`` -> ``"Volumes"``."""
+    return row.split(":", 1)[1].strip() if ":" in row else row
 
 
 def decoder_of(row: str) -> str:

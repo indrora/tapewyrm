@@ -109,6 +109,43 @@ def test_wide_lanes_and_vertical_zoom(image_path: Path):
     assert height("TWTI: Sectors") == HEIGHTS["records"]
 
 
+def test_shared_logical_lanes_announce_their_rows(image_path: Path):
+    """Bytes under the ruler, physical rows, then one shared lane per depth whose header follows the view."""
+    from tapewyrm_archive.progress import NULL_PROGRESS
+
+    from cinnabar.ui.items import SpanLaneItem
+    from cinnabar.ui.lanes import LaneStack
+
+    QApplication.instance() or QApplication([])
+    track = open_path(image_path).load(0, NULL_PROGRESS)
+    stack = LaneStack()
+    stack.set_track(track)
+    assert [name for name, _, _ in stack._lanes] == [
+        "Bytes",
+        "TWTI: Sectors",
+        "Logical 0",
+        "Logical 1",
+        "Logical 2",
+    ]
+    header_seg = track.segments[0]
+    vtbl_seg = next(s for s in track.segments if dict(s.detail)["holds"] == "Volume Table")
+    structure = next(item for name, _, item in stack._lanes if name == "Logical 0")
+    assert isinstance(structure, SpanLaneItem) and structure.strip
+    assert structure.rows_in_view(header_seg.start, header_seg.end) == ["QIC-80: Header"]
+    assert structure.rows_in_view(header_seg.start, vtbl_seg.end) == [
+        "QIC-80: Header",
+        "QIC-113: Volume table",
+    ]
+    stack.set_range(header_seg.start, header_seg.end)
+    stack._update_headers()
+    assert stack._headers["Logical 0"].name == "Header"
+    assert stack._headers["Logical 0"].decoder == "QIC-80"
+    assert stack._headers["Logical 2"].name == "Fields"  # the header family is two deep
+    stack.set_range(header_seg.start, vtbl_seg.end)
+    stack._update_headers()
+    assert stack._headers["Logical 0"].name == "Header \u2192 Volume table"
+
+
 def test_stack_reports_its_height_and_scrolls_on_drag(image_path: Path):
     from tapewyrm_archive.progress import NULL_PROGRESS
 

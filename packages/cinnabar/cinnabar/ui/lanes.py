@@ -1,4 +1,4 @@
-"""The channel stack for one track: a time ruler, then one dense row per decoder row.
+"""The channel stack for one track: a time ruler, then one dense row per lane.
 
 Laid out the way a logic analyzer lays out channels (PulseView, Logic): a
 ruler across the top with tick labels, then contiguous rows separated by
@@ -7,18 +7,28 @@ the row's name and its decoder tag:
 
     [ruler]      +2.676 s        +2.700 s        +2.725 s   | Seg 2
     |Flux        |||||||| ||| ||||||| ...
+    |Bytes       ......
     |Sectors     < id=0/0/65 >< id=0/0/66 > ...
      MFM
     |Fields      <sync><FE><ID><crc>  gap  <sync><FB><    data    ><crc>
      MFM
-    |Volume table  < Volume Table >
-     QIC-113
-    ...
-    |Bytes       ......
+    |Header      [Header~~~~~~~~~~~~~~~~~~~~~~~~~~][Volume table~~~~~~~~~
+     QIC-80      < Format Parameter Record  ><  Bad Sector Map  >< Volume Table >
+    |Header fields  <sig><fmt>...                                  <entry><entry>
+     QIC-80
+    |Fields
 
-Rows are the span rows of :mod:`cinnabar.annotate` (``Span.row``), shown
-in :data:`cinnabar.annotate.ROW_ORDER`, only those that occur in the
-track; "Flux" and "Bytes" are the two non-span lanes. All view boxes
+The physical rows of :mod:`cinnabar.annotate` (sectors, records, image
+slots, a volume track's source segments) each get a lane of their own, in
+:data:`cinnabar.annotate.ROW_ORDER`, when they occur in the track. The
+logical rows share one lane per depth
+(:data:`cinnabar.annotate.LOGICAL_FAMILIES`): a segment holds one logical
+structure at a time, so a lane per row sat empty most of the way along a
+track. A type strip along the top of a shared lane announces each run of
+a row in the decoder's colour, and the lane's header reads what is under
+the view right now ("Header", "Header -> Volume table"). "Flux" and
+"Bytes" are the two non-span lanes; Bytes sits right under the flux so a
+capture, an image and a volume all start the same way. All view boxes
 share the x range and are clamped to the track; the wheel zooms, dragging
 pans (pyqtgraph's defaults, y locked). Hover and click report the span
 under the cursor.
@@ -26,7 +36,7 @@ under the cursor.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Callable as _Callable
 
 import pyqtgraph as pg
@@ -34,7 +44,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsWidget
 
-from cinnabar.annotate import decoder_of, ordered_rows
+from cinnabar.annotate import LOGICAL_DEPTH, decoder_of, level_of, ordered_rows, row_title
 from cinnabar.model import Span, Track, in_row, rows_of
 from cinnabar.ui import palette
 from cinnabar.ui.items import (
@@ -48,15 +58,32 @@ from cinnabar.ui.items import (
 )
 
 HEADER_WIDTH = 150
-HEIGHTS = {"ruler": 38, "Flux": 64, "Stream": 96, "records": 36, "row": 26, "Bytes": 24}
+# A logical row's 30 px is a 10 px type strip and 20 px of spans.
+HEIGHTS = {"ruler": 38, "Flux": 64, "Stream": 96, "records": 36, "row": 30, "Bytes": 24}
 # "Wide lanes": the taller defaults, with room for a label and a sublabel in
 # every row and three readable rows of flux (the ruler stays).
-WIDE_HEIGHTS = {"ruler": 38, "Flux": 110, "Stream": 150, "records": 60, "row": 44, "Bytes": 40}
+WIDE_HEIGHTS = {"ruler": 38, "Flux": 110, "Stream": 150, "records": 60, "row": 48, "Bytes": 40}
 VSCALE_MIN, VSCALE_MAX = 1.0, 2.5  # the vertical zoom's range
 NON_SPAN_ROWS = ("Flux", "Flux: Stream", "Bytes")
 ROW_HEIGHT_MIN, ROW_HEIGHT_MAX = 14, 400
 GRIP_PX = 6  # the band along a header's bottom edge that drags the row's height
 RECORD_ROWS = {"MFM: Sectors", "GCR: Records", "TWTI: Sectors"}
+# The shared logical lanes, one per depth: their keys (for dragged heights)
+# and the names their headers show while nothing logical is under the view.
+LOGICAL_KEYS = tuple(f"Logical {k}" for k in range(LOGICAL_DEPTH))
+LOGICAL_NAMES = ("Structure", "Parts", "Fields")
+
+
+def _logical_name(k: int) -> str:
+    return LOGICAL_NAMES[k] if k < len(LOGICAL_NAMES) else f"Level {k}"
+
+
+def _at_level(spans: Sequence[Span], k: int) -> Iterator[Span]:
+    """Every span of a forest whose row is drawn in shared lane ``k``, in order."""
+    for s in spans:
+        if level_of(s.row) == k:
+            yield s
+        yield from _at_level(s.children, k)
 
 
 class _Header(QGraphicsWidget):
@@ -121,12 +148,15 @@ class _Header(QGraphicsWidget):
         name_font.setBold(True)
         p.setFont(name_font)
         text_rect = QRectF(r.left() + 10, r.top(), r.width() - 12, r.height())
+        name = p.fontMetrics().elidedText(
+            self.name, Qt.TextElideMode.ElideRight, int(text_rect.width())
+        )
         if self.decoder and self.decoder != self.name and r.height() >= 24:
             half = r.height() / 2
             p.drawText(
                 QRectF(text_rect.left(), r.top() + 1, text_rect.width(), half),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
-                self.name,
+                name,
             )
             tag_font = QFont(palette.UI)
             tag_font.setPixelSize(palette.FONT_PX["lane-sub"])
@@ -138,9 +168,7 @@ class _Header(QGraphicsWidget):
                 self.decoder,
             )
         else:
-            p.drawText(
-                text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.name
-            )
+            p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
 
 
 class _LaneBox(pg.ViewBox):
@@ -180,6 +208,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
         self.ci.layout.setColumnStretchFactor(1, 1)
         self.track: Track | None = None
         self._lanes: list[tuple[str, pg.ViewBox, _DeviceItem]] = []
+        self._headers: dict[str, _Header] = {}  # by lane key, for the live logical headers
         self._ruler: pg.ViewBox | None = None
         # Row heights the user dragged, by row name; kept across rebuilds and tracks.
         self.heights: dict[str, int] = {}
@@ -222,9 +251,12 @@ class LaneStack(pg.GraphicsLayoutWidget):
     # -- building ---------------------------------------------------------
 
     @staticmethod
-    def rows(track: Track) -> list[str]:
-        present = rows_of([s for seg in track.segments for s in seg.records + seg.fields])
-        return ordered_rows(present - {""})
+    def lane_keys(track: Track) -> list[str]:
+        """The span lanes a track needs, in order: its physical rows, then a shared lane per depth in use."""
+        present = rows_of([s for seg in track.segments for s in seg.records + seg.fields]) - {""}
+        physical = [row for row in ordered_rows(present) if level_of(row) is None]
+        levels = [lvl for row in present if (lvl := level_of(row)) is not None]
+        return physical + list(LOGICAL_KEYS[: max(levels, default=-1) + 1])
 
     def set_track(self, track: Track) -> None:
         self.clear()
@@ -236,6 +268,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
         self.ci.layout.setColumnFixedWidth(0, HEADER_WIDTH)
         self.ci.layout.setColumnStretchFactor(1, 1)
         self._lanes = []
+        self._headers = {}
         self.track = track
         x0, x1 = track.start, track.end
 
@@ -261,15 +294,31 @@ class LaneStack(pg.GraphicsLayoutWidget):
             )
             self._lane(vb, StreamItem(track.flux, x0, x1), "Flux: Stream", track)
 
+        vb = self._row("Bytes", "", self.row_height("Bytes", "Bytes"), anchor=anchor, key="Bytes")
+        self._lane(vb, BytesItem(track.segments, x0, x1), "Bytes", track)
+
         spans = [s for seg in track.segments for s in seg.records + seg.fields]
-        for row in self.rows(track):
-            decoder = decoder_of(row)
-            name = row.split(":", 1)[1].strip() if ":" in row else row
-            is_record = row in RECORD_ROWS
-            height = self.row_height(row, "records" if is_record else "row")
-            vb = self._row(name, decoder, height, anchor=anchor, key=row)
+        for key in self.lane_keys(track):
+            if key in LOGICAL_KEYS:
+                k = LOGICAL_KEYS.index(key)
+                height = self.row_height(key, "row")
+                vb = self._row(_logical_name(k), "", height, anchor=anchor, key=key)
+                item = SpanLaneItem(
+                    list(_at_level(spans, k)),
+                    x0,
+                    x1,
+                    label_px=palette.FONT_PX["field"],
+                    sublabel_px=palette.FONT_PX["field-sub"],
+                    inset=0.1,
+                    strip=True,
+                )
+                self._lane(vb, item, key, track)
+                continue
+            is_record = key in RECORD_ROWS
+            height = self.row_height(key, "records" if is_record else "row")
+            vb = self._row(row_title(key), decoder_of(key), height, anchor=anchor, key=key)
             item = SpanLaneItem(
-                list(in_row(spans, row)),
+                list(in_row(spans, key)),
                 x0,
                 x1,
                 label_px=palette.FONT_PX["record" if is_record else "field"],
@@ -277,15 +326,31 @@ class LaneStack(pg.GraphicsLayoutWidget):
                 bold=is_record,
                 inset=0.12,
             )
-            self._lane(vb, item, row, track)
-
-        vb = self._row("Bytes", "", self.row_height("Bytes", "Bytes"), anchor=anchor, key="Bytes")
-        self._lane(vb, BytesItem(track.segments, x0, x1), "Bytes", track)
+            self._lane(vb, item, key, track)
 
         for vb_ in [self._ruler] + [vb for _, vb, _ in self._lanes]:
             vb_.setLimits(xMin=x0, xMax=x1, minXRange=track.axis.min_window)
         self._ruler.sigXRangeChanged.connect(self._x_changed)
         self.setMinimumHeight(self.total_height())
+        self._update_headers()
+
+    def _update_headers(self) -> None:
+        """A shared lane's header says what is under the view: its rows, first to last."""
+        if self._ruler is None:
+            return
+        a, b = self.view_range()
+        for key, _vb, item in self._lanes:
+            if key not in LOGICAL_KEYS or not isinstance(item, SpanLaneItem):
+                continue
+            header = self._headers[key]
+            rows = item.rows_in_view(a, b)
+            if rows:
+                header.name = " \u2192 ".join(row_title(r) for r in rows)
+                header.decoder = decoder_of(rows[0])
+            else:
+                header.name = _logical_name(LOGICAL_KEYS.index(key))
+                header.decoder = ""
+            header.update()
 
     def _row(
         self,
@@ -313,6 +378,8 @@ class LaneStack(pg.GraphicsLayoutWidget):
             self.setMinimumHeight(self.total_height())
 
         header = _Header(name, decoder, height, resize if key is not None else None)
+        if key is not None:
+            self._headers[key] = header
         self.ci.addItem(header, row=row, col=0)
         vb.setMouseEnabled(x=True, y=False)
         vb.setYRange(0, 1, padding=0)
@@ -339,7 +406,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
         if self.track is None:
             return
         track = self.track
-        wanted = self.rows(track)
+        wanted = self.lane_keys(track)
         have = [name for name, _, _ in self._lanes if name not in NON_SPAN_ROWS]
         if wanted != have:
             a, b = self.view_range()
@@ -349,11 +416,15 @@ class LaneStack(pg.GraphicsLayoutWidget):
         spans = [s for seg in track.segments for s in seg.records + seg.fields]
         for name, _vb, item in self._lanes:
             if isinstance(item, SpanLaneItem):
-                item.set_spans(list(in_row(spans, name)))
+                if name in LOGICAL_KEYS:
+                    item.set_spans(list(_at_level(spans, LOGICAL_KEYS.index(name))))
+                else:
+                    item.set_spans(list(in_row(spans, name)))
             elif isinstance(item, BytesItem):
                 item.set_segments(track.segments)
             else:
                 item.update()
+        self._update_headers()
 
     # -- range -----------------------------------------------------------
 
@@ -368,6 +439,7 @@ class LaneStack(pg.GraphicsLayoutWidget):
         return a, b
 
     def _x_changed(self, _vb, rng) -> None:
+        self._update_headers()
         self.range_changed.emit(rng[0], rng[1])
 
     # -- hover and click ---------------------------------------------------
@@ -411,7 +483,9 @@ class LaneStack(pg.GraphicsLayoutWidget):
                             ),
                             row="Bytes",
                         )
-                return found, name, x
+                # A shared lane reports the span's own row, not the lane.
+                row = found.row if found is not None and name in LOGICAL_KEYS else name
+                return found, row, x
         return None
 
 

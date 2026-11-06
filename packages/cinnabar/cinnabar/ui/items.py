@@ -21,14 +21,19 @@ from collections.abc import Sequence
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QPolygonF
 
+from cinnabar.annotate import decoder_of, row_title
 from cinnabar.model import ByteRun, Flux, Segment, Span  # noqa: F401 -- Segment for BytesItem
 from cinnabar.ui import palette
 
 POINT_PX = 5  # the pointed end of a chevron or hex, in pixels
 MIN_LABEL_PX = 28  # a span narrower than this gets no label
 BYTE_TEXT_PX = 22  # a byte at least this wide on screen shows its hex value
+# The type strip along the top of a shared logical lane (SpanLaneItem(strip=True)).
+STRIP_PX = 10  # its height; the spans draw below it
+STRIP_FONT_PX = 9
+STRIP_FADE_PX = 360  # the band fades from the decoder's colour to a tint over this many pixels
 _FONT_CACHE: dict[int, QFont] = {}
 
 
@@ -90,7 +95,17 @@ def shape_polygon(x0: float, x1: float, top: float, bottom: float, shape: str) -
 
 
 class SpanLaneItem(_DeviceItem):
-    """One lane: a flat list of spans (one depth of the tree), with labels when they fit."""
+    """One lane: a flat list of spans (one depth of the tree), with labels when they fit.
+
+    A shared logical lane (``strip=True``) holds spans of several rows in
+    turn (the header's, then the volume table's, then a volume's: one
+    family per segment) and announces each **run** of a row with a type
+    strip along its top: a band in the decoder's colour that fades to a
+    tint along the run, carrying the row's name at the run's start (or
+    stuck to the view's left edge once the start has scrolled off), so a
+    new kind of structure coming along reads at a glance and a lane's
+    content is never in doubt mid-run.
+    """
 
     def __init__(
         self,
@@ -102,22 +117,42 @@ class SpanLaneItem(_DeviceItem):
         sublabel_px: int = 11,
         bold: bool = False,
         inset: float = 0.08,
+        strip: bool = False,
     ) -> None:
         super().__init__(x0, x1)
         self._label_px = label_px
         self._sublabel_px = sublabel_px
         self._bold = bold
         self._inset = inset
+        self.strip = strip
         self.spans: list[Span] = []
         self._starts = np.zeros(0)
         self._ends = np.zeros(0)
+        self.runs: list[tuple[float, float, str]] = []  # (start, end, row) of each run of a row
+        self._run_starts = np.zeros(0)
+        self._run_ends = np.zeros(0)
         self.set_spans(spans)
 
     def set_spans(self, spans: Sequence[Span]) -> None:
         self.spans = sorted(spans, key=lambda s: s.start)
         self._starts = np.array([s.start for s in self.spans])
         self._ends = np.array([s.end for s in self.spans])
+        runs: list[tuple[float, float, str]] = []
+        for s in self.spans:
+            if runs and runs[-1][2] == s.row:
+                runs[-1] = (runs[-1][0], max(runs[-1][1], s.end), s.row)
+            else:
+                runs.append((s.start, s.end, s.row))
+        self.runs = runs
+        self._run_starts = np.array([r[0] for r in runs])
+        self._run_ends = np.array([r[1] for r in runs])
         self.update()
+
+    def rows_in_view(self, x0: float, x1: float) -> list[str]:
+        """The rows with a run inside ``[x0, x1)``, first to last (a row once per run)."""
+        lo = int(np.searchsorted(self._run_ends, x0, side="right"))
+        hi = int(np.searchsorted(self._run_starts, x1, side="left"))
+        return [row for _s, _e, row in self.runs[lo:hi]]
 
     def span_at(self, x: float) -> Span | None:
         """The span under view x, if any (the latest-starting one that covers it)."""
@@ -136,6 +171,9 @@ class SpanLaneItem(_DeviceItem):
         p.save()
         p.resetTransform()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self.strip:
+            self._paint_strip(p, scale, offset, top, vx0, vx1)
+            top += STRIP_PX
         h = bottom - top
         t = top + h * self._inset
         b = bottom - h * self._inset
@@ -170,6 +208,50 @@ class SpanLaneItem(_DeviceItem):
             if w >= MIN_LABEL_PX and s.label:
                 self._label(p, s, dx0, dx1, t, b)
         p.restore()
+
+    def _paint_strip(
+        self, p: QPainter, scale: float, offset: float, top: float, vx0: float, vx1: float
+    ) -> None:
+        """The type strip: a fading band and the row's name for every run in view."""
+        lo = int(np.searchsorted(self._run_ends, vx0, side="right"))
+        hi = int(np.searchsorted(self._run_starts, vx1, side="left"))
+        band = QRectF(0, top + 1, 0, STRIP_PX - 2)
+        left_edge = scale * vx0 + offset
+        p.setFont(_font(STRIP_FONT_PX, True, palette.UI))
+        metrics = p.fontMetrics()
+        for i, (x0, x1, row) in enumerate(self.runs[lo:hi], lo):
+            dx0 = scale * x0 + offset
+            dx1 = scale * x1 + offset
+            col = palette.decoder_colour(decoder_of(row))
+            solid, faint = QColor(col), QColor(col)
+            solid.setAlpha(200)
+            faint.setAlpha(45)
+            fade = QLinearGradient(QPointF(dx0, 0.0), QPointF(dx0 + STRIP_FADE_PX, 0.0))
+            fade.setColorAt(0.0, solid)
+            fade.setColorAt(1.0, faint)
+            band.setLeft(dx0)
+            band.setWidth(min(dx1 - dx0, STRIP_FADE_PX))
+            p.fillRect(band, QBrush(fade))
+            if dx1 - dx0 > STRIP_FADE_PX:
+                band.setLeft(dx0 + STRIP_FADE_PX)
+                band.setWidth(dx1 - dx0 - STRIP_FADE_PX)
+                p.fillRect(band, faint)
+            # The message: the row's name at the run's start, or stuck to the
+            # view's left edge once the start has scrolled off. A short run
+            # (the volume table is one segment) may not be as wide as its
+            # name, so the tag may spill past the run's end into the empty
+            # lane, as far as the next run's start.
+            title = row_title(row)
+            width = metrics.horizontalAdvance(title)
+            lx = max(dx0, left_edge) + 4
+            room = scale * self.runs[i + 1][0] + offset if i + 1 < len(self.runs) else float("inf")
+            if lx + width + 4 > max(dx1, room):
+                continue
+            tag = QRectF(lx - 3, top + 1, width + 6, STRIP_PX - 2)
+            p.fillRect(tag, solid)
+            dark = col.lightness() < 150
+            p.setPen(QPen(palette.text_on_dark() if dark else palette.text()))
+            p.drawText(tag, Qt.AlignmentFlag.AlignCenter, title)
 
     def _label(self, p: QPainter, s: Span, x0: float, x1: float, t: float, b: float) -> None:
         inner = QRectF(x0 + POINT_PX, t, max(x1 - x0 - 2 * POINT_PX, 1), b - t)

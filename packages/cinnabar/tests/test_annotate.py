@@ -30,6 +30,21 @@ def test_header_spans_cover_fpr_fields_and_bsm():
     assert bsm.start == (volume_mod.BSM_OFFSET if data[4] == 4 else volume_mod.FIXED_BSM_OFFSET)
 
 
+def test_logical_families_match_the_annotators_rows():
+    """The shared-lane registry repeats the annotators' ROWS tuples; keep them in step."""
+    from cinnabar.annotate import LOGICAL_FAMILIES, level_of, row_title
+    from cinnabar.annotate import volume as volume_mod
+
+    assert LOGICAL_FAMILIES == (
+        header_mod.ROWS,
+        volume_mod.VTBL_ROWS,
+        volume_mod.VOLUME_ROWS,
+        volume_mod.EXTENT_ROWS,
+    )
+    assert level_of("QIC-113: Entry parts") == 2 and level_of("MFM: Sectors") is None
+    assert row_title("QIC-113: Volume table") == "Volume table"
+
+
 def test_fpr_span_lists_every_field_and_the_geometry():
     """One click on the record shows all of it; short fields carry their value as sublabel."""
     from qiclib import segment as seg_mod

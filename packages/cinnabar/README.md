@@ -7,17 +7,22 @@ stack of lanes:
 
 ```
 Flux                every transition, the PLL's bitcells, the decoded bits   (captures only)
+Bytes               the segment's bytes as a shade strip, hex values when zoomed in
 MFM: Sectors        one span per MFM sector (GCR: Records on a QIC-100-MC tape;
                     TWTI: Sectors on an image)
 MFM: Fields         the sector's sync marks, ID field, data field and CRCs
-QIC-80: Header      the format parameter record and bad-sector map, and their fields
-QIC-113: ...        volume table, volumes, volume fields; sections, entries, entry parts
-QIC-122: ...        compression extents, frames, frame fields
-Bytes               the segment's bytes as a shade strip, hex values when zoomed in
+Structure  }        three shared lanes for the logical rows, one per depth:
+Parts      }        QIC-80: Header / Header fields; QIC-113: Volume table, Volumes,
+Fields     }        Volume fields; Sections, Entries, Entry parts; QIC-122 extents,
+                    frames, frame fields
 ```
 
 Rows are named by the decoder that produced them, like a protocol
-analyzer's; a track shows the rows that occur in it. A ruler runs across
+analyzer's. The physical rows each get a lane when they occur in the
+track; the logical rows share three lanes, since a segment holds one
+logical structure at a time: a type strip along each shared lane's top
+names every run of a row in its decoder's colour, and the lane's header
+reads what is under the view ("Header", "Header -> Volume table"). A ruler runs across
 the top, the whole track is a strip along the bottom with the viewed window
 on it, and a Details panel docks on the right: while nothing is selected
 it shows what the tape's header said (name, format, geometry, volumes), and
