@@ -80,6 +80,18 @@ def test_overview_shows_tape_and_track_rows_until_something_is_clicked():
     assert "28 tracks x 100 segments" in panel.title.text()
 
 
+def test_segment_export_keeps_or_drops_the_parity_pieces():
+    """A segment export is the 29 data sectors unless the ECC type was chosen."""
+    from cinnabar.model import SEGMENT_BYTES, BytePiece
+    from cinnabar.ui.details import export_pieces
+
+    data = BytePiece(0, b"\x11" * 4, ByteRun(0.0, 1.0, b"\x11" * 4, 0), 0)
+    parity_run = ByteRun(1.0, 2.0, b"\x22" * 4, SEGMENT_BYTES)
+    parity = BytePiece(SEGMENT_BYTES, b"\x22" * 4, parity_run, 0)
+    assert export_pieces([data, parity], ecc=False) == [data]
+    assert export_pieces([data, parity], ecc=True) == [data, parity]
+
+
 def test_write_pieces_keeps_offsets(tmp_path: Path):
     seg = _segment()
     out = tmp_path / "seg.bin"

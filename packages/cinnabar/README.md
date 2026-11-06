@@ -28,7 +28,8 @@ on it, and a Details panel docks on the right: while nothing is selected
 it shows what the tape's header said (name, format, geometry, volumes), and
 a click on any span or byte shows its decoded fields and a colour-coded
 hexdump of its bytes, with buttons to export them or the whole segment to a
-file. The toolbar and menus step segments and
+file (a segment export offers the 29 data sectors, as an image holds them,
+or all 32 with the parity). The toolbar and menus step segments and
 tracks, zoom, fit, and switch themes (`--theme sketch|paper|dark|contrast`);
 the status bar shows what the cursor is on and how far decoding has got.
 Keys: Left / Right segment, PageUp / PageDown track, Home / End, Cmd/Ctrl +

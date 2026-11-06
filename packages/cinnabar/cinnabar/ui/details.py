@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cinnabar.model import BytePiece, Segment, Span, Tape, Track
+from cinnabar.model import SEGMENT_BYTES, BytePiece, Segment, Span, Tape, Track
 from cinnabar.ui import palette
 from cinnabar.ui.lanes import describe
 
@@ -108,6 +108,20 @@ def _table(rows: list[str], mono: str) -> str:
 
 
 HINT = "Click a span or a byte for its details."
+# The save dialog's types for a segment export: the 29 data sectors (what an
+# image holds, so the file matches the segment tw convert would write) or
+# all 32 with the three Reed-Solomon parity sectors after the data, which a
+# flux capture has and an RS experiment wants. The choice is the dialog's
+# own type list, so there is no second dialog; the ECC type is offered only
+# when there are parity bytes to add.
+EXPORT_DATA = "Segment data, 29 sectors (*.bin)"
+EXPORT_WITH_ECC = "Segment data and ECC, 32 sectors (*.bin)"
+EXPORT_ANY = "All files (*)"
+
+
+def export_pieces(pieces: Sequence[BytePiece], *, ecc: bool) -> list[BytePiece]:
+    """The pieces a segment export writes: all of them, or only those within the data."""
+    return list(pieces) if ecc else [p for p in pieces if p.offset < SEGMENT_BYTES]
 
 
 class DetailsPanel(QWidget):
@@ -217,7 +231,13 @@ class DetailsPanel(QWidget):
         if segment:
             pieces = self.segment.bytes_between(self.segment.start, self.segment.end)
             stem = f"{self.track.label}-{self.segment.title}".lower().replace(" ", "-")
+            has_ecc = any(p.offset >= SEGMENT_BYTES for p in pieces)
+            types = (
+                [EXPORT_DATA, EXPORT_WITH_ECC, EXPORT_ANY] if has_ecc else [EXPORT_DATA, EXPORT_ANY]
+            )
+            filters = ";;".join(types)
         else:
+            filters = "Binary (*.bin);;All files (*)"
             pieces = self._bytes
             label = (self.span.label if self.span is not None else "bytes").lower()
             # "id=0/0/1" -> "id0-0-1": no "=" or "/" in a file name.
@@ -227,10 +247,10 @@ class DetailsPanel(QWidget):
                 .replace("/", "-")
                 .replace("=", "")
             )
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export bytes", f"{stem}.bin", "Binary (*.bin);;All files (*)"
-        )
+        path, chosen = QFileDialog.getSaveFileName(self, "Export bytes", f"{stem}.bin", filters)
         if path:
+            if segment:
+                pieces = export_pieces(pieces, ecc=chosen == EXPORT_WITH_ECC)
             write_pieces(Path(path), pieces)
 
 
