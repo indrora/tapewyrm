@@ -419,12 +419,18 @@ class FluxTrack:
             if sec.data_crc_ok:
                 good += 1
             slot = geometry_mod.sector_in_segment(sec.fsc)
-            if slot >= sectors_mod.DATA_SECTORS:
-                continue
             off = slot * SECTOR_BYTES
-            data[off : off + SECTOR_BYTES] = sec.data
             field0 = d0 + (d1 - d0) * 4 / jobs.DATA_FIELD_BYTES  # past sync + mark
             field1 = d1 - (d1 - d0) * 2 / jobs.DATA_FIELD_BYTES  # before the CRC
+            if slot >= sectors_mod.DATA_SECTORS:
+                # A parity sector's bytes go to the Bytes lane (they are on
+                # the tape, and a click or an export should see them, at
+                # offsets past the data) but not into the segment's data,
+                # which stays the 29 data sectors an image holds and the
+                # logical annotators expect.
+                byte_runs.append(ByteRun(field0, field1, sec.data, off))
+                continue
+            data[off : off + SECTOR_BYTES] = sec.data
             runs.append((off, SECTOR_BYTES, field0, field1))
             byte_runs.append(ByteRun(field0, field1, sec.data, off))
         layout = self.ident.layout

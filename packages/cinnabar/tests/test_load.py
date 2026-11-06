@@ -61,7 +61,7 @@ def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
     for seg in track.segments[1:]:
         assert seg.state == "clean", (seg.title, seg.detail)
         assert len(seg.records) == 32
-        assert all(r.style == "record" for r in seg.records)
+        assert [r.style for r in seg.records] == ["record"] * 29 + ["ecc"] * 3
         assert seg.start <= seg.records[0].start < seg.records[-1].end <= seg.end
         fields = [c.label for c in seg.records[0].children]
         assert fields == ["sync", "FE", "ID", "crc", "gap", "sync", "FB", "data", "crc"]
@@ -71,6 +71,10 @@ def test_flux_capture_decodes_sectors_in_time(qic80_capture: Path):
     header = track.segments[1]
     assert header.fields[0].label == "Format Parameter Record"
     assert header.byte_runs[0].start >= header.start
+    # The three parity sectors: labelled ECC, bytes shown past the data, not in it.
+    assert [r.sublabel for r in header.records[-3:]] == ["ECC"] * 3
+    assert len(header.byte_runs) == 32 and header.byte_runs[-1].offset == 31 * 1024
+    assert header.fields[1].end <= header.byte_runs[29].start  # the BSM ends before the parity
     volume = track.segments[3]
     assert [s.label for s in volume.fields] == ["Directory Section", "Data Section"]
     assert track.overview[1:] == ["clean", "clean", "clean"]

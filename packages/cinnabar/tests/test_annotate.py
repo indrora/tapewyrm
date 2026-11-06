@@ -119,6 +119,19 @@ def test_compressed_volume_has_no_stream_spans_but_extents_per_segment():
     assert [s.label for s in spans] == ["next", "frame (cont.)"]
 
 
+def test_flux_parity_sectors_are_labelled_ecc():
+    """Sectors 30-32 of a segment are RS parity: ECC, whatever the segment holds."""
+    from qiclib.types import RawSector
+
+    sectors = [RawSector(0, 0, fsc, bytes(1024), True, True, False) for fsc in range(1, 33)]
+    positions = [(k * 10.0, k * 10.0 + 1, k * 10.0 + 2, k * 10.0 + 9) for k in range(32)]
+    spans = sectors_mod.sector_spans(sectors, positions, ["Header"] * 32)
+    assert [s.sublabel for s in spans[:2]] == ["Header", "Header"]
+    assert [s.sublabel for s in spans[-3:]] == ["ECC"] * 3
+    assert {s.style for s in spans[:29]} == {"record"} and {s.style for s in spans[29:]} == {"ecc"}
+    assert dict(spans[-1].detail)["holds"] == "RS parity for the segment"
+
+
 def test_slot_spans_follow_the_segment_table():
     entry = SegmentEntry(SegmentState.CORRECTED, erasures=2, data_len=29_696, excluded_mask=0b100)
     slots = sectors_mod.slot_spans(entry, base=29_696)

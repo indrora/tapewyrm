@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from qiclib import geometry as geometry_mod
 from qiclib.types import RawSector
 from tapewyrm_archive.twti import SegmentEntry, SegmentState
 
@@ -150,17 +151,32 @@ def sector_spans(
             ),
         )
         label = f"id={sec.fsd}/{sec.ftk}/{sec.fsc}"
-        sub = holds[i] if i < len(holds) and holds[i] else ("CRC BAD" if bad else "")
+        # The last three sectors of a segment are its Reed-Solomon parity
+        # (DESIGN.md 2.3), not data: say so, as the image's slots do, rather
+        # than "Header" or a volume's name like their neighbours, which made
+        # them look like data that had not decoded.
+        parity = geometry_mod.sector_in_segment(sec.fsc) >= DATA_SECTORS
+        if parity:
+            sub = "ECC" if not bad else "ECC, CRC BAD"
+        else:
+            sub = holds[i] if i < len(holds) and holds[i] else ("CRC BAD" if bad else "")
+        style = "record-bad" if (bad or id_bad) else ("ecc" if parity else "record")
         out.append(
             Span(
                 id0,
                 d1,
                 label,
                 sub,
-                "record" if not (bad or id_bad) else "record-bad",
+                style,
                 Shape.CHEVRON,
                 (
                     ("fsd/ftk/fsc", f"{sec.fsd}/{sec.ftk}/{sec.fsc}"),
+                    (
+                        "holds",
+                        "RS parity for the segment"
+                        if parity
+                        else (holds[i] if i < len(holds) and holds[i] else "data"),
+                    ),
                     ("id crc", "ok" if sec.id_crc_ok else "bad"),
                     ("data crc", "ok" if sec.data_crc_ok else "bad"),
                     ("deleted mark", "yes" if sec.deleted else "no"),
