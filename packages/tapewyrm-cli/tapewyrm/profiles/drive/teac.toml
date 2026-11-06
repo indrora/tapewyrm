@@ -1,0 +1,45 @@
+# TEAC FT-3010. Reports vendor 0x01cc, which ftape-vendors.h (Linux 2.6.19) lists
+# as "Wangtek 3200 / Teac 700" with wake_up_colorado (the "Teac FT3010TR" entry
+# there is 0x03cf, make 15). Bench 2026-11-05: ROM 0x8c.
+#
+# Same wake as colorado (Phantom Select + Enter Primary Mode is what it answers)
+# but a TIGHTER pulse train. The firmware measures inter_pulse_us from the
+# trailing edge of STEP (qic_step_pulse), so the leading-edge period is
+# pulse_us + inter_pulse_us. colorado's 200 + 2000 = 2.2 ms sits over Rev J
+# TSTEP max (2.1 ms) and exactly on TTIMEOUT min (2.2 ms): a drive whose
+# command time-out runs short splits the train, and an isolated pulse is Soft
+# Reset and five is Alternate Command Time-out. The Colorados shrug; on the
+# bench this drive did both (error 27 latched with no Soft Reset ever sent;
+# ACKs at ~6.25 ms, past the engine's gap + TACK window, so every report was
+# abandoned mid-subcontext and the drive ended up dark on every output).
+# 200 + 1300 = 1.5 ms is the centre of TSTEP's 0.9-2.1 ms window: 3/3
+# `tw drive status` and 600/600 reports in 60 s, cartridge out.
+#
+# Quirk (Rev J cmd 14): the drive holds its automatic Seek Load Point until the
+# first Report Drive Status, then runs it and reports NOT Ready (on the bench,
+# often no ACK at all) until done. The first status after power-on starts the
+# tape moving; Report Error Code (7) is rejected (Table 2a: needs Ready) until
+# that finishes. Never leave a report half-clocked on this drive (an ACK
+# timeout, `tw drive scope --pulses N`, a Soft Reset): it goes dark on every
+# output and only a power cycle brings it back.
+
+name = "teac"
+bit_order = "lsb"                 # QIC-117 reports clock LSB-first off TRK0
+report_strategy = "fixed_settle"  # as on the Colorados; index_edge untried here
+quirks = []
+
+[timing]
+pulse_us = 200              # STEP pulse width (Rev J TSTEPW 1-1100 us)
+inter_pulse_us = 1300       # trailing-edge gap -> 1.5 ms leading-edge period (TSTEP 0.9-2.1 ms)
+terminate_gap_us = 3300     # 3.5 ms from the last leading edge: > TTIMEOUT max 2.9 ms
+report_settle_us = 900      # report bit appears within 900 us of the 2nd pulse (TBIT)
+motion_timeout_s = 20       # generic motion wait-ready ceiling; Table 2d covers the rest
+
+[[wake]]
+cmd = "phantom select"
+arg = 0
+delay_ms = 50
+
+[[wake]]
+cmd = "enter primary mode"
+delay_ms = 50
