@@ -523,6 +523,7 @@ def open_captures(paths: Sequence[Path]) -> Tape:
         # window re-reads them on its next refresh (they change again when a
         # later landing completes the identification).
         tape.detail = (*tape_detail, *layout.summary())
+        tape.warnings = layout.warnings
 
     ident.on_identified.append(identified)
 

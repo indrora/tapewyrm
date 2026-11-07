@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from qiclib import identify, qic122
+from qiclib import volume_profile as vp
+from qiclib.verdict import warning_names
 from qiclib.volume import VtblEntry
 from tapewyrm_archive.twvl import SparseVolume
 
@@ -42,6 +44,7 @@ from cinnabar.model import (
     Shape,
     Span,
     Track,
+    VolumeReading,
 )
 
 log = logging.getLogger(__name__)
@@ -67,10 +70,12 @@ class Volume:
         entry: VtblEntry,
         bad: set[int],
         fetch: Callable[[int], bytes],
-        offset_bytes: int,
+        reading: VolumeReading,
     ) -> None:
         self.entry = entry
-        self.offset_bytes = offset_bytes
+        # How the profile that read the table says this volume is read: its
+        # QIC-122 extent widths and its file-set parser (cinnabar.model.VolumeReading).
+        self.reading = reading
         self._fetch = fetch
         # Absolute segment -> offset in the stream, for every segment of the
         # range: one that has not landed yet still has its place (and its
@@ -109,7 +114,7 @@ class Volume:
         where its bytes go in the uncompressed stream (QIC-113 section 9);
         it is decompressed the way ``qicsilver extract`` does it
         (:func:`qiclib.qic122.decode_extent`, with the volume profile's
-        offset width), and one that will not decode is a hole.
+        offset and frame-size widths), and one that will not decode is a hole.
         """
         out: list[VolumePiece] = []
         for seg_abs, off in sorted(self.base.items(), key=lambda kv: kv[1]):
@@ -120,7 +125,11 @@ class Volume:
                 out.append(VolumePiece(off, data[:SEGMENT_BYTES], seg_abs))
                 continue
             try:
-                ext = qic122.decode_extent(data, offset_bytes=self.offset_bytes)
+                ext = qic122.decode_extent(
+                    data,
+                    offset_bytes=self.reading.extent_offset_bytes,
+                    frame_size_bytes=self.reading.extent_frame_size_bytes,
+                )
             except qic122.Qic122Error as exc:
                 log.debug("segment %d: extent did not decode: %s", seg_abs, exc)
                 continue
@@ -175,15 +184,71 @@ class Volume:
         else:
             log.debug("parsing volume %r (%d bytes)", self.entry.description, self.length)
             try:
-                self._spans = volume_ann.volume_spans(self.stream(), self.entry)
+                self._spans = volume_ann.volume_spans(
+                    self.stream(), self.entry, parser=self.reading.parser
+                )
             except Exception:  # noqa: BLE001 -- a damaged volume still shows its segments
                 log.exception("volume %r: structure not parsed", self.entry.description)
                 self._spans = []
         return self._spans
 
 
+def chosen_verdict(verdicts: list[vp.Verdict]) -> vp.Verdict | None:
+    """The verdict the tape is read with: the best survivor of the fingerprint gate, else the best loser.
+
+    ``qiclib.identify`` ranks the verdicts survivors first, each group by
+    score, and reads the volumes with the first either way, noting when
+    every profile was eliminated (its reading "may be wrong"); the viewer
+    reads with the same one so it labels what ``extract`` extracts.
+    :func:`qiclib.volume_profile.survivors` is the test, so the order is
+    not relied on.
+    """
+    alive = vp.survivors(verdicts)
+    if alive:
+        return alive[0]
+    if verdicts:
+        log.debug(
+            "every volume profile was eliminated; reading with %s anyway", verdicts[0].profile.name
+        )
+        return verdicts[0]
+    log.debug("no volume table was read; no verdict")
+    return None
+
+
+def reading_of(verdict: vp.Verdict | None) -> VolumeReading:
+    """A verdict as the plain record the annotators and widgets read (:class:`cinnabar.model.VolumeReading`).
+
+    The profile's three layers, by name and number: the VTBL fields it
+    places past byte 56 (and the bytes its fingerprint compared, as
+    ``"match"``), its extent widths and its parser; with the verdict's
+    score, whether its gate failed, and its warnings (the profile's own and
+    the selection's, as ``qiclib.volume_profile.guess`` adds them).
+    """
+    if verdict is None:
+        return VolumeReading("(none)", "")
+    profile = verdict.profile
+    fields = [(name, spec.offset, spec.length) for name, spec in profile.fields.items()]
+    fields += [("match", off, len(expected)) for off, expected in profile.vtbl_bytes]
+    return VolumeReading(
+        profile=profile.name,
+        parser=profile.fileset_parser,
+        status=profile.status,
+        score=verdict.score,
+        eliminated=verdict.eliminated,
+        warnings=tuple(warning_names(verdict.warnings)),
+        fields=tuple(sorted(fields, key=lambda f: f[1])),
+        extent_offset_bytes=profile.extent_offset_bytes,
+        extent_frame_size_bytes=profile.extent_frame_size_bytes,
+    )
+
+
 class Layout:
-    """What each segment of a tape holds, from its identification."""
+    """What each segment of a tape holds, from its identification.
+
+    ``verdict`` is the volume profile's reading the tape is read with
+    (:func:`chosen_verdict`) and ``reading`` the same as plain data for the
+    annotators and the window (:func:`reading_of`); every volume carries it.
+    """
 
     def __init__(
         self,
@@ -193,12 +258,11 @@ class Layout:
         dup_header: int | None = None,
     ) -> None:
         self.info = info
-        verdict = max(info.verdicts, key=lambda v: v.score) if info.verdicts else None
-        self.entries: list[VtblEntry] = verdict.entries if verdict is not None else []
-        self.profile = verdict.profile.name if verdict is not None else "(none)"
-        offset_bytes = verdict.profile.extent_offset_bytes if verdict is not None else 8
+        self.verdict = chosen_verdict(info.verdicts)
+        self.reading = reading_of(self.verdict)
+        self.entries: list[VtblEntry] = self.verdict.entries if self.verdict is not None else []
         bad = set(info.bsm.bad_segments)
-        self.volumes = [Volume(e, bad, fetch, offset_bytes) for e in self.entries]
+        self.volumes = [Volume(e, bad, fetch, self.reading) for e in self.entries]
         self.by_segment: dict[int, Volume] = {}
         for vol in self.volumes:
             for seg_abs in vol.base:
@@ -221,7 +285,9 @@ class Layout:
         Shared by both loaders' tape rows and the window's details panel, so
         a flux capture and an image of the same tape read alike. The
         geometry rows are the header's own numbers (QIC-80-MC Rev N 7.1);
-        the cartridge is :mod:`qiclib.cartridge`'s guess from them.
+        the cartridge is :mod:`qiclib.cartridge`'s guess from them; the
+        volume profile, its score, its parser and its warnings are the
+        reading's (:attr:`cinnabar.model.VolumeReading.rows`).
         """
         info, vol = self.info, self.info.vol
         guess = info.cartridge
@@ -244,9 +310,14 @@ class Layout:
             ("data segments", f"{vol.first_data_seg} - {vol.last_data_seg}"),
             ("volume table", f"{vtbl} ({info.vtbl_state})"),
             ("volumes", str(len(self.entries))),
-            ("volume profile", self.profile),
+            *self.reading.rows,
         )
         return rows + tuple(("note", note) for note in info.notes)
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The caveats on the table's reading, for the tape's rows (:attr:`cinnabar.model.Tape.warnings`)."""
+        return self.reading.warnings
 
     def landed(self, seg_abs: int) -> None:
         """A segment just arrived (a flux capture): its volume's structure is stale."""
@@ -278,13 +349,17 @@ class Layout:
         if seg_abs in self.header_segs:
             return [s.mapped(bmap.to_axis) for s in header_mod.header_spans(padded)]
         if seg_abs == self.vtbl_seg:
-            return [s.mapped(bmap.to_axis) for s in volume_ann.vtbl_spans(padded, self.entries)]
+            spans = volume_ann.vtbl_spans(padded, self.entries, self.reading)
+            return [s.mapped(bmap.to_axis) for s in spans]
         vol = self.by_segment.get(seg_abs)
         if vol is None:
             return []
         if vol.entry.compressed:
             spans = volume_ann.extent_spans(
-                padded, spanning=vol.entry.segment_spanning, offset_bytes=vol.offset_bytes
+                padded,
+                spanning=vol.entry.segment_spanning,
+                offset_bytes=vol.reading.extent_offset_bytes,
+                frame_size_bytes=vol.reading.extent_frame_size_bytes,
             )
             return [s.mapped(bmap.to_axis) for s in spans]
         lo = vol.base[seg_abs]
@@ -307,18 +382,23 @@ def volume_track(vol: Volume, number: int, label: str) -> Track:
     Each readable tape segment's piece is a segment of the track, titled
     by the tape segment it came from, so a hole (a lost tape segment) is
     a gap you can see. The QIC-113 rows come from the stream (directory
-    and data entries: the files), a "Source segment" row says which tape
-    segment each stretch came from, and the Bytes lane is the decompressed
-    data, so a click on a data entry's ``data`` child is that file's bytes
-    and "Export these bytes" writes the file.
+    and data entries: the files, laid out by the parser the volume profile
+    names), a "Source segment" row says which tape segment each stretch
+    came from, and the Bytes lane is the decompressed data, so a click on
+    a data entry's ``data`` child is that file's bytes and "Export these
+    bytes" writes the file. The track's rows carry the profile's verdict
+    and the parser's probe of the whole stream, what ``qicsilver extract``
+    would stamp into the TWVL header, and its warnings are the probe's.
     """
     body, pieces = vol.decompressed()
     size = max(len(body), 1)
+    parser = vol.reading.parser
     try:
-        structure = volume_ann.volume_spans(body, vol.entry, decompressed=True)
+        structure = volume_ann.volume_spans(body, vol.entry, decompressed=True, parser=parser)
     except Exception:  # noqa: BLE001 -- a damaged volume still shows its pieces
         log.exception("volume %r: decompressed structure not parsed", vol.entry.description)
         structure = []
+    probe, warnings = volume_ann.probe_rows(body, vol.entry, parser)
     segments: list[Segment] = []
     for k, piece in enumerate(pieces):
         start = piece.offset
@@ -371,5 +451,8 @@ def volume_track(vol: Volume, number: int, label: str) -> Track:
             ("stream bytes", f"{size:,}"),
             ("pieces", str(len(pieces))),
             ("tape segments", f"{vol.entry.start_seg}-{vol.entry.end_seg}"),
+            *vol.reading.rows,
+            *probe,
         ),
+        warnings=warnings,
     )

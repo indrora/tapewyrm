@@ -17,6 +17,22 @@ Fields     }        Volume fields; Sections, Entries, Entry parts; QIC-122 exten
                     frames, frame fields
 ```
 
+The QIC-113 rows are laid out the way `qicsilver extract` reads the tape:
+the volume profile that read the volume table (`qiclib.volume_profile`,
+DESIGN.md §7.8) names a file-set parser, `qic113-basic`, `qic113-extended`
+or `none`, and that parser decides whether a volume's lanes show a
+Basic-DOS directory-first layout, an Extended-OS one placed from its
+directory, or one span saying the format has no parser yet. Nothing is
+re-decided from the record's bytes (the vendor bit, the OS type), since
+real tapes lie about those. The Volume fields lane draws bytes 57-127 of
+each VTBL record where that profile places them, with the bytes its
+fingerprint matched in red, and every entry's rows carry the profile, its
+score, whether its fingerprint held, its parser and its warnings; a volume's
+decompressed stream (the Volume N entries of the track menu) also carries
+the parser's probe of the whole stream, the verdict `extract` stamps into a
+TWVL header. A hand-built stream with no profile behind it is probed with
+every parser, as `qicsilver inspect` probes a bare TWVL.
+
 Rows are named by the decoder that produced them, like a protocol
 analyzer's. The physical rows each get a lane when they occur in the
 track; the logical rows share three lanes, since a segment holds one
@@ -25,8 +41,11 @@ names every run of a row in its decoder's colour, and the lane's header
 reads what is under the view ("Header", "Header -> Volume table"). A ruler runs across
 the top, the whole track is a strip along the bottom with the viewed window
 on it, and a Details panel docks on the right: while nothing is selected
-it shows what the tape's header said (name, format, geometry, volumes), and
-a click on any span or byte shows its decoded fields and a colour-coded
+it shows what the tape's header said (name, format, geometry, volumes),
+which volume profile read the volume table, its score and its parser, and,
+on a line of their own in amber, any warnings on that reading
+(`low-confidence`, `no-parser`, `untested`...); a click on any span or
+byte shows its decoded fields and a colour-coded
 hexdump of its bytes, with buttons to export them or the whole segment to a
 file (a segment export offers the 29 data sectors, as an image holds them,
 or all 32 with the parity). The toolbar and menus step segments and

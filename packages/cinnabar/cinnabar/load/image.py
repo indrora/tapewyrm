@@ -132,4 +132,4 @@ def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
             return _load(track)
 
     numbers = list(range(tracks)) + sorted(labels)
-    return Tape(str(path), kind, numbers, load, detail, labels)
+    return Tape(str(path), kind, numbers, load, detail, labels, layout.warnings)
