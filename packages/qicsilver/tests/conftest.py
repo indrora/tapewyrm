@@ -2,14 +2,18 @@
 
 All are built with ``qiclib.testing.builders`` and invented names only (the
 bench tapes are strangers' backups; their listings stay out of the repo).
+:func:`error_text` reads a failed CLI run's message out of rich-click's
+panel; the inspect and tar tests check the same refusals with it.
 """
 
 from __future__ import annotations
 
+import re
 import struct
 from pathlib import Path
 
 import pytest
+from click.testing import Result
 from qiclib import qic113ext as q
 from qiclib import segment as seg_mod
 from qiclib.testing.builders import (
@@ -158,3 +162,21 @@ def basic_volume(tmp_path: Path) -> Path:
     path = tmp_path / "basic.twvl"
     build_twvl(stream, record).save(path)
     return path
+
+
+# ---------------------------------------------------------------------------
+# CLI runs
+# ---------------------------------------------------------------------------
+
+
+def error_text(result: Result) -> str:
+    """A failed run's output with rich-click's panel (borders, wrapping) undone, for substring checks.
+
+    rich-click draws the message in a box of U+2500-range line characters
+    and wraps it to the terminal width, so it is compared as one line of
+    words. A traceback is never acceptable: every refusal is a click
+    exception, so the run must have failed cleanly.
+    """
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output, result.output
+    return " ".join(re.sub(r"[\u2500-\u257f]", " ", result.output).split())

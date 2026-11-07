@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import re
 
 from click.testing import CliRunner
+from conftest import error_text
 
 from qicsilver.cli import cli
 
@@ -115,13 +115,6 @@ def _shape(lines: list[str]) -> list[tuple[str, str, str]]:
     return [(line[:10], line.split()[1], line.split()[-1]) for line in lines]
 
 
-def _error_text(result) -> str:
-    """The failed run's output with rich-click's panel (borders, wrapping) undone, for substring checks."""
-    assert result.exit_code != 0
-    assert "Traceback" not in result.output, result.output
-    return " ".join(re.sub(r"[\u2500-\u257f]", " ", result.output).split())
-
-
 def test_an_image_with_one_volume_lists_it_without_a_number(extended_volume, extended_image):
     """inspect IMAGE reads the tape's only volume as inspect reads its .twvl."""
     from_image = _run(str(extended_image))
@@ -147,7 +140,7 @@ def test_several_volumes_need_dash_dash_volume(three_volume_image):
     """Never a silent first volume: the error says how many there are and how to pick."""
     result = CliRunner().invoke(cli, ["inspect", str(three_volume_image)])
     assert result.exit_code == 1, result.output
-    assert "3 volumes" in _error_text(result) and "--volume N" in _error_text(result)
+    assert "3 volumes" in error_text(result) and "--volume N" in error_text(result)
     chosen = _run(str(three_volume_image), "--volume", "2")
     assert "volume        EXAMPLE BACKUP 2" in chosen
     doc = json.loads(_run(str(three_volume_image), "--volume", "1", "--json"))
@@ -157,21 +150,21 @@ def test_several_volumes_need_dash_dash_volume(three_volume_image):
 def test_a_volume_the_tape_lacks_is_a_clean_error(three_volume_image):
     result = CliRunner().invoke(cli, ["inspect", str(three_volume_image), "--volume", "7"])
     assert result.exit_code == 1, result.output
-    assert "no volume 7" in _error_text(result) and "0-2" in _error_text(result)
+    assert "no volume 7" in error_text(result) and "0-2" in error_text(result)
 
 
 def test_dash_dash_volume_with_a_twvl_file_is_a_usage_error(extended_volume):
     result = CliRunner().invoke(cli, ["inspect", str(extended_volume), "--volume", "0"])
     assert result.exit_code == 2, result.output
-    assert "--volume" in _error_text(result) and "already one volume" in _error_text(result)
+    assert "--volume" in error_text(result) and "already one volume" in error_text(result)
 
 
 def test_files_are_told_apart_by_magic_not_by_name(tmp_path):
     capture = tmp_path / "lies.twvl"  # TWRF magic under a .twvl name
     capture.write_bytes(b"TWRF" + bytes(64))
     result = CliRunner().invoke(cli, ["inspect", str(capture)])
-    assert result.exit_code == 1 and "tw convert" in _error_text(result), result.output
+    assert result.exit_code == 1 and "tw convert" in error_text(result), result.output
     junk = tmp_path / "junk.twti"
     junk.write_bytes(b"nope nope")
     result = CliRunner().invoke(cli, ["inspect", str(junk)])
-    assert result.exit_code == 1 and "not a TWVL volume" in _error_text(result), result.output
+    assert result.exit_code == 1 and "not a TWVL volume" in error_text(result), result.output

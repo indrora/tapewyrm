@@ -56,9 +56,12 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   prints `{"summary": ..., "entries": [...]}`, the summary naming the
   volume's number as `volume_index`. It shares tar's directory walk
   (`qicsilver.entries`), so the two always agree.
-- **`tar VOLUME OUT.tar`**: a POSIX (pax) tar of the volume's files and
+- **`tar VOLUME|IMAGE OUT.tar`**: a POSIX (pax) tar of the volume's files and
   directories, with the original names (long Windows 95 names), modification
-  times and DOS attributes (pax header `TAPEWYRM.dos_attributes`). Both QIC-113
+  times and DOS attributes (pax header `TAPEWYRM.dos_attributes`). The input
+  is a TWVL volume or a TWTI/TWTZ image, routed exactly as `inspect` routes
+  it (`--volume N` for a tape with several volumes, `--volume-profile` as for
+  `extract`), so a tape can be tarred without extracting it first. Both QIC-113
   directory formats work: **extended** (Colorado/HP backup software) and
   **Basic-DOS** (e.g. the "MTN" tapes; QIC-113 attribute bits in
   `TAPEWYRM.qic113_attributes`). It also writes a damage report,
@@ -74,7 +77,7 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
 
 | Module | What |
 |---|---|
-| `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes); `inspect IMAGE` builds one volume in memory with `qiclib.extract.load_volume`. |
+| `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes); `inspect IMAGE` and `tar IMAGE` build one volume in memory with `qiclib.extract.load_volume`, through the one routing (magic, `--volume`, error wording) both commands share. |
 | `qicsilver.entries` | Reads a TWVL volume's header and QIC-113 directory (Extended or Basic-DOS) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
 | `qicsilver.tar` | Those entries -> pax tar + damage report. |
 | `qicsilver.inspect` | Those entries -> the `inspect` listing, filters and `--json` document. |

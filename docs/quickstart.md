@@ -381,10 +381,11 @@ qicsilver inspect captures/NAME.twtz                    # a look first: the one 
 qicsilver --progress extract captures/NAME.twtz captures/NAME-vols
 qicsilver inspect captures/NAME-vols/vol-00.twvl
 qicsilver --progress tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
+qicsilver --progress tar captures/NAME.twtz captures/NAME.tar     # or skip extract: the one volume, or --volume N
 ```
 
 The synopses are `qicsilver extract IMAGE [OUTDIR]`, `qicsilver inspect
-VOLUME|IMAGE [PATH]...` and `qicsilver tar VOLUME OUTPUT`: input first, output last.
+VOLUME|IMAGE [PATH]...` and `qicsilver tar VOLUME|IMAGE OUTPUT`: input first, output last.
 `extract` writes one `OUTDIR/vol-NN.twvl` per volume in the volume table (NN
 is the volume's number there, as `identify` lists it) and prints their paths.
 It decompresses QIC-122 data and lays each volume out by its QIC-113 offsets;
@@ -446,6 +447,11 @@ $ qicsilver tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 captures/NAME.tar: 2000 files, 150 directories, 12 damaged (report: captures/NAME.tar.damaged.txt)
 ```
 (example output)
+
+Like `inspect`, `tar` takes the tape image itself: `qicsilver tar
+captures/NAME.twtz captures/NAME.tar` tars a tape with one volume and
+`--volume N` picks one of several, read as `extract` reads it (so
+`--volume-profile` applies) with no `.twvl` written.
 
 The **damage report** (`captures/NAME.tar.damaged.txt`, or `--report PATH`) lists the
 lost tape segments and one line per damaged file: missing bytes, size, flag,

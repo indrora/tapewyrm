@@ -1,8 +1,13 @@
-"""qicsilver.tar: TWVL volume -> tar."""
+"""qicsilver.tar: a TWVL volume, or one volume of a tape image -> tar."""
+
+import tarfile
 
 import pytest
+from click.testing import CliRunner
+from conftest import error_text
 from tapewyrm_archive.twvl import Volume
 
+from qicsilver.cli import cli
 from qicsilver.tar import default_report_path, write_tar
 
 
@@ -164,3 +169,78 @@ def test_malformed_volume_header_is_refused(tmp_path, change, problem):
     Volume(header=header, data=b"").save(vol)
     with pytest.raises(MalformedFileError, match=problem):
         write_tar(vol, tmp_path / "out.tar")
+
+
+# ---------------------------------------------------------------------------
+# tar IMAGE: the volume is read out of the tape image, routed as inspect routes it
+# ---------------------------------------------------------------------------
+
+
+def _members(path) -> list[tuple]:
+    """What a reader gets from each member: name, type, size, mode, mtime, pax headers, bytes."""
+    with tarfile.open(path) as t:
+        return [
+            (
+                m.name,
+                m.type,
+                m.size,
+                m.mode,
+                m.mtime,
+                m.pax_headers,
+                t.extractfile(m).read() if m.isfile() else None,
+            )
+            for m in t.getmembers()
+        ]
+
+
+def test_tar_of_an_image_equals_tar_of_its_extracted_volume(extended_image, tmp_path):
+    """tar IMAGE writes what tar of `extract`'s .twvl writes: members, bytes and report alike."""
+    runner = CliRunner()
+    twvl = tmp_path / "vol.twvl"
+    extracted = runner.invoke(cli, ["extract", str(extended_image), "-o", str(twvl)])
+    assert extracted.exit_code == 0, extracted.output
+    from_file = runner.invoke(cli, ["tar", str(twvl), str(tmp_path / "file.tar")])
+    from_image = runner.invoke(cli, ["tar", str(extended_image), str(tmp_path / "image.tar")])
+    assert from_file.exit_code == 0, from_file.output
+    assert from_image.exit_code == 0, from_image.output
+    members = _members(tmp_path / "image.tar")
+    assert members == _members(tmp_path / "file.tar")
+    assert [m[0] for m in members] == [
+        "C",
+        "C/DOCS",
+        "C/EXAMPLE.TXT",
+        "C/BROKEN.DAT",
+        "C/DOCS/NOTES.TXT",
+    ]
+    assert "3 files, 2 directories, 1 damaged" in from_image.output
+    # The reports differ only in which file they say the bytes came from.
+    file_report = (tmp_path / "file.tar.damaged.txt").read_text().splitlines()
+    image_report = (tmp_path / "image.tar.damaged.txt").read_text().splitlines()
+    assert image_report[0] == f"# qicsilver damage report for {extended_image}"
+    assert image_report[1:] == file_report[1:]
+
+
+def test_several_volumes_need_dash_dash_volume(three_volume_image, tmp_path):
+    """Never a silent first volume: the error names the count and the flag, and nothing is written."""
+    out = tmp_path / "out.tar"
+    result = CliRunner().invoke(cli, ["tar", str(three_volume_image), str(out)])
+    assert result.exit_code == 1, result.output
+    assert "3 volumes" in error_text(result) and "--volume N" in error_text(result)
+    assert not out.exists() and not default_report_path(out).exists()
+    chosen = CliRunner().invoke(cli, ["tar", str(three_volume_image), str(out), "--volume", "2"])
+    assert chosen.exit_code == 0, chosen.output
+    assert "volume 'EXAMPLE BACKUP 2'" in default_report_path(out).read_text()
+
+
+def test_a_volume_the_tape_lacks_is_a_clean_error(three_volume_image, tmp_path):
+    out = str(tmp_path / "out.tar")
+    result = CliRunner().invoke(cli, ["tar", str(three_volume_image), out, "--volume", "7"])
+    assert result.exit_code == 1, result.output
+    assert "no volume 7" in error_text(result) and "0-2" in error_text(result)
+
+
+def test_dash_dash_volume_with_a_twvl_file_is_a_usage_error(extended_volume, tmp_path):
+    out = str(tmp_path / "out.tar")
+    result = CliRunner().invoke(cli, ["tar", str(extended_volume), out, "--volume", "0"])
+    assert result.exit_code == 2, result.output
+    assert "--volume" in error_text(result) and "already one volume" in error_text(result)
