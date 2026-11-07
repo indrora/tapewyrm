@@ -206,7 +206,7 @@ since readers read version 2 alone (Section 9).
 | `sample_clock_hz`     | integer          | REQUIRED | 1 | Sample clock of the capturing device, Hz (72000000 on a Greaseweazle v4.1). |
 | `track`               | integer (signed) | REQUIRED | 1 | TPT of the pass, 0-based. `-1` means unknown (a probe capture that did not seek). |
 | `direction`           | string           | REQUIRED | 1 | `"forward"` or `"reverse"`: the serpentine direction of `track` (even forward, odd reverse). For a non-track probe, the direction of tape motion. |
-| `pass_id`             | integer          | REQUIRED | 1 | Writer-assigned pass number, u16 range. Distinguishes repeated passes over one track. `tw dump` writes `1`. |
+| `pass_id`             | integer          | REQUIRED | 1 | Writer-assigned pass number, u16 range. Distinguishes repeated passes over one track. `tw dump` writes the attempt number: `1`, or more when `--retries` re-read the track. |
 | `utc`                 | string           | REQUIRED | 1 | Capture start time, ISO 8601 / [RFC3339] date-time with offset, e.g. `"2026-01-02T03:04:05+00:00"`. MAY be `""` if unknown. |
 | `tape_format`         | integer          | REQUIRED | 1 | Recording format code: 0 unknown, 1 QIC-40, 2 QIC-80, 3 QIC-3020, 4 QIC-3010. These are the Report Tape Status bits 0-3 values [QIC-117]. |
 | `segments_per_track`  | integer          | REQUIRED | 1 | Segments per track if known, else `0`. |
@@ -866,12 +866,26 @@ once holds lines from every run.
 | `sectors`      | integer or null | With `--check`: sectors decoded; else `null` |
 | `good`         | integer or null | With `--check`: sectors with ID and data CRC good |
 | `segments`     | integer or null | With `--check`: distinct segments seen in sector IDs |
+| `attempts`     | integer         | Passes made for this track (`--retries`); 1 without |
+| `kept`         | integer         | Which of those passes this line and the kept file describe |
+| `rejected`     | array           | The other passes, each `{"attempt": n, "reason": "..."}`: why that one was deleted |
 
 `tw dump` stops after a pass whose `end_reason` is not `EOT`, that does
 not verify, whose `index_pulses` falls below 0.9 x the best earlier pass,
 or whose `missing_est` exceeds 5 % of `index_pulses` (and, with `--check`,
 whose good fraction is below 0.8). The line for that pass is still
 written.
+
+With `--retries N`, a track whose pass failed any of those rules, or
+missed any segment inside (`missing_est` > 0), is read again up to N more
+times first. The file kept, and the line written, is the last pass's
+unless an earlier one was better, measured in this order: ran to `EOT`,
+verified, clean flux status, then more `index_pulses`, then fewer
+`missing_est`, then (with `--check`) more `good`. The other passes' files
+are deleted and listed in `rejected`; only the kept pass is judged by the
+stop rules. The kept file's header carries the attempt number as `pass_id`.
+These members are appended to the line, so a reader that knows only the
+older ones finds them where they were.
 
 ## Appendix C. Change Log
 

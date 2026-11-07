@@ -36,16 +36,31 @@ each pass first winds to the end of the tape where its track starts
 (:func:`wind_to_track_start`); in a sequential dump that is only the last few
 feet. Old tape is fragile: after every pass the dump stops if anything
 looks worse, rather than spending more passes on a tape that may be shedding.
+
+Old drives also read flakily, and many a failed pass is fixed by simply
+reading the track again (the head settles differently, a USB hiccup does not
+repeat, the drive finds the segment it skipped). ``--retries N`` re-reads a
+track up to N more times (:func:`read_track`). A pass counts as failed when the
+capture raised, when :func:`check_pass` would stop the dump on it, or when any
+segment was missed inside it (``missing_est > 0``: stricter than the stop
+rule's 5 %, because one re-read is cheap and one segment is 29 kB of someone's
+files). The file kept is the last pass's unless an earlier one was better by
+the same measures (:func:`pass_rank`); ``dump.jsonl`` accounts for every pass.
+Only once the retries are spent do the stop rules judge the kept pass, exactly
+as they judge a single pass without retries.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
-from collections.abc import Iterable
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Iterable
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
@@ -57,7 +72,7 @@ from tapewyrm.codec import gwstream, mfm
 from tapewyrm.link.device import LinkError
 from tapewyrm.link.protocol import EndReason
 from tapewyrm.qic117 import commands
-from tapewyrm.qic117.drive import Qic117Drive
+from tapewyrm.qic117.drive import LINK_FATAL, DriveError, Qic117Drive
 from tapewyrm.types import StopCond
 
 log = logging.getLogger(__name__)
@@ -88,10 +103,23 @@ def segment_pulses(index_ticks: list[int], sample_clock_hz: int) -> list[int]:
 
 
 CAPTURE_SUFFIX = ".twrf"
+# A re-read is captured beside the kept file as ``track-NN.twrf.retry`` and
+# moved into place only if it wins (read_track). The name does not end in
+# .twrf, so a run that dies mid-retry leaves nothing that `tw convert` or
+# cinnabar would take for a capture; the next attempt overwrites it.
+RETRY_SUFFIX = ".retry"
 
 
 class DumpStopped(Exception):
     """The dump stopped early on purpose; ``str()`` says why."""
+
+
+@dataclass
+class RejectedPass:
+    """One pass of a track that ``--retries`` threw away, and why (:func:`read_track`)."""
+
+    attempt: int
+    reason: str
 
 
 @dataclass
@@ -111,6 +139,14 @@ class TrackResult:
     sectors: int | None = None
     good: int | None = None  # ID and data CRC both OK
     segments: int | None = None  # distinct segments seen in the sector IDs
+    # --retries (read_track): how many passes this track took, which of them
+    # this line and the kept file describe, and why the others were deleted.
+    # A track read clean first time is attempts=1, kept=1, rejected=[]. New
+    # members go at the end: the sidecar is read by cinnabar and the
+    # pipeline, which must find the older ones where they were.
+    attempts: int = 1
+    kept: int = 1
+    rejected: list[RejectedPass] = field(default_factory=list)
 
     @property
     def good_fraction(self) -> float | None:
@@ -140,7 +176,9 @@ def check_pass(res: TrackResult, best_index: int, flux_ack: int = 0) -> str | No
     """Why the dump should stop after this pass, or None to carry on.
 
     ``best_index`` is the highest INDEX count of the earlier passes in this
-    dump (0 if this is the first).
+    dump (0 if this is the first). The reasons name the measure alone; they
+    are also what ``--retries`` records against a rejected pass, where
+    "stopping" would be wrong (:func:`pass_failure`).
     """
     if flux_ack != 0:
         log.debug("track %d: flux status %d != 0; stopping", res.track, flux_ack)
@@ -159,10 +197,7 @@ def check_pass(res: TrackResult, best_index: int, flux_ack: int = 0) -> str | No
             MIN_INDEX_FRACTION,
             best_index,
         )
-        return (
-            f"drive found only {res.index_pulses} segments (best pass so far: "
-            f"{best_index}); stopping to protect the tape"
-        )
+        return f"drive found only {res.index_pulses} segments (best pass so far: {best_index})"
     if res.missing_est > MAX_MISSING_FRACTION * max(res.index_pulses, 1):
         log.debug(
             "track %d: %d missed > %.2f x %d found; stopping",
@@ -171,19 +206,13 @@ def check_pass(res: TrackResult, best_index: int, flux_ack: int = 0) -> str | No
             MAX_MISSING_FRACTION,
             res.index_pulses,
         )
-        return (
-            f"~{res.missing_est} segments missed inside the pass "
-            f"({res.index_pulses} found); stopping to protect the tape"
-        )
+        return f"~{res.missing_est} segments missed inside the pass ({res.index_pulses} found)"
     fraction = res.good_fraction
     if fraction is not None and fraction < MIN_GOOD_FRACTION:
         log.debug(
             "track %d: good fraction %.3f < %.2f; stopping", res.track, fraction, MIN_GOOD_FRACTION
         )
-        return (
-            f"only {fraction:.0%} of sectors CRC-clean (< {MIN_GOOD_FRACTION:.0%}); "
-            "stopping to protect the tape"
-        )
+        return f"only {fraction:.0%} of sectors CRC-clean (< {MIN_GOOD_FRACTION:.0%})"
     return None
 
 
@@ -200,7 +229,7 @@ def _report(drive: Qic117Drive, name: str, bits: int) -> int | None:
 def drive_identity(drive: Qic117Drive) -> CaptureHeader:
     """A header template carrying the drive's reports, rate and provenance.
 
-    Track/direction/time are filled in per pass by :func:`dump_tracks`.
+    Track/direction/time are filled in per pass by :func:`_capture_pass`.
     """
     from tapewyrm.buildinfo import host_build
 
@@ -313,6 +342,335 @@ def tracks_for_tape(identity: CaptureHeader) -> list[int]:
     return list(range(count))
 
 
+# ---------------------------------------------------------------------------
+# One pass of one track
+# ---------------------------------------------------------------------------
+
+
+def _capture_pass(
+    drive: Qic117Drive,
+    track: int,
+    path: Path,
+    attempt: int,
+    *,
+    template: CaptureHeader,
+    progress: Progress = NULL_PROGRESS,
+    check: bool = False,
+) -> tuple[TrackResult, int]:
+    """One Logical Forward pass over ``track`` into ``path``: (result, GW flux status).
+
+    The whole dance for one pass, so that a re-read (:func:`read_track`)
+    repeats it from the top: the ready+referenced check, the wind to the
+    track's starting end, Seek Head to Track, the capture, the wait for Ready,
+    and the decode-free measurements (plus the decode with ``check``).
+    ``attempt`` goes into the TWRF header as ``pass_id`` (1 unless the track
+    was re-read), so a capture says by itself that it is a re-read.
+
+    Every drive command goes through the drive layer, which pulses with the
+    profile's timing and resyncs a report that failed half-way (the TEAC
+    FT-3010 goes dark until a power cycle if one is left half-clocked);
+    nothing here, and nothing between attempts, touches the cable directly.
+
+    Raises :class:`DumpStopped` when the drive is not fit to read, which is
+    not retried: reading from an unknown position loses segments silently.
+    A ``LinkError``/``DriveError`` from the capture is let through after the
+    drive has had a chance to settle, so a retry starts from a stopped tape.
+    """
+    from qiclib.geometry import coord_to_seg
+
+    from tapewyrm.qic117.status import error_name
+
+    link = drive.link
+    log.debug("track %d attempt %d: checking drive is ready+referenced", track, attempt)
+    st = drive.status()
+    if not (st.ready and st.referenced) or st.error:
+        log.debug(
+            "track %d: ready=%s referenced=%s error=%s; refusing",
+            track,
+            st.ready,
+            st.referenced,
+            st.error,
+        )
+        raise DumpStopped(
+            f"before track {track}: drive not ready+referenced ({st}); "
+            "Logical Forward would be refused (Rev J error 19)"
+        )
+    log.info(f"track {track:2d}: winding to its start...")
+    t_wind = time.monotonic()
+    wind_to_track_start(drive, track)
+    log.info(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
+    log.debug("track %d: seeking head", track)
+    drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
+
+    hdr = replace(
+        template,
+        track=track,
+        direction=Direction.for_track(track),
+        pass_id=attempt,
+        utc=datetime.now(UTC).isoformat(timespec="seconds"),
+        drive_status=st.raw,
+    )
+    log.info(
+        f"track {track:2d}: capturing -> {path}" + (f" (attempt {attempt})" if attempt > 1 else "")
+    )
+    t0 = time.monotonic()
+    cap = link.capture(
+        commands.LOGICAL_FORWARD.code,
+        StopCond(byte_budget=0),  # the tape ends the pass, not a budget
+        rate=hdr.rate_kbps,
+        tpt=track,
+        direction=track & 1,
+        pass_id=hdr.pass_id,
+    )
+    nbytes = 0
+    # Logical Forward ends at EOT, so the length is unknown: count bytes.
+    log.debug("track %d: streaming capture to %s", track, path)
+    try:
+        # `with cap` aborts the session if the stream dies mid-pass, and the
+        # abort stops the tape (DESIGN.md §5.2); a stream that drained to its
+        # END needs no abort and gets none.
+        with cap, path.open("wb") as f, progress.task(f"track {track:2d}", unit="bytes") as bar:
+            write_preamble(f, hdr)
+            for chunk in cap.chunks():
+                f.write(chunk)
+                nbytes += len(chunk)
+                bar.advance(len(chunk))
+    except LinkError:
+        # The tape is stopping but the drive is not Ready yet. Let it settle,
+        # so a retry's ready check does not refuse a drive that is merely
+        # busy; if even that fails, the capture's own error is the one worth
+        # reporting, so it is the one raised.
+        log.debug("track %d: capture raised; letting the drive settle before any retry", track)
+        with suppress(LinkError, DriveError):
+            drive.wait_ready(30)
+        raise
+    log.debug("track %d: capture done, %d bytes; reading flux status", track, nbytes)
+    flux_ack = link.flux_status()
+    wall = time.monotonic() - t0
+
+    log.debug("track %d: flux status %d; waiting for drive Ready", track, flux_ack)
+    st = drive.wait_ready(30)
+    err = drive.last_error.code if (st.error and drive.last_error) else None
+
+    log.info(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
+    hdr_read, flux_at = read_header(path)
+    ps = gwstream.parse(path.read_bytes()[flux_at:])
+    segments_at = segment_pulses(ps.index_ticks, ps.sample_clock_hz)
+    res = TrackResult(
+        track=track,
+        path=str(path),
+        bytes=nbytes,
+        seconds=round(wall, 1),
+        end_reason=EndReason(ps.end.reason).name if ps.end else "none",
+        verified=ps.verified,
+        tape_seconds=round(ps.duration_s, 1),
+        index_pulses=len(segments_at),
+        missing_est=missing_segments(segments_at),
+        status_after=st.raw,
+        error_after=err,
+    )
+    summary = f"{res.index_pulses} segments by INDEX, {res.missing_est} missed in gaps"
+    if check:
+        log.info(f"track {track:2d}: decoding (--check)...")
+        sectors = mfm.recover_sectors_from_flux(
+            ps.intervals, ps.sample_clock_hz, hdr_read.rate_kbps
+        )
+        res.sectors = len(sectors)
+        res.good = sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok)
+        res.segments = len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors})
+        summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
+    log.info(
+        f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, {summary}"
+        + (f", error {err} {error_name(err)}" if err else "")
+    )
+    return res, flux_ack
+
+
+# ---------------------------------------------------------------------------
+# Re-reading a failed track (--retries)
+# ---------------------------------------------------------------------------
+
+
+def pass_rank(res: TrackResult, flux_ack: int) -> tuple[bool, bool, bool, int, int, int]:
+    """How good a pass is, for keeping the best of several: bigger is better.
+
+    The measures are the ones :func:`pass_failure` judges by, most telling
+    first: the pass ran to logical EOT (anything else cut the track short);
+    the stream verified against the END accounting (else bytes went missing
+    on the way); the GW flux status was clean (else the stream overflowed);
+    then how many segments the drive found, which is the most direct count of
+    how much of the track is in the file; then how few it skipped inside the
+    pass; and with --check how many sectors decoded clean. Segments found
+    outrank segments missed because a pass that found 207 and skipped 3
+    inside holds more of the track than one that found 200 with no gap in
+    it: the latter lost its segments at the ends of the pass, where no INDEX
+    gap can show them (:func:`missing_segments`).
+    """
+    return (
+        res.end_reason == EndReason.EOT.name,
+        res.verified,
+        flux_ack == 0,
+        res.index_pulses,
+        -res.missing_est,
+        res.good or 0,
+    )
+
+
+def pass_failure(res: TrackResult, flux_ack: int, best_index: int) -> str | None:
+    """Why this pass counts as failed for ``--retries``, or None if it is clean.
+
+    Failed is what the capture path already knows how to see: anything
+    :func:`check_pass` would stop the dump for (the pass did not end at EOT,
+    the stream did not verify, the GW flux status reports an overflow, the
+    drive found fewer segments than 90 % of the best track so far, too many
+    were missed inside, or with --check too few sectors are CRC-clean), plus
+    one stricter rule: a pass that skipped any segment inside
+    (``missing_est > 0``) is worth another try, where the stop rule only
+    reacts above 5 %. A capture that raised is failed too, but
+    :func:`read_track` handles that before there is a result to judge.
+    """
+    reason = check_pass(res, best_index, flux_ack)
+    if reason is not None:
+        return reason
+    if res.missing_est > 0:
+        log.debug(
+            "track %d: %d segments missed inside the pass; failed for --retries",
+            res.track,
+            res.missing_est,
+        )
+        return f"~{res.missing_est} segments missed inside the pass ({res.index_pulses} found)"
+    return None
+
+
+#: One pass into a file: ``capture_pass(dest, attempt) -> (result, flux status)``.
+CapturePass = Callable[[Path, int], tuple[TrackResult, int]]
+
+
+def read_track(
+    capture_pass: CapturePass,
+    track: int,
+    path: Path,
+    *,
+    retries: int = 0,
+    best_index: int = 0,
+) -> tuple[TrackResult, int]:
+    """Read one track with up to ``retries`` re-reads: (kept result, its flux status).
+
+    ``capture_pass(dest, attempt)`` makes one pass into ``dest`` and returns
+    its measurements (:func:`_capture_pass` over a drive; the tests script
+    it). The track is read again until the kept pass is clean
+    (:func:`pass_failure`) or the attempts are spent; the stop rules are not
+    applied here but by the caller, to what was kept.
+
+    Which file stays at ``path``: the last pass's, unless an earlier one was
+    better by :func:`pass_rank`, so a tie goes to the latest. In practice
+    that is the clean pass, or the last of the failed ones. The two differ
+    when a later pass is clean but found fewer segments than an earlier pass
+    that skipped some inside; then the earlier file, which holds more of the
+    track, is kept, and the loop goes on hoping for a pass that is both. A
+    re-read is captured beside the kept file (``RETRY_SUFFIX``) and moved into
+    place only if it wins, so the kept file is never overwritten by a worse
+    one; the result's ``path`` is ``path`` whichever file it was captured
+    into, and it carries ``attempts``, ``kept`` and, for every other pass,
+    why that one was deleted.
+
+    A pass that raised ``LinkError`` or ``DriveError`` has nothing to measure:
+    it is rejected with the error as its reason. Its partial file is kept only
+    while no pass has been measured at all, so a track that never read still
+    leaves what it got (and a later raised pass replaces it: ties go to the
+    latest). Errors that mean the board is gone (``LINK_FATAL``) are not
+    retried. If every pass raised, the last error is raised again.
+    """
+    if retries < 0:
+        log.debug("retries=%d is negative; refusing", retries)
+        raise ValueError(f"retries must be 0 or more, not {retries}")
+    scratch = path.with_name(path.name + RETRY_SUFFIX)
+    if scratch.exists():
+        log.debug("track %d: deleting stale %s from an earlier run", track, scratch)
+        scratch.unlink()
+    kept: TrackResult | None = None
+    kept_ack = 0
+    kept_failure: str | None = None
+    occupied = False  # something sits at `path`: the kept file, or a raised pass's partial
+    rejected: list[RejectedPass] = []
+    last_exc: Exception | None = None
+    attempt = 0
+    for attempt in range(1, retries + 2):
+        dest = scratch if occupied else path
+        if attempt > 1:
+            log.info(f"track {track:2d}: re-reading, attempt {attempt} of {retries + 1}")
+        try:
+            res, flux_ack = capture_pass(dest, attempt)
+        except LINK_FATAL:
+            log.debug("track %d attempt %d: the board is gone; not retrying", track, attempt)
+            raise
+        except (LinkError, DriveError) as exc:
+            why = f"capture raised {type(exc).__name__}: {exc}"
+            log.warning(f"track {track:2d}: attempt {attempt} failed: {why}")
+            rejected.append(RejectedPass(attempt, why))
+            last_exc = exc
+            if kept is None and dest.exists():
+                log.debug(
+                    "track %d attempt %d: nothing measured yet; its partial file stays as %s",
+                    track,
+                    attempt,
+                    path,
+                )
+                if dest != path:
+                    os.replace(dest, path)
+                occupied = True
+            else:
+                log.debug("track %d attempt %d: deleting its partial %s", track, attempt, dest)
+                dest.unlink(missing_ok=True)
+            continue
+        failure = pass_failure(res, flux_ack, best_index)
+        if kept is not None and pass_rank(res, flux_ack) < pass_rank(kept, kept_ack):
+            why = (f"{failure}; " if failure else "clean, but ") + (
+                f"ranked below attempt {kept.kept} ({res.index_pulses} segments found, "
+                f"{res.missing_est} missed, vs {kept.index_pulses} and {kept.missing_est})"
+            )
+            log.info(f"track {track:2d}: attempt {attempt} {why}; keeping attempt {kept.kept}")
+            rejected.append(RejectedPass(attempt, why))
+            dest.unlink()
+        else:
+            if kept is not None:
+                # The kept pass was failed (a clean one ends the loop), and this
+                # one ranks at least as high: it takes over, the old one goes.
+                assert kept_failure is not None
+                log.info(
+                    f"track {track:2d}: attempt {attempt} replaces attempt {kept.kept} "
+                    f"({kept_failure})"
+                )
+                rejected.append(RejectedPass(kept.kept, kept_failure))
+            if dest != path:
+                log.debug(
+                    "track %d attempt %d: moving %s into place as %s", track, attempt, dest, path
+                )
+                os.replace(dest, path)
+            kept = replace(res, path=str(path), kept=attempt)
+            kept_ack, kept_failure = flux_ack, failure
+            occupied = True
+            if failure is not None:
+                log.warning(f"track {track:2d}: attempt {attempt} failed: {failure}")
+        if kept_failure is None:
+            log.debug("track %d: attempt %d is clean; done", track, attempt)
+            break
+    if kept is None:
+        assert last_exc is not None  # the loop ran at least once, and every pass raised
+        log.warning(f"track {track:2d}: no pass could be measured in {attempt} attempt(s)")
+        raise last_exc
+    kept.attempts = attempt
+    kept.rejected = sorted(rejected, key=lambda r: r.attempt)
+    if attempt > 1:
+        log.info(f"track {track:2d}: kept attempt {kept.kept} of {attempt}")
+    return kept, kept_ack
+
+
+# ---------------------------------------------------------------------------
+# The dump
+# ---------------------------------------------------------------------------
+
+
 def dump_tracks(
     drive: Qic117Drive,
     out_dir: Path,
@@ -320,19 +678,17 @@ def dump_tracks(
     *,
     progress: Progress = NULL_PROGRESS,
     check: bool = False,
+    retries: int = 0,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble.
 
     ``tracks`` None means every track of the cartridge: :func:`tracks_for_tape`
     counts them from the tape format and width the drive reports. ``check``
     also decodes every pass (~17 s each) and stops on a low CRC-clean
-    fraction; see the module docstring.
+    fraction; see the module docstring. ``retries`` re-reads a track whose
+    pass failed up to that many more times (:func:`read_track`) before the
+    stop rules judge the pass that was kept.
     """
-    from qiclib.geometry import coord_to_seg
-
-    from tapewyrm.qic117.status import error_name
-
-    link = drive.link
     log.debug("creating output directory %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     template = drive_identity(drive)
@@ -344,100 +700,31 @@ def dump_tracks(
     results: list[TrackResult] = []
     with progress.task("dumping tracks", total=len(tracks), unit="tracks") as overall:
         for track in tracks:
-            log.debug("track %d: checking drive is ready+referenced", track)
-            st = drive.status()
-            if not (st.ready and st.referenced) or st.error:
-                log.debug(
-                    "track %d: ready=%s referenced=%s error=%s; refusing",
-                    track,
-                    st.ready,
-                    st.referenced,
-                    st.error,
-                )
-                raise DumpStopped(
-                    f"before track {track}: drive not ready+referenced ({st}); "
-                    "Logical Forward would be refused (Rev J error 19)"
-                )
-            log.info(f"track {track:2d}: winding to its start...")
-            t_wind = time.monotonic()
-            wind_to_track_start(drive, track)
-            log.info(f"track {track:2d}: wound to its start in {time.monotonic() - t_wind:.1f}s")
-            log.debug("track %d: seeking head", track)
-            drive.command(commands.SEEK_HEAD_TO_TRACK, arg=track)
-
             path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
-            hdr = replace(
-                template,
-                track=track,
-                direction=Direction.for_track(track),
-                utc=datetime.now(UTC).isoformat(timespec="seconds"),
-                drive_status=st.raw,
-            )
-            log.info(f"track {track:2d}: capturing -> {path}")
-            t0 = time.monotonic()
-            cap = link.capture(
-                commands.LOGICAL_FORWARD.code,
-                StopCond(byte_budget=0),  # the tape ends the pass, not a budget
-                rate=hdr.rate_kbps,
-                tpt=track,
-                direction=track & 1,
-                pass_id=hdr.pass_id,
-            )
-            nbytes = 0
-            # Logical Forward ends at EOT, so the length is unknown: count bytes.
-            log.debug("track %d: streaming capture to %s", track, path)
-            with path.open("wb") as f, progress.task(f"track {track:2d}", unit="bytes") as bar:
-                write_preamble(f, hdr)
-                for chunk in cap.chunks():
-                    f.write(chunk)
-                    nbytes += len(chunk)
-                    bar.advance(len(chunk))
-            log.debug("track %d: capture done, %d bytes; reading flux status", track, nbytes)
-            flux_ack = link.flux_status()
-            wall = time.monotonic() - t0
-
-            log.debug("track %d: flux status %d; waiting for drive Ready", track, flux_ack)
-            st = drive.wait_ready(30)
-            err = drive.last_error.code if (st.error and drive.last_error) else None
-
-            log.info(f"track {track:2d}: {nbytes / 1e6:.1f} MB in {wall:.0f}s; checking...")
-            hdr_read, flux_at = read_header(path)
-            ps = gwstream.parse(path.read_bytes()[flux_at:])
-            segments_at = segment_pulses(ps.index_ticks, ps.sample_clock_hz)
-            res = TrackResult(
-                track=track,
-                path=str(path),
-                bytes=nbytes,
-                seconds=round(wall, 1),
-                end_reason=EndReason(ps.end.reason).name if ps.end else "none",
-                verified=ps.verified,
-                tape_seconds=round(ps.duration_s, 1),
-                index_pulses=len(segments_at),
-                missing_est=missing_segments(segments_at),
-                status_after=st.raw,
-                error_after=err,
-            )
-            summary = f"{res.index_pulses} segments by INDEX, {res.missing_est} missed in gaps"
-            if check:
-                log.info(f"track {track:2d}: decoding (--check)...")
-                sectors = mfm.recover_sectors_from_flux(
-                    ps.intervals, ps.sample_clock_hz, hdr_read.rate_kbps
-                )
-                res.sectors = len(sectors)
-                res.good = sum(1 for s in sectors if s.id_crc_ok and s.data_crc_ok)
-                res.segments = len({coord_to_seg(s.fsd, s.ftk, s.fsc) for s in sectors})
-                summary += f"; {res.good}/{res.sectors} sectors good across {res.segments} segments"
             best_index = max((r.index_pulses for r in results), default=0)
+            res, flux_ack = read_track(
+                partial(
+                    _capture_pass, drive, track, template=template, progress=progress, check=check
+                ),
+                track,
+                path,
+                retries=retries,
+                best_index=best_index,
+            )
             results.append(res)
             log.debug("track %d: appending result to %s", track, out_dir / "dump.jsonl")
             with (out_dir / "dump.jsonl").open("a") as f:
                 f.write(json.dumps(asdict(res)) + "\n")
-            log.info(
-                f"track {track:2d}: END {res.end_reason}, {res.tape_seconds}s of tape, {summary}"
-                + (f", error {err} {error_name(err)}" if err else "")
-            )
             reason = check_pass(res, best_index, flux_ack)
             if reason is not None:
                 raise DumpStopped(f"track {track}: {reason}")
+            still = pass_failure(res, flux_ack, best_index)
+            if still is not None:
+                # Under the stop rules but not clean (a few segments missed
+                # inside): carry on with it, as a dump without retries would.
+                log.warning(
+                    f"track {track:2d}: carrying on with a pass that has {still}"
+                    + ("; retries spent" if retries else "; --retries would re-read it")
+                )
             overall.advance()
     return results

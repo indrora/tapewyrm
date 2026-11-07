@@ -42,8 +42,21 @@ def _parse_tracks(spec: str) -> list[int]:
 @click.option(
     "--check", is_flag=True, help="also decode each pass and stop if < 80% of sectors CRC-clean"
 )
+@click.option(
+    "--retries",
+    metavar="N",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help=(
+        "re-read a track up to N more times when its pass failed: the capture raised a "
+        "link or drive error, the pass did not end at EOT, the stream did not verify, "
+        "the drive found fewer segments than the best track so far, or any segment was "
+        "missed inside the pass (missing_est > 0); the best pass is kept"
+    ),
+)
 @click.pass_obj
-def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool) -> None:
+def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool, retries: int) -> None:
     """Capture whole tracks to TWRF files in OUTDIR, one Logical Forward pass each.
 
     TRACKS is a list of tracks and ranges such as 0-12 or 0,2,5-7. Without it,
@@ -54,16 +67,27 @@ def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool) -> None
     After every pass it checks, without decoding, that the pass ended cleanly
     and the drive found as many segments as before, and stops early if the
     tape looks unhealthy. --check also decodes and checks sector CRCs.
+    --retries N re-reads a track whose pass failed those checks (or skipped
+    any segment, or raised) up to N more times first, keeping the best pass;
+    dump.jsonl records every attempt.
     Serpentine order: run tracks in ascending order to avoid rewinds.
     """
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
 
     # Parse TRACKS before touching the drive so a typo fails fast.
     track_list = _parse_tracks(tracks) if tracks is not None else None
-    log.debug("dumping tracks %s to %s (check=%s)", track_list or "all", outdir, check)
+    log.debug(
+        "dumping tracks %s to %s (check=%s, retries=%d)",
+        track_list or "all",
+        outdir,
+        check,
+        retries,
+    )
     with _drive_session(app) as d, app.progress() as prog:
         try:
-            results = dump_tracks(d, outdir, track_list, progress=prog, check=check)
+            results = dump_tracks(
+                d, outdir, track_list, progress=prog, check=check, retries=retries
+            )
         except DumpStopped as exc:
             log.debug("dump stopped: %r", exc)
             raise click.ClickException(f"dump stopped: {exc}") from exc
@@ -73,4 +97,7 @@ def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool) -> None
         good = sum(r.good or 0 for r in results)
         total = sum(r.sectors or 0 for r in results)
         line += f", {good}/{total} sectors CRC-clean"
+    re_read = sum(1 for r in results if r.attempts > 1)
+    if re_read:
+        line += f", {re_read} re-read"
     click.echo(f"{line} -> {outdir}")

@@ -208,6 +208,13 @@ tw --profile colorado --progress dump captures/NAME
 - **`--check`** also decodes each pass (about 20 s more per track) and stops if
   fewer than 80% of its sectors are CRC-clean. Use it on a tape you don't
   trust yet, or on track 0 alone (`tw dump captures/NAME 0`) as a first look.
+- **`--retries N`** reads a track again, up to N more times, when its pass
+  failed (it did not end at EOT, did not verify, found fewer segments than
+  the best track so far, skipped any segment, or raised a link or drive
+  error), before the health checks judge it; the best pass is kept, and
+  `dump.jsonl` says how many passes each track took and why the others were
+  thrown away. Flaky reads are the norm on old drives, so a retry or two is
+  cheap insurance.
 - **How long.** A pass takes as long as the tape takes to run end to end at the
   drive's speed: a couple of minutes per track for a short QIC-80 cartridge, and
   about 9 minutes for a track of a 1,000 ft QIC-3020 cartridge, plus winding.

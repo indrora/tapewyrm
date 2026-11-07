@@ -253,7 +253,7 @@ class Qic117Drive:
             log.debug("report %r (code %d), %d bits", cmd.name, cmd.code, nbits)
         try:
             raw = self.link.command_txn(cmd.code, report_bits=nbits)
-        except _LINK_FATAL:
+        except LINK_FATAL:
             raise
         except LinkError:
             # The drive may well have answered -- just later than the firmware
@@ -285,7 +285,7 @@ class Qic117Drive:
         try:
             for _ in range(REPORT_RESYNC_RNBS):
                 self.link.command_txn(commands.REPORT_NEXT_BIT.code)
-        except _LINK_FATAL:
+        except LINK_FATAL:
             raise
         except LinkError as exc:
             log.debug("resync failed (%s); the original error stands", exc)
@@ -448,7 +448,7 @@ class Qic117Drive:
         self.motor_unit = unit
         try:
             self.link.select(SelectHint(unit=unit, bus="ibmpc", motor=True))
-        except _LINK_FATAL:
+        except LINK_FATAL:
             raise
         except LinkError as exc:
             log.debug("wake: board refused motor on for unit %d (%s); unsupported", unit, exc)
@@ -468,7 +468,7 @@ class Qic117Drive:
         log.debug("release_lines: motor off on unit %d, then deselect", unit)
         try:
             self.link.motor(unit, False)
-        except _LINK_FATAL:
+        except LINK_FATAL:
             raise
         except LinkError as exc:
             # NO_BUS / BAD_UNIT: the motor was never switched on.
@@ -537,8 +537,9 @@ class Qic117Drive:
 #     re-addresses Phantom Select).
 
 # Link failures that mean the *board* is gone or wrong, not that the drive is
-# silent. auto_wake must not paper over these by moving on to the next profile.
-_LINK_FATAL = (LinkClosed, LinkTimeout, LinkVersionError)
+# silent. auto_wake must not paper over these by moving on to the next profile,
+# and `tw dump --retries` must not re-read a track over them (tape/dump.py).
+LINK_FATAL = (LinkClosed, LinkTimeout, LinkVersionError)
 
 #: ftape_report_raw_drive_status: one try plus up to three retries.
 _STATUS_TRIES = 4
@@ -581,7 +582,7 @@ def _ftape_answer(drive: Qic117Drive) -> str | None:
     for attempt in range(1, _STATUS_TRIES + 1):
         try:
             raw = drive.report(commands.REPORT_DRIVE_STATUS, 8)
-        except _LINK_FATAL:
+        except LINK_FATAL:
             raise
         except LinkError as exc:
             log.debug("auto: status try %d/%d failed: %s", attempt, _STATUS_TRIES, exc)
@@ -632,7 +633,7 @@ def auto_wake(link: DeviceLink, candidates: Sequence[DriveProfile]) -> Qic117Dri
         try:
             drive.run_wake_steps()
             why = _ftape_answer(drive)
-        except _LINK_FATAL:
+        except LINK_FATAL:
             log.debug(
                 "auto: link failure while trying %s; not a silent drive, raising", profile.name
             )
