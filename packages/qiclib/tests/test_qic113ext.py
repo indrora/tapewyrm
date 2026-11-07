@@ -4,7 +4,7 @@ import struct
 
 from tapewyrm_archive.twvl import SparseVolume
 
-from qiclib import qic113ext as q
+from qiclib.volume import qic113ext as q
 
 
 def _dd(ddid: int, area: int, st: bytes = b"", name: str = "") -> bytes:

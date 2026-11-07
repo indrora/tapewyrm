@@ -7,7 +7,7 @@ directory header, a data chunk or a move up the tree, with the catalog
 Dmitry Brant's reverse-engineering in QICStreamReader's
 ``qicstreamv2/Program.cs`` (Apache-2.0; read, never depended on). No tape
 on the bench carries it, so the profile that names this parser
-(``profiles/volume/qicstream-v2.toml``) is ``untested`` and the synthetic
+(``volume/profiles/qicstream-v2.toml``) is ``untested`` and the synthetic
 volumes of :func:`qiclib.testing.builders.build_fset_volume` are the only
 ones it has met. Line numbers below are ``Program.cs``'s.
 
@@ -53,7 +53,7 @@ prefix, except that it calls the size 64-bit where the code reads 32. The
 code is what extracted real tapes, so this parser follows the code; bytes
 12-21 of the struct are not read.
 
-What this parser makes of it: a :class:`~qiclib.fileset.entry.VolumeEntry`
+What this parser makes of it: a :class:`~qiclib.volume.fileset.entry.VolumeEntry`
 per directory header (code 6 in the contents region, its path from the
 push/pop stack) and per file header (code 5), the file's ``data_offset``
 the first byte of its first chunk and its ``size`` the header's. Chunks
@@ -65,7 +65,7 @@ stream ends (every push popped, no pop past the root). A length that runs
 past the volume -- the label, the drive name, a ``structLen``, a chunk
 prefix -- raises, so the probe is fatal: a length field pointing past the
 buffer is the classic sign of the wrong layout, exactly what
-:meth:`~qiclib.fileset.base.FileSetParser.probe` turns into ``fatal``. A
+:meth:`~qiclib.volume.fileset.base.FileSetParser.probe` turns into ``fatal``. A
 chunk whose *bytes* are cut off by the end of the volume keeps what is
 there and counts the rest missing, since that is what a tape whose last
 segments were lost looks like.
@@ -83,7 +83,7 @@ contents region has holes could fill its listing from there, raising
 ``directory-reconstructed``. TODO: a file above 64 KiB is several chunks
 with 4-byte chunk prefixes between them, which the contiguous
 ``data_offset``/``size`` read in ``qicsilver.entries.entry_data`` cannot
-follow; :class:`~qiclib.fileset.entry.VolumeEntry` needs an extent list
+follow; :class:`~qiclib.volume.fileset.entry.VolumeEntry` needs an extent list
 first (its own TODO), and until then only single-chunk files tar right.
 """
 
@@ -98,11 +98,11 @@ from typing import Any
 
 from tapewyrm_archive.twvl import Volume
 
-from qiclib.fileset.base import FileSetParser, Reading, register
-from qiclib.fileset.common import volume_name
-from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
-from qiclib.verdict import Check, VolumeWarning
-from qiclib.volume import VtblEntry
+from qiclib.volume.fileset.base import FileSetParser, Reading, register
+from qiclib.volume.fileset.common import volume_name
+from qiclib.volume.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import Check, VolumeWarning
 
 log = logging.getLogger(__name__)
 

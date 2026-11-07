@@ -8,8 +8,11 @@ meanings per QIC-80-MC Rev N (docs/qic-standards/qic80n.pdf) sections 7.1
 and 8.
 """
 
+from tapewyrm_archive.qic80date import decode_short_date
+
+from qiclib.header import _parse_bsm, parse_header
 from qiclib.testing.builders import make_segment_from_sectors
-from qiclib.volume import _parse_bsm, _parse_vtbl_entry, decode_short_date, parse_header
+from qiclib.volume.table import _parse_vtbl_entry
 
 # Header segment, sector 0, first 160 bytes (the remaining 864 bytes are zero).
 HEADER = bytes.fromhex(
@@ -65,8 +68,8 @@ def test_fixed_format_bsm_is_a_per_segment_bitmap_at_2048():
 
 
 def test_apply_bsm_marks_excluded_slots():
+    from qiclib.header import BadSectorMap, apply_bsm
     from qiclib.types import Segment
-    from qiclib.volume import BadSectorMap, apply_bsm
 
     segs = {(0, 129): Segment(tpt=0, tps=129, seg=129), (0, 5): Segment(tpt=0, tps=5, seg=5)}
     assert apply_bsm(segs, BadSectorMap(bad_lsns={129 * 32 + 11})) == 1

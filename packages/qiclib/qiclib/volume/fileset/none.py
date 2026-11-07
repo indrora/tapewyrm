@@ -18,9 +18,9 @@ from typing import Any
 
 from tapewyrm_archive.twvl import Volume
 
-from qiclib.fileset.base import NONE, FileSetParser, Reading, register
-from qiclib.verdict import Probe, VolumeWarning
-from qiclib.volume import VtblEntry
+from qiclib.volume.fileset.base import NONE, FileSetParser, Reading, register
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import Probe, VolumeWarning
 
 log = logging.getLogger(__name__)
 

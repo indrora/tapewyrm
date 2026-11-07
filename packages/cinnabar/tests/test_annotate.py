@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import struct
 
-from qiclib import volume as volume_mod
+from qiclib import header as qiclib_header
 from qiclib.testing.builders import build_format_parameter_record, build_vtbl_entry
+from qiclib.volume import table as qiclib_table
 from tapewyrm_archive.twti import SegmentEntry, SegmentState
 
 from cinnabar.annotate import header as header_mod
@@ -27,7 +28,9 @@ def test_header_spans_cover_fpr_fields_and_bsm():
     assert labels["55 AA 55 AA"].sublabel == "55 aa 55 aa"
     assert dict(labels["seg/trk"].detail)["value"] == "207"
     bsm = spans[1]
-    assert bsm.start == (volume_mod.BSM_OFFSET if data[4] == 4 else volume_mod.FIXED_BSM_OFFSET)
+    assert bsm.start == (
+        qiclib_header.BSM_OFFSET if data[4] == 4 else qiclib_header.FIXED_BSM_OFFSET
+    )
 
 
 def test_logical_families_match_the_annotators_rows():
@@ -66,7 +69,7 @@ def test_vtbl_spans_show_entries_and_the_terminator():
     e1 = build_vtbl_entry(start_seg=3, end_seg=10, description="FIRST", flags=0x20)
     e2 = build_vtbl_entry(start_seg=11, end_seg=12, description="SECOND", compressed=True)
     data = (e1 + e2).ljust(1024, b"\x00")
-    entries = volume_mod.parse_volume_table_data(data)
+    entries = qiclib_table.parse_volume_table_data(data)
     (table,) = volume_ann.vtbl_spans(data, entries)
     assert table.sublabel == "2 entries"
     kids = table.children
@@ -82,7 +85,7 @@ def test_vtbl_spans_show_entries_and_the_terminator():
 
 def test_basic_volume_spans_directory_first():
     stream = basic_volume_stream()
-    entry = volume_mod.parse_vtbl_base(build_vtbl_entry(start_seg=2, end_seg=2))
+    entry = qiclib_table.parse_vtbl_base(build_vtbl_entry(start_seg=2, end_seg=2))
     spans = volume_ann.volume_spans(stream, entry)
     assert [s.label for s in spans] == ["Directory Section", "Data Section"]
     directory, data = spans
@@ -99,7 +102,7 @@ def test_basic_volume_spans_directory_first():
 
 
 def test_compressed_volume_has_no_stream_spans_but_extents_per_segment():
-    entry = volume_mod.parse_vtbl_base(build_vtbl_entry(start_seg=2, end_seg=2, compressed=True))
+    entry = qiclib_table.parse_vtbl_base(build_vtbl_entry(start_seg=2, end_seg=2, compressed=True))
     assert volume_ann.volume_spans(b"\x00" * 100, entry) == []
     # An extent: 8-byte offset, a 100-byte compressed frame, a 50-byte raw frame, null fill.
     seg = bytearray(29_696)

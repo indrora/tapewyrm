@@ -184,7 +184,7 @@ def _compressed_image(tmp_path: Path) -> Path:
     """An image whose volume is QIC-122 extents of *raw* frames (no compressor needed)."""
     import struct
 
-    from qiclib import volume as volume_mod
+    from qiclib import header as qiclib_header
     from qiclib.build import build_image
     from qiclib.testing.builders import (
         build_header_segment,
@@ -199,7 +199,7 @@ def _compressed_image(tmp_path: Path) -> Path:
 
     stream = basic_volume_stream()
     header = build_header_segment(0)
-    vtbl_at = volume_mod.parse_header(header)[0].first_data_seg or 1
+    vtbl_at = qiclib_header.parse_header(header)[0].first_data_seg or 1
     # Two extents: the stream split in half, each a raw frame at its offset.
     half = len(stream) // 2
     segs = []

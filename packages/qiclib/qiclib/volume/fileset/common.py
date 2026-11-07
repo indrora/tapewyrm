@@ -7,7 +7,7 @@ TWVL header, never from the raw VTBL record (TWS-3 section 6.2, rule 9):
 through the volume profile that fits the tape, while bytes 57-127 of the raw
 record mean different things to different backup programs (an MTN tape
 keeps part of its label where Rev N keeps the data section size).
-:func:`header_vtbl` builds the one :class:`~qiclib.volume.VtblEntry` every
+:func:`header_vtbl` builds the one :class:`~qiclib.volume.table.VtblEntry` every
 parser uses from those members; only the QIC-113 signature at bytes 58-61,
 which the header does not carry, is read from ``vtbl.raw``.
 
@@ -16,7 +16,7 @@ before trusting a record (names printable, sizes nonzero and in bounds,
 dates that decode) and from what the wrong parser gets wrong (the unk-co
 tape under the Basic-DOS parser: every name empty, every size zero, every
 date in 1970). Every parser's probe runs them; a parser adds its own in
-its :class:`~qiclib.fileset.base.Reading`.
+its :class:`~qiclib.volume.fileset.base.Reading`.
 
 Library code (STYLE.md §2.5): it logs, raises ``ValueError`` /
 ``MalformedFileError``, and prints nothing.
@@ -32,11 +32,12 @@ from pathlib import Path
 from typing import Any
 
 from tapewyrm_archive.errors import MalformedFileError
+from tapewyrm_archive.qic80date import decode_short_date
 from tapewyrm_archive.twvl import Volume
 
-from qiclib.fileset.entry import VolumeEntry
-from qiclib.verdict import Check
-from qiclib.volume import VTBL_ENTRY_LEN, VtblEntry, decode_short_date, parse_vtbl_base
+from qiclib.volume.fileset.entry import VolumeEntry
+from qiclib.volume.table import VTBL_ENTRY_LEN, VtblEntry, parse_vtbl_base
+from qiclib.volume.verdict import Check
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def header_vtbl(volume_path: Path, hdr: dict) -> VtblEntry:
 
     Bytes 0-56 of ``vtbl.raw`` are universal, so they seed the entry
     (:func:`parse_vtbl_base`), and the raw record stays on it for the QIC-113
-    signature check in :func:`qiclib.qic113.is_extended_os`. Everything that
+    signature check in :func:`qiclib.volume.qic113.is_extended_os`. Everything that
     sizes or places a section -- the flag byte, the compression flag and both
     section sizes -- is then taken from the header, which ``qicsilver
     extract`` filled through the right volume profile. Re-decoding bytes 57+

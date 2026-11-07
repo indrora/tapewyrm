@@ -26,7 +26,7 @@ tapewyrm-archive = { path = "../tapewyrm-archive", editable = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# qiclib/profiles/volume/*.toml ship inside the package (hatch includes package data).
+# qiclib/volume/profiles/*.toml ship inside the package (hatch includes package data).
 [tool.hatch.build.targets.wheel]
 packages = ["qiclib"]
 

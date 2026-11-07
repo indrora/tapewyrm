@@ -90,7 +90,7 @@ def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, r
     import json
 
     from qiclib.identify import format_info, identify, to_dict
-    from qiclib.volume_profile import VolumeProfileError
+    from qiclib.volume.profile import VolumeProfileError
 
     log.debug("identifying %s (volume profile %r)", image, volume_profile)
     try:
@@ -150,7 +150,7 @@ def extract(
     """
     from qiclib.extract import extract as do_extract
     from qiclib.extract import parse_volume_list
-    from qiclib.volume_profile import VolumeProfileError
+    from qiclib.volume.profile import VolumeProfileError
 
     app: AppContext = ctx.obj
     # Argument combinations that need no volume table are refused here, before
@@ -224,7 +224,7 @@ def _open_volume(
     (exit 1).
     """
     from qiclib.extract import load_volume
-    from qiclib.volume_profile import VolumeProfileError
+    from qiclib.volume.profile import VolumeProfileError
     from tapewyrm_archive.inspect import sniff
 
     from qicsilver.entries import list_volume, read_volume

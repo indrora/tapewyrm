@@ -13,8 +13,9 @@ from tapewyrm_archive.twvl import Volume
 
 from qiclib import rs
 from qiclib.geometry import FTK_PER_SIDE, seg_to_coord
+from qiclib.header import FPR_SIGNATURE
 from qiclib.types import RawSector, Segment
-from qiclib.volume import FPR_SIGNATURE, SIG_VTBL, VTBL_ENTRY_LEN
+from qiclib.volume.table import SIG_VTBL, VTBL_ENTRY_LEN
 
 SECTOR = 1024
 
@@ -240,7 +241,7 @@ def build_data_entry(dir_entry: bytes, path: str, data: bytes) -> bytes:
 # QIC-113 Extended-OS volume (Rev G section 8)
 # ---------------------------------------------------------------------------
 
-# Data Description IDs and signatures, copied from qiclib.qic113ext so a
+# Data Description IDs and signatures, copied from qiclib.volume.qic113ext so a
 # builder bug cannot hide behind the parser's own constants.
 _DD_DOS, _DD_DATA, _DD_WIN95 = 2, 7, 10
 _EXT_DATA_ENTRY_SIG = b"\xcc\x33\xcc\x33"
@@ -291,7 +292,7 @@ def build_ext_dir_entry(
 class ExtItem:
     """One entry of a synthetic Extended-OS volume, in directory order.
 
-    ``traversal`` uses the qiclib.qic113ext T_* bits; the caller orders the
+    ``traversal`` uses the qiclib.volume.qic113ext T_* bits; the caller orders the
     items one directory level at a time, as QIC-113 Rev G 8.2.1 does.
     """
 
@@ -397,10 +398,10 @@ def build_twvl(
 
 
 # ---------------------------------------------------------------------------
-# QICStream v2 "FSET" volume (qiclib.fileset.qicstream_fset)
+# QICStream v2 "FSET" volume (qiclib.volume.fileset.qicstream_fset)
 # ---------------------------------------------------------------------------
 
-# The control codes and the name offset, copied from qiclib.fileset.qicstream_fset
+# The control codes and the name offset, copied from qiclib.volume.fileset.qicstream_fset
 # so a builder bug cannot hide behind the parser's own constants.
 _FSET_CONTENTS, _FSET_CATALOG, _FSET_UP, _FSET_FILE, _FSET_DIR, _FSET_CHUNK = 1, 2, 3, 5, 6, 9
 _FSET_NAME_OFFSET = 0x16

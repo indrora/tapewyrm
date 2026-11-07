@@ -44,7 +44,7 @@ The catalogue is data, not code: one TOML **cartridge profile** per tape in
 own provenance comment and be named on its own: ``qic-extra``, ``qic80-dc2120``).
 A profile describes the physical cartridge -- standard, tracks, width, length,
 cover capacity, coercivity, model, vendor, label. It is not a *volume profile*
-(:mod:`qiclib.volume_profile`), which describes a backup program's volume-table
+(:mod:`qiclib.volume.profile`), which describes a backup program's volume-table
 layout. The §5.4.1 equations stay here in code, keyed by standard: they are
 spec arithmetic that every cartridge of a standard shares.
 

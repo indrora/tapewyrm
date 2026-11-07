@@ -1,53 +1,16 @@
-"""Header/BSM + volume-table parsing tests (DESIGN.md §7.3)."""
+"""Volume-table parsing tests: VTBL records and volume_streams (DESIGN.md §7.3, §7.5)."""
 
 from __future__ import annotations
 
+from tapewyrm_archive.qic80date import decode_short_date
+
 from qiclib.testing.builders import (
-    build_header_segment,
     build_volume_table_segment,
     build_vtbl_entry,
     make_segment_from_sectors,
     make_short_date,
 )
-from qiclib.volume import (
-    SIG_VTBL,
-    decode_short_date,
-    parse_header,
-    parse_volume_table,
-    volume_streams,
-)
-
-
-def test_parse_format_parameter_record():
-    seg = build_header_segment(
-        segments_per_track=207,
-        tracks=28,
-        max_fsd=5,
-        tape_name="MYBACKUP",
-    )
-    vol, bsm = parse_header(seg)
-    assert vol.valid_signature is True
-    assert vol.format_code == 0x04
-    assert vol.segments_per_track == 207
-    assert vol.tracks == 28
-    assert vol.max_fsd == 5
-    assert vol.max_ftk == 254
-    assert vol.max_fsc == 128
-    assert vol.tape_name == "MYBACKUP"
-
-
-def test_parse_bsm_sectors_and_segments():
-    seg = build_header_segment(
-        bad_lsns=[100, 5000],
-        bad_segments=[3, 10],
-    )
-    _vol, bsm = parse_header(seg)
-    assert bsm.is_sector_bad(100)
-    assert bsm.is_sector_bad(5000)
-    assert bsm.is_segment_bad(3)
-    assert bsm.is_segment_bad(10)
-    assert not bsm.is_sector_bad(101)
-    assert not bsm.is_segment_bad(4)
+from qiclib.volume.table import SIG_VTBL, parse_volume_table, volume_streams
 
 
 def test_short_date_round_trip():
@@ -86,7 +49,7 @@ def test_volume_streams_concatenates_data_sectors():
 
     segs = {(0, 1): vt_seg, (0, 2): seg2, (0, 3): seg3}
 
-    from qiclib.volume import BadSectorMap, VolumeInfo
+    from qiclib.header import BadSectorMap, VolumeInfo
 
     vol = VolumeInfo(
         format_code=4,

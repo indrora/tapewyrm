@@ -1,4 +1,4 @@
-# QICStream v2: the "FSET" control-code stream (qiclib.fileset.qicstream_fset).
+# QICStream v2: the "FSET" control-code stream (qiclib.volume.fileset.qicstream_fset).
 #
 # Written from Dmitry Brant's QICStreamReader (qicstreamv2/Program.cs and the
 # Vtbl2Record in headerview/Program.cs; read, never a dependency). No tape on
@@ -11,7 +11,7 @@
 # survives `[match]` on every tape and is only told apart once qiclib.extract
 # has built the volume and `_probe_with` applies `volume_bytes`: without the
 # magic its probe is fatal and the profile is out. At the table stage it is
-# DEFERRED (qiclib.volume_profile.rank seats it behind every survivor the table
+# DEFERRED (qiclib.volume.profile.rank seats it behind every survivor the table
 # can vouch for): its Rev N reading of a vendor-specific record would otherwise
 # outscore vendor-unknown, which reads nothing past byte 56, and name this
 # software on every tape whose vendor bit is set (seen on the bench 2026-11-07).
@@ -22,7 +22,7 @@
 # UNVERIFIED. QICStreamReader's Vtbl2Record suggests the real record is a
 # different shape altogether: "VTBL" at byte 4 (not 0), a time_t at 0x1C, and a
 # u16-prefixed label at 0x3C followed by a u16-prefixed drive name, the same
-# shape as the volume header. If so, qiclib.volume.parse_volume_table_data
+# shape as the volume header. If so, qiclib.volume.table.parse_volume_table_data
 # (which wants the signature at byte 0) will not even find the record, and a
 # real tape will need its own table reader before this profile is reached. Fix
 # the offsets from the first real record.

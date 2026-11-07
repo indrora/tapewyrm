@@ -4,7 +4,7 @@ What Colorado/HP CMS backup, Windows 95 Backup and Arcada Backup wrote
 (QICStreamReader's qicstream95, qicstream95a, arcadabackup1 and
 arcadabackup2 are four hand-rolled walks of this one layout, differing by a
 byte in the fixed block they assume; the spec-driven
-:mod:`qiclib.qic113ext` reads the sizes instead). The directory section is
+:mod:`qiclib.volume.qic113ext` reads the sizes instead). The directory section is
 last, at ``data_section_size``; each entry's data entry starts at the
 running sum of the data-entry sizes before it, and begins with the
 ``33CC33CC`` signature, which is the check this parser adds: are the
@@ -30,12 +30,12 @@ from typing import Any
 from tapewyrm_archive.qic80date import format_short_date
 from tapewyrm_archive.twvl import Volume
 
-from qiclib import qic113ext as q
-from qiclib.fileset.base import FileSetParser, Reading, register
-from qiclib.fileset.common import directory_offset, volume_name
-from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry, tar_name
-from qiclib.verdict import Check, VolumeWarning
-from qiclib.volume import VtblEntry
+from qiclib.volume import qic113ext as q
+from qiclib.volume.fileset.base import FileSetParser, Reading, register
+from qiclib.volume.fileset.common import directory_offset, volume_name
+from qiclib.volume.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry, tar_name
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import Check, VolumeWarning
 
 log = logging.getLogger(__name__)
 

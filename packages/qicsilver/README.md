@@ -33,7 +33,7 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   profile whose fingerprint (bytes the backup program wrote) matches is
   scored for plausibility, the rest are eliminated. The report names the
   profile, the file-set parser it implies and any **warnings** (`generic`,
-  `low-confidence`, `untested`, ...; `qiclib.verdict`).
+  `low-confidence`, `untested`, ...; `qiclib.volume.verdict`).
   `--volume-profile NAME|PATH` forces one (default `guess`), `--json` prints
   machine-readable JSON, `--raw` adds the raw records and every profile's
   checks, fingerprint items marked. Only the header and the volume table at
@@ -90,7 +90,7 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
 | Module | What |
 |---|---|
 | `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes); `inspect IMAGE` and `tar IMAGE` build one volume in memory with `qiclib.extract.load_volume`, through the one routing (magic, `--volume`, error wording) both commands share. |
-| `qicsilver.entries` | Reads a TWVL volume through the file-set parser its header names (`qiclib.fileset`; every parser probed when it names none) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag, plus the volume's warnings. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
+| `qicsilver.entries` | Reads a TWVL volume through the file-set parser its header names (`qiclib.volume.fileset`; every parser probed when it names none) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag, plus the volume's warnings. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
 | `qicsilver.tar` | Those entries -> pax tar + damage report. |
 | `qicsilver.inspect` | Those entries -> the `inspect` listing, filters and `--json` document. |
 | `qicsilver.console` | Log handler and progress bars: a deliberate copy of `tapewyrm.console`; keep them in step ([STYLE.md](../../STYLE.md) §2). |

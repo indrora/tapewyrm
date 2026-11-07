@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from qiclib.qic113 import extract, is_extended_os
 from qiclib.testing.builders import build_data_entry, build_dir_entry, build_vtbl_entry
-from qiclib.volume import VtblEntry
+from qiclib.volume.qic113 import extract, is_extended_os
+from qiclib.volume.table import VtblEntry
 
 # Attribute bits (DESIGN.md §7.5).
 ATTR_READ = 0x01
@@ -16,7 +16,7 @@ ATTR_LAST_IN_TABLE = 0x80
 
 
 def _vtbl(**kw) -> VtblEntry:
-    from qiclib.volume import _parse_vtbl_entry
+    from qiclib.volume.table import _parse_vtbl_entry
 
     return _parse_vtbl_entry(build_vtbl_entry(start_seg=2, end_seg=3, **kw))
 
@@ -130,7 +130,7 @@ def test_directory_order_follows_the_spec_example_and_skips_empty_dirs():
     LANGUAGE: APL, C, BASIC. Levels are written ROOT, COMEXE, STUFF, LANGUAGE,
     APL, C, BASIC, TEXT; EMPTY has no level (its size is a data header's, not 0).
     """
-    from qiclib.qic113 import _build_tree, _flatten, _parse_directory_section
+    from qiclib.volume.qic113 import _build_tree, _flatten, _parse_directory_section
 
     sub, last = ATTR_READ | ATTR_SUBDIR, ATTR_LAST_IN_DIR
 
@@ -179,7 +179,7 @@ def test_directory_last_finds_segment_aligned_directory(sizes_in_vtbl):
     """
     import struct
 
-    from qiclib.volume_profile import SEGMENT_DATA_BYTES
+    from qiclib.volume.table import SEGMENT_DATA_BYTES
 
     fdata = b"directory-last payload"
     directory = build_dir_entry(
@@ -197,7 +197,7 @@ def test_directory_last_finds_segment_aligned_directory(sizes_in_vtbl):
         + bytes(SEGMENT_DATA_BYTES - len(directory))
     )
 
-    from qiclib.volume import _parse_vtbl_entry
+    from qiclib.volume.table import _parse_vtbl_entry
 
     raw = bytearray(build_vtbl_entry(start_seg=2, end_seg=3, flags=0x20, os_type=1))
     if sizes_in_vtbl:
@@ -220,7 +220,7 @@ def test_extended_os_detection():
     raw = bytearray(build_vtbl_entry(start_seg=2, end_seg=3, flags=0x01, os_type=0))
     struct.pack_into("<H", raw, 58, 113)
     struct.pack_into("<H", raw, 60, 7)
-    from qiclib.volume import _parse_vtbl_entry
+    from qiclib.volume.table import _parse_vtbl_entry
 
     entry = _parse_vtbl_entry(bytes(raw))
     assert is_extended_os(entry) is True

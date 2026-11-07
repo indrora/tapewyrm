@@ -1,7 +1,7 @@
 """`qicsilver extract`: TWTI/TWTZ tape image -> TWVL volume files.
 
 Reads the volume table through a volume profile (:mod:`qiclib.identify`,
-:mod:`qiclib.volume_profile`), then builds each volume's bytes: QIC-122
+:mod:`qiclib.volume.profile`), then builds each volume's bytes: QIC-122
 extents decoded and placed at their uncompressed offsets, or, for an
 uncompressed volume, the segments' data laid end to end. Each volume is
 written with the TWVL format from ``tapewyrm_archive.twvl`` (TWS-3), holes
@@ -33,14 +33,15 @@ from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.provenance import provenance_path
+from tapewyrm_archive.qic80date import decode_short_date
 from tapewyrm_archive.twti import SegmentState, TapeImage
 from tapewyrm_archive.twvl import VERSION, SparseVolume, Volume, find_holes
 
-from qiclib import fileset as fs
-from qiclib import qic122
-from qiclib import volume as volume_mod
-from qiclib import volume_profile as vp
-from qiclib.verdict import Probe, VolumeWarning, warning_names
+from qiclib.volume import fileset as fs
+from qiclib.volume import profile as vp
+from qiclib.volume import qic122
+from qiclib.volume.table import SEGMENT_DATA_BYTES, VtblEntry
+from qiclib.volume.verdict import Probe, VolumeWarning, warning_names
 
 log = logging.getLogger(__name__)
 
@@ -88,11 +89,11 @@ def _segment_bounds(img: TapeImage, start: int, end: int) -> tuple[list[int], in
     return bounds, pos
 
 
-def _vtbl_dict(e: volume_mod.VtblEntry) -> dict:
+def _vtbl_dict(e: VtblEntry) -> dict:
     d = asdict(e)
     d["signature"] = e.signature.decode("ascii", "replace")
     d["raw"] = e.raw.hex()
-    d["date_decoded"] = volume_mod.decode_short_date(e.date)
+    d["date_decoded"] = decode_short_date(e.date)
     return d
 
 
@@ -206,7 +207,7 @@ class VolumeTable:
     """
 
     profile: vp.VolumeProfile | None
-    entries: list[volume_mod.VtblEntry]
+    entries: list[VtblEntry]
     verdict: vp.Verdict | None = None
     alternatives: tuple[vp.Verdict, ...] = ()
 
@@ -310,7 +311,7 @@ def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeT
 def build_volume(
     img: TapeImage,
     k: int,
-    e: volume_mod.VtblEntry,
+    e: VtblEntry,
     *,
     offset_bytes: int,
     frame_size_bytes: int = 2,
@@ -375,7 +376,7 @@ def build_volume(
     # compression ratio -- the same bound volume_profile's size check uses.
     span = max(0, e.end_seg - e.start_seg + 1)
     ratio = 1 if e.compressed is False else vp.MAX_COMPRESSION_RATIO
-    max_size = span * vp.SEGMENT_DATA_BYTES * ratio
+    max_size = span * SEGMENT_DATA_BYTES * ratio
     if size > max_size:
         log.debug(
             "volume %d: %d bytes > %d (%d segments x %d x %d); refusing",
@@ -383,7 +384,7 @@ def build_volume(
             size,
             max_size,
             span,
-            vp.SEGMENT_DATA_BYTES,
+            SEGMENT_DATA_BYTES,
             ratio,
         )
         raise ValueError(
@@ -506,7 +507,7 @@ def build_volume(
             "dir_section_size": e.dir_section_size,
             # Where the directory section starts in the volume bytes,
             # when that is known exactly (uncompressed Directory-Last);
-            # None = consumers locate it (qiclib.qic113 does).
+            # None = consumers locate it (qiclib.volume.qic113 does).
             "directory_offset": directory_offset,
             # The length of the volume bytes, so a reader can tell a
             # truncated file from a short volume (TWS-3 3.1, 6.2).
@@ -555,9 +556,7 @@ def _same_bytes(a: vp.Verdict, b: vp.Verdict, k: int) -> bool:
     )
 
 
-def _probe_with(
-    vol: Volume, vtbl: volume_mod.VtblEntry, verdict: vp.Verdict, k: int, source: Path
-) -> Probe:
+def _probe_with(vol: Volume, vtbl: VtblEntry, verdict: vp.Verdict, k: int, source: Path) -> Probe:
     """One profile's parser probe of volume ``k``, its ``volume_bytes`` gate included.
 
     The gate is the one fingerprint the table could not answer (bytes at
@@ -585,7 +584,7 @@ def stamp_fileset(vol: Volume, table: VolumeTable, k: int, source: Path) -> Prob
     """Probe volume ``k`` with its profile's parser and write the verdict into its header.
 
     The table said who wrote the tape; this says whether the volume's bytes
-    read as that software's catalog (:mod:`qiclib.fileset`). The header
+    read as that software's catalog (:mod:`qiclib.volume.fileset`). The header
     gains ``fileset`` (profile, parser, parameters, status and the probe)
     and ``warnings`` (TWS-3 sections 3.4 and 3.5), which ``qicsilver
     inspect`` and ``tar`` dispatch on, so a volume carries its own reading

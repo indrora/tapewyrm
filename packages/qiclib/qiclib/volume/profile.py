@@ -16,19 +16,19 @@ per layer of a volume read (DESIGN.md §7.8):
 2. **``[extent]``: how do the volume's segments become bytes?** The width
    of each QIC-122 extent's uncompressed-offset field (8 per Rev G, 4 on
    the MTN tapes) and of each frame's size field (2 per Rev G, 4 on
-   NovaStor tapes), see :mod:`qiclib.qic122`.
+   NovaStor tapes), see :mod:`qiclib.volume.qic122`.
 3. **``[fileset]``: which parser reads those bytes, with what parameters?**
-   A :mod:`qiclib.fileset` parser by name: ``qic113-basic``,
+   A :mod:`qiclib.volume.fileset` parser by name: ``qic113-basic``,
    ``qic113-extended``, or ``none`` for a format that is recognised but
    cannot be listed yet.
 
-A profile is a TOML file in ``qiclib/profiles/volume/`` (or any path)::
+A profile is a TOML file in ``qiclib/volume/profiles/`` (or any path)::
 
     name = "cms-qic113"
     description = "..."
     status = "bench"                 # "spec" | "bench" | "untested"
     tapes = ["jc", "unk-co"]         # bench tapes it was confirmed on
-    warnings = []                    # static warnings (qiclib.verdict.VolumeWarning names)
+    warnings = []                    # static warnings (qiclib.volume.verdict.VolumeWarning names)
 
     [match]                          # the fingerprint: a GATE, every item must hold
     vtbl_bytes = [[58, "7100"], [62, "434d53"]]   # [offset, hex] in the VTBL record
@@ -49,7 +49,7 @@ A profile is a TOML file in ``qiclib/profiles/volume/`` (or any path)::
     frame_size_bytes = 2             # 2 | 4; 2 when absent
 
     [fileset]                        # optional; "none" when absent
-    parser = "qic113-extended"       # a qiclib.fileset parser name
+    parser = "qic113-extended"       # a qiclib.volume.fileset parser name
     # any further key is a parameter of that parser
 
 **Fingerprints are gates, not hints.** A ``[match]`` item is something the
@@ -70,14 +70,14 @@ occupies. Each check is +1 / -1 (the gate items +2 / -2, for the ``--raw``
 display); the best total wins. A wrong layout reads neighbouring fields as
 sizes and labels, which fail these checks loudly (the 3M tape under Rev N
 claims a 4.9-billion-GB volume), so the margin is usually wide; when it is
-not (:data:`~qiclib.verdict.CLOSE_MARGIN`), the winner carries
+not (:data:`~qiclib.volume.verdict.CLOSE_MARGIN`), the winner carries
 ``low-confidence``, and two profiles that read the table *identically* make
 it ``vtbl-ambiguous``.
 
 **Then the parser decides.** The table only says who wrote the tape;
 whether the volume's bytes read as that software's catalog is the
 ``[fileset]`` parser's probe, run by ``qiclib.extract`` once the volume is
-built (:mod:`qiclib.fileset`). A profile whose parser fails there loses
+built (:mod:`qiclib.volume.fileset`). A profile whose parser fails there loses
 even after winning here. The reverse holds for a profile whose only
 fingerprint is in the volume bytes (``volume_bytes``: ``qicstream-v2``'s
 ``FSET``): the table cannot vouch for it, so it never wins here, however
@@ -96,7 +96,7 @@ them travel with the verdict into ``identify --json`` and the TWVL header.
 
 Scope: ``qicsilver identify``, ``extract``, ``inspect`` and ``tar`` all read
 volume tables through this (:mod:`qiclib.identify`, :mod:`qiclib.extract`).
-The fixed Rev N / QIC-113 parser in :mod:`qiclib.volume` remains the
+The fixed Rev N / QIC-113 reading in :mod:`qiclib.volume.table` remains the
 reference; tests/test_volume_profile.py checks that the ``qic80-rev-n`` and
 ``qic113-rev-g`` profiles agree with it.
 """
@@ -111,19 +111,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from qiclib import fileset as fs
-from qiclib.verdict import CLOSE_MARGIN, Check, Probe, VolumeWarning, parse_warning
-from qiclib.volume import (
-    SEGMENT_DATA_BYTES,  # noqa: F401  (re-exported: extract and the tests read it here)
-    VolumeInfo,
-    VtblEntry,
-    decode_short_date,
-    parse_vtbl_base,
-)
+from tapewyrm_archive.qic80date import decode_short_date
+
+from qiclib.header import VolumeInfo
+from qiclib.volume import fileset as fs
+from qiclib.volume.table import SEGMENT_DATA_BYTES, VtblEntry, parse_vtbl_base
+from qiclib.volume.verdict import CLOSE_MARGIN, Check, Probe, VolumeWarning, parse_warning
 
 log = logging.getLogger(__name__)
 
-PROFILES_DIR = Path(__file__).resolve().parent / "profiles" / "volume"
+PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 GUESS = "guess"
 
 # The extended VTBL fields a profile may place. Numeric fields are little
@@ -675,7 +672,7 @@ def guess(
     The winner (``[0]``, when it survived) carries the selection's warnings:
     ``vtbl-ambiguous`` when the runner-up read the table identically *and*
     scored the same, ``low-confidence`` when a runner-up that read it
-    differently came within :data:`~qiclib.verdict.CLOSE_MARGIN` points. A
+    differently came within :data:`~qiclib.volume.verdict.CLOSE_MARGIN` points. A
     runner-up with the same reading but a lower score is no competitor: it
     is the winner's own generalisation (``qic113-rev-g`` under
     ``cms-qic113``), beaten by exactly the hint that makes the winner

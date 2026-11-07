@@ -5,8 +5,8 @@ from __future__ import annotations
 import struct
 
 from qiclib.geometry import coord_to_seg, seg_to_coord
+from qiclib.header import FPR_SIGNATURE
 from qiclib.testing.builders import build_data_entry, build_dir_entry, build_vtbl_entry
-from qiclib.volume import FPR_SIGNATURE
 from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
 

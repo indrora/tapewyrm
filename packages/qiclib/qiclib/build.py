@@ -20,9 +20,9 @@ from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twti import SEGMENT_STRIDE, VERSION, SegmentEntry, SegmentState, TapeImage
 
 from qiclib import cartridge as cartridge_mod
+from qiclib import header as header_mod
 from qiclib import merge
 from qiclib import segment as seg_mod
-from qiclib import volume as volume_mod
 from qiclib.geometry import Geometry
 from qiclib.types import RawSector, SegmentStatus
 
@@ -137,7 +137,7 @@ def build_image(
     # The header places right under any geometry; then the header's own
     # geometry places everything else (floppy tracks per side). See
     # volume.locate_header, shared with the pipeline and `qicsilver identify`.
-    located = volume_mod.locate_header(merged, Geometry(tracks=28, segments_per_track=207))
+    located = header_mod.locate_header(merged, Geometry(tracks=28, segments_per_track=207))
     if located is None:
         log.debug(
             "locate_header found no header segment in %d merged sectors; refusing", len(merged)
@@ -254,7 +254,7 @@ def _mb(size: int) -> str:
     return f"{size / 1e6:,.1f} MB"
 
 
-def _log_header(located: volume_mod.LocatedHeader, total: int) -> None:
+def _log_header(located: header_mod.LocatedHeader, total: int) -> None:
     """Say what the header segment told us: who the tape is and its layout.
 
     Split over several lines so each stays readable when rich wraps the log

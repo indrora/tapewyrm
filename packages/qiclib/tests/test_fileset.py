@@ -1,4 +1,4 @@
-"""File-set parsers (qiclib.fileset): the registry, the probes, and the standard checks.
+"""File-set parsers (qiclib.volume.fileset): the registry, the probes, and the standard checks.
 
 The point of a probe is the unk-co tape: a volume the wrong parser reads
 without complaint (186 nameless zero-byte files dated 1970) must score
@@ -14,10 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from qiclib import fileset as fs
-from qiclib import qic113ext as q
-from qiclib.fileset.common import standard_checks
-from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
 from qiclib.testing.builders import (
     FSET_UP,
     ExtItem,
@@ -31,7 +27,11 @@ from qiclib.testing.builders import (
     build_vtbl_entry,
     make_short_date,
 )
-from qiclib.verdict import Probe, VolumeWarning
+from qiclib.volume import fileset as fs
+from qiclib.volume import qic113ext as q
+from qiclib.volume.fileset.common import standard_checks
+from qiclib.volume.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
+from qiclib.volume.verdict import Probe, VolumeWarning
 
 NOW = datetime(2026, 11, 7, tzinfo=UTC)
 MTIME = 914_390_000  # 1998-12-23 05:13:20 UTC

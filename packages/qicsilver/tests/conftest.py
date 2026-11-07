@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 from click.testing import Result
-from qiclib import qic113ext as q
 from qiclib import segment as seg_mod
 from qiclib.testing.builders import (
     ExtItem,
@@ -27,6 +26,7 @@ from qiclib.testing.builders import (
     build_vtbl_entry,
     make_short_date,
 )
+from qiclib.volume import qic113ext as q
 from tapewyrm_archive.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, TapeImage
 
 #: 1998-12-23 05:13:20 UTC, the mtime of every synthetic extended file.

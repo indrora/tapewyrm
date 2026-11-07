@@ -1,7 +1,7 @@
 """One entry of a backup volume, as every file-set parser reports it.
 
 :class:`VolumeEntry` is the record ``qicsilver tar`` writes and ``qicsilver
-inspect`` lists, whichever parser produced it (:mod:`qiclib.fileset`): the
+inspect`` lists, whichever parser produced it (:mod:`qiclib.volume.fileset`): the
 backup's own path and the tar member name, size, modification time, the
 backup's attribute byte and the mode derived from it, where the file's
 bytes start in the volume, how many of them fell in holes, and the backup

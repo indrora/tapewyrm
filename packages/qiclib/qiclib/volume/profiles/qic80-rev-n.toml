@@ -2,7 +2,7 @@
 #
 # The spec layout, for software that follows it to the letter: vendor-specific
 # bit clear, every field at its Rev N offset, and a QIC-113 Basic-DOS file set
-# inside (the volume of a plain DOS backup). qiclib.volume._parse_vtbl_entry
+# inside (the volume of a plain DOS backup). qiclib.volume.table._parse_vtbl_entry
 # (the reference parser) uses the same offsets; tests/test_volume_profile.py
 # keeps the two in step.
 #

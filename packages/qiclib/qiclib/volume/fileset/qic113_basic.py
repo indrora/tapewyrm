@@ -5,8 +5,8 @@ tapes wrote (QICStreamReader's connerbackup and qicstreamv1 readers are
 hand-rolled versions of this layout): a directory section of fixed-portion
 + name entries, and a data section of ``33CC33CC``-signed data entries,
 each a copy of its directory entry plus a path plus the bytes.
-:func:`qiclib.qic113.extract` does the walk; this module turns its file set
-into :class:`~qiclib.fileset.entry.VolumeEntry` records and adds the one
+:func:`qiclib.volume.qic113.extract` does the walk; this module turns its file set
+into :class:`~qiclib.volume.fileset.entry.VolumeEntry` records and adds the one
 check the walk makes possible: were the data entries actually found?
 
 The attribute byte holds the QIC-113 bits (bit 1 "write access allowed",
@@ -15,7 +15,7 @@ tape are entries too, ``lost``, with every byte missing. Tar member names
 are the paths as they are (no drive root).
 
 The 9-byte fixed portion the MTN tapes write (no extra-info byte) is
-detected from the size byte by :func:`qiclib.qic113._parse_dir_entry`, so
+detected from the size byte by :func:`qiclib.volume.qic113._parse_dir_entry`, so
 this parser takes no parameters.
 """
 
@@ -28,12 +28,12 @@ from typing import Any
 
 from tapewyrm_archive.twvl import Volume
 
-from qiclib import qic113
-from qiclib.fileset.base import FileSetParser, Reading, register
-from qiclib.fileset.common import directory_offset
-from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
-from qiclib.verdict import Check
-from qiclib.volume import VtblEntry
+from qiclib.volume import qic113
+from qiclib.volume.fileset.base import FileSetParser, Reading, register
+from qiclib.volume.fileset.common import directory_offset
+from qiclib.volume.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import Check
 
 log = logging.getLogger(__name__)
 
@@ -45,11 +45,11 @@ class Qic113BasicParser(FileSetParser):
     def read(
         self, vol: Volume, vtbl: VtblEntry, source: Path, params: Mapping[str, Any]
     ) -> Reading:
-        """``qiclib.qic113.extract`` lists every file, found or lost.
+        """``qiclib.volume.qic113.extract`` lists every file, found or lost.
 
         A found file's missing bytes come from the volume's hole map (its
         data ``offset`` is into the same byte stream); a lost one is all
-        missing. ``vtbl`` is the header's (:func:`~qiclib.fileset.common.header_vtbl`):
+        missing. ``vtbl`` is the header's (:func:`~qiclib.volume.fileset.common.header_vtbl`):
         its section sizes and compression flag, which place a Directory-Last
         directory when the header's ``directory_offset`` is null, are the
         header's.

@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import logging
 
-from qiclib import merge, qic113
+from qiclib import header as header_mod
+from qiclib import merge
 from qiclib import segment as seg_mod
-from qiclib import volume as volume_mod
 from qiclib.geometry import Geometry, fallback_spt, track_count
 from qiclib.types import FileSet, RawSector, SegmentStatus
+from qiclib.volume import qic113
+from qiclib.volume import table as table_mod
 from tapewyrm_archive.qic117 import TapeStatus
 from tapewyrm_archive.twrf import RawFluxCapture
 from tapewyrm_archive.types import TapeFormat
@@ -91,7 +93,7 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
     #      sector is not part of the codeword (QIC-80-MC Rev N 6.2.5).
     report = RecoveryReport()
     log.debug("locating header segment among %d merged sectors", len(merged))
-    located = volume_mod.locate_header(merged, geom)
+    located = header_mod.locate_header(merged, geom)
     if located is None:
         log.debug("no header segment found in %d sectors; returning empty result", len(merged))
         report.notes.append("no header segment found; cannot reassemble volumes")
@@ -117,7 +119,7 @@ def decode(caps: list[RawFluxCapture]) -> tuple[list[FileSet], RecoveryReport]:
 
     # 5. Per-file-set Volume Data Area byte streams.
     log.debug("assembling volume data streams")
-    streams = volume_mod.volume_streams(segs, vol, bsm)
+    streams = table_mod.volume_streams(segs, vol, bsm)
 
     # 6. QIC-113 extraction per file set.
     filesets: list[FileSet] = []

@@ -7,12 +7,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from qiclib import fileset as fs
-from qiclib import volume as volume_mod
-from qiclib import volume_profile as vp
+from qiclib import header as header_mod
 from qiclib.testing import bench_3m, bench_unk_co
 from qiclib.testing.builders import build_format_parameter_record, build_vtbl_entry
-from qiclib.verdict import VolumeWarning
+from qiclib.volume import fileset as fs
+from qiclib.volume import profile as vp
+from qiclib.volume import table as table_mod
+from qiclib.volume.verdict import VolumeWarning
 from tests.test_volume_bench import HEADER as JC_HEADER
 from tests.test_volume_bench import VTBL as JC_VTBL
 
@@ -20,17 +21,17 @@ NOW = datetime(2026, 11, 7, tzinfo=UTC)
 
 
 def _jc():
-    vol, _ = volume_mod.parse_header_data(JC_HEADER)
+    vol, _ = header_mod.parse_header_data(JC_HEADER)
     return vol, [JC_VTBL]
 
 
 def _3m():
-    vol, _ = volume_mod.parse_header_data(bench_3m.header_data())
+    vol, _ = header_mod.parse_header_data(bench_3m.header_data())
     return vol, [bench_3m.VTBL]
 
 
 def _unk_co():
-    vol, _ = volume_mod.parse_header_data(bench_unk_co.header_data())
+    vol, _ = header_mod.parse_header_data(bench_unk_co.header_data())
     return vol, [bench_unk_co.VTBL]
 
 
@@ -56,7 +57,10 @@ def test_guess_picks_cms_for_the_colorado_tape():
     # specific: a sibling, not a competitor, so no low-confidence.
     assert runner.profile.name == "qic113-rev-g" and best.score > runner.score
     assert best.warnings == set()
-    assert {v.profile.name for v in verdicts if v.eliminated} == {"qic80-rev-n", "mtn"}
+    assert {v.profile.name for v in verdicts if v.eliminated} == {
+        "qic80-rev-n",
+        "mtn",
+    } | _reader_profiles()
 
 
 def test_guess_picks_cms_for_unk_co_without_the_vendor_bit():
@@ -73,7 +77,10 @@ def test_guess_picks_cms_for_unk_co_without_the_vendor_bit():
     # both QIC-113 layouts; the vendor-specific and MTN profiles are out.
     names = [v.profile.name for v in verdicts]
     assert names.index("qic80-rev-n") > names.index("qic113-rev-g")
-    assert {v.profile.name for v in verdicts if v.eliminated} == {"vendor-unknown", "mtn"}
+    assert {v.profile.name for v in verdicts if v.eliminated} == {
+        "vendor-unknown",
+        "mtn",
+    } | _reader_profiles()
 
 
 def test_guess_picks_mtn_for_the_3m_tape():
@@ -90,7 +97,7 @@ def test_guess_picks_mtn_for_the_3m_tape():
         "cms-qic113",
         "qic113-rev-g",
         "vendor-unknown",
-    }
+    } | _reader_profiles()
 
 
 def test_rev_n_reads_garbage_from_the_3m_tape():
@@ -140,7 +147,7 @@ def test_status_and_match_decide_the_static_warnings():
 
 def test_generic_winner_carries_its_warning():
     """Builders' default header is a Rev N tape: rev-n wins on a plain entry, and says it is a default."""
-    vol, _ = volume_mod.parse_header_data(build_format_parameter_record())
+    vol, _ = header_mod.parse_header_data(build_format_parameter_record())
     rec = build_vtbl_entry(start_seg=3, end_seg=40, description="C:", dir_section_size=4096)
     best = vp.guess([rec], vol, now=NOW)[0]
     assert best.profile.name == "qic80-rev-n" and VolumeWarning.GENERIC in best.warnings
@@ -184,7 +191,7 @@ def test_volume_gate_checks_bytes_at_the_start_of_the_volume():
 )
 def test_profiles_agree_with_the_builtin_parser(rec):
     """volume._parse_vtbl_entry is the reference parser; keep the profiles in step with it."""
-    builtin = volume_mod._parse_vtbl_entry(rec)
+    builtin = table_mod._parse_vtbl_entry(rec)
     names = ("cms-qic113", "qic113-rev-g") if builtin.vendor_specific else ("qic80-rev-n",)
     for name in names:
         assert vp.decode_entry(rec, vp.load(name)) == builtin
@@ -197,15 +204,15 @@ def test_vendor_unknown_reads_nothing_past_byte_56():
 
 
 def test_date_before_first_format_fails():
-    vol, _ = volume_mod.parse_header_data(bench_3m.header_data())  # formatted 1994
+    vol, _ = header_mod.parse_header_data(bench_3m.header_data())  # formatted 1994
     old = bytearray(bench_3m.VTBL)
     old[52:56] = (0).to_bytes(4, "little")  # undefined date: no date check at all
     assert all(
-        c.name != "date" for c in vp.entry_checks(volume_mod.parse_vtbl_base(bytes(old)), vol, NOW)
+        c.name != "date" for c in vp.entry_checks(table_mod.parse_vtbl_base(bytes(old)), vol, NOW)
     )
     early = bytearray(bench_3m.VTBL)
     early[52:56] = ((1990 - 1970) << 25).to_bytes(4, "little")
-    checks = vp.entry_checks(volume_mod.parse_vtbl_base(bytes(early)), vol, NOW)
+    checks = vp.entry_checks(table_mod.parse_vtbl_base(bytes(early)), vol, NOW)
     assert [c.ok for c in checks if c.name == "date"] == [False]
 
 
@@ -279,9 +286,11 @@ def test_volume_only_fingerprint_is_deferred_at_the_table_stage():
     reading outscored vendor-unknown, which reads nothing past byte 56, on
     every tape with the vendor bit set.
     """
-    vol, _ = volume_mod.parse_header_data(build_format_parameter_record())
+    vol, _ = header_mod.parse_header_data(build_format_parameter_record())
     assert vp.load("qicstream-v2").deferred
-    assert not any(vp.load(n).deferred for n in vp.builtin_names() if n != "qicstream-v2")
+    deferred = {n for n in vp.builtin_names() if vp.load(n).deferred}
+    assert "qicstream-v2" in deferred
+    assert not deferred & {"qic80-rev-n", "vendor-unknown", "cms-qic113", "qic113-rev-g", "mtn"}
     for flags, winner in ((0x00, "qic80-rev-n"), (0x01, "vendor-unknown")):
         rec = build_vtbl_entry(
             start_seg=3, end_seg=40, description="C:", flags=flags, dir_section_size=4096
@@ -289,5 +298,74 @@ def test_volume_only_fingerprint_is_deferred_at_the_table_stage():
         ranked = vp.guess([rec], vol, now=NOW)
         alive = vp.survivors(ranked)
         assert alive[0].profile.name == winner and alive[0].warnings == {VolumeWarning.GENERIC}
-        assert [v.profile.name for v in alive[1:]] == ["qicstream-v2"]
+        assert {v.profile.name for v in alive[1:]} == deferred
         assert [v.profile.name for v in vp.contenders(ranked)] == [winner]
+
+
+# ---------------------------------------------------------------------------
+# Profiles written from QICStreamReader, not from a tape (status "untested")
+# ---------------------------------------------------------------------------
+
+
+def _reader_profiles() -> set[str]:
+    """The untested built-ins that gate on VTBL bytes.
+
+    Each was written from one of Dmitry Brant's readers, never from a tape of
+    ours, so on every record we have -- the three bench tapes and the
+    builders' synthetic ones -- its fingerprint must fail and the table stage
+    must eliminate it. The bench selection tests above add this set to the
+    profiles they expect eliminated, so a new reader profile cannot change a
+    bench verdict without a test saying so.
+    """
+    return {p.name for p in vp.load_builtin() if p.status == "untested" and p.vtbl_bytes}
+
+
+def test_untested_profiles_earn_their_place():
+    """An untested profile carries a positive fingerprint or a listable parser (DESIGN.md §7.8).
+
+    A fingerprint-less profile whose parser is ``none`` would survive the gate,
+    fail the probe and be pure noise in ``identify --raw``; one with no
+    positive mark would also win by default and carry ``generic`` on top of
+    ``untested``, which is two ways of saying "we guessed".
+    """
+    for profile in vp.load_builtin():
+        if profile.status != "untested":
+            continue
+        assert profile.positive_match or profile.fileset_parser != fs.NONE, profile.name
+        assert VolumeWarning.UNTESTED in profile.static_warnings, profile.name
+        assert VolumeWarning.GENERIC not in profile.static_warnings, profile.name
+
+
+def test_reader_fingerprints_stay_quiet_on_every_known_record():
+    """No bench or synthetic record carries a reader profile's mark, so none of them fires."""
+    plain = header_mod.parse_header_data(build_format_parameter_record())[0]
+    cases = [("jc", *_jc()), ("3m", *_3m()), ("unk-co", *_unk_co())]
+    cases += [
+        (
+            "rev-n",
+            plain,
+            [build_vtbl_entry(start_seg=3, end_seg=40, description="C:", dir_section_size=4096)],
+        ),
+        (
+            "vendor",
+            plain,
+            [build_vtbl_entry(start_seg=3, end_seg=40, description="C:", flags=0x01)],
+        ),
+    ]
+    reader = _reader_profiles()
+    for profile in (p for p in vp.load_builtin() if p.name in reader):
+        for name, vol, records in cases:
+            checks = vp.match_checks(records[0], vol, profile)
+            assert any(not c.ok for c in checks), f"{profile.name} fires on {name}"
+
+
+def test_novastor_is_a_volume_only_profile_with_wide_extents():
+    """novastor (from QICStreamReader): the mark at 0x74 of record 0, 8/4 extent widths, no parser."""
+    profile = vp.load("novastor")
+    assert profile.deferred and profile.status == "untested"
+    assert (profile.extent_offset_bytes, profile.extent_frame_size_bytes) == (8, 4)
+    assert profile.fileset_parser == fs.NONE and not profile.fields
+    head = bytearray(0x80)
+    head[0x74 : 0x74 + 12] = b"<<NoVaStOr>>"
+    assert [c.ok for c in vp.volume_gate(profile, bytes(head))] == [True]
+    assert [c.ok for c in vp.volume_gate(profile, b"\x01\x00\x00\x00FSET" + bytes(0x80))] == [False]

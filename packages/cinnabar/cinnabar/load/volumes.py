@@ -7,7 +7,7 @@ format parameter record and the bad-sector map; the first data segment
 carries the volume table; every other segment belongs to the volume whose
 VTBL range covers it. :class:`Layout` answers "what is segment N" from a
 :class:`qiclib.identify.TapeInfo` and a way to fetch a segment's data, and
-builds each volume's byte stream the way :func:`qiclib.volume.volume_streams`
+builds each volume's byte stream the way :func:`qiclib.volume.table.volume_streams`
 does (data areas end to end, BSM-bad segments skipped, missing ones zero)
 so the volume annotators see the bytes ``qicsilver extract`` would.
 
@@ -26,8 +26,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from qiclib import identify, qic122
-from qiclib.volume import VtblEntry
+from qiclib import identify
+from qiclib.volume import qic122
+from qiclib.volume.table import VtblEntry
 from tapewyrm_archive.twvl import SparseVolume
 
 from cinnabar.annotate import header as header_mod
@@ -108,7 +109,7 @@ class Volume:
         segment is a QIC-122 Compression Extent whose leading field says
         where its bytes go in the uncompressed stream (QIC-113 section 9);
         it is decompressed the way ``qicsilver extract`` does it
-        (:func:`qiclib.qic122.decode_extent`, with the volume profile's
+        (:func:`qiclib.volume.qic122.decode_extent`, with the volume profile's
         offset width), and one that will not decode is a hole.
         """
         out: list[VolumePiece] = []

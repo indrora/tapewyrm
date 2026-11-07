@@ -30,7 +30,7 @@ APPENDIX_A = bytes.fromhex("20 90 88 38 1C 21 E2 5C 15 80")
 
 
 def _mtn_entry(*, start_seg: int, end_seg: int, dir_size: int, data_size: int) -> bytes:
-    """A VTBL record laid out the way profiles/volume/mtn.toml describes."""
+    """A VTBL record laid out the way volume/profiles/mtn.toml describes."""
     rec = bytearray(build_vtbl_entry(start_seg=start_seg, end_seg=end_seg, description=""))
     rec[58:61] = b"MTN"
     struct.pack_into("<I", rec, 92, dir_size)

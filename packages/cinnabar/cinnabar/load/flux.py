@@ -41,8 +41,8 @@ from pathlib import Path
 
 import numpy as np
 from qiclib import geometry as geometry_mod
+from qiclib import header as header_mod
 from qiclib import identify
-from qiclib import volume as volume_mod
 from qiclib.types import RawSector
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twrf import header_to_dict, parse_body, read_header
@@ -92,7 +92,7 @@ def _may_hold_header(sectors: Sequence[RawSector]) -> bool:
     for sec in sectors:
         if not sec.id_crc_ok:
             continue
-        if sec.data[:4] == volume_mod.FPR_SIGNATURE:
+        if sec.data[:4] == header_mod.FPR_SIGNATURE:
             return True
         seg = geometry_mod.coord_to_seg(sec.fsd, sec.ftk, sec.fsc, geometry_mod.FTK_PER_SIDE)
         if seg < HEADER_CANDIDATE_SEGMENTS:

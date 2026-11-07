@@ -15,7 +15,7 @@ Basic-DOS (§7) is implemented fully:
 Extended-OS (§8) is implemented to the framing level: ``0x33CC33CC`` + directory
 entry + path + Data Areas (``0x66996699`` + 2-byte Data-Area-ID; ID 7 = primary
 file bytes). Per-OS attribute structs are summarized / ``TODO``.
-(``qicsilver tar`` reads extended volumes with :mod:`qiclib.qic113ext`
+(``qicsilver tar`` reads extended volumes with :mod:`qiclib.volume.qic113ext`
 instead; this framing-level walk remains for :func:`extract`'s callers.)
 
 The multi-cartridge ``LTLT`` Link Sub-Section is recognized and skipped.
@@ -28,8 +28,10 @@ import logging
 import struct
 from dataclasses import dataclass, field
 
+from tapewyrm_archive.qic80date import decode_short_date
+
 from qiclib.types import FileEntry, FileSet
-from qiclib.volume import SEGMENT_DATA_BYTES, VtblEntry, decode_short_date
+from qiclib.volume.table import SEGMENT_DATA_BYTES, VtblEntry
 
 log = logging.getLogger(__name__)
 
@@ -500,7 +502,7 @@ def is_extended_os(vtbl: VtblEntry) -> bool:
     QIC-80 volume with an odd byte 125. This used to have a separate
     byte-125 branch returning False -- dead code, now just logged.
 
-    This is the kind of gate :mod:`qiclib.fileset` replaces with a probe:
+    This is the kind of gate :mod:`qiclib.volume.fileset` replaces with a probe:
     the parsers try the bytes and score the result, so a tape that lies
     here still lists. It stays for :func:`extract`'s own framing walk and
     for the viewer's annotations.

@@ -1,0 +1,61 @@
+# NovaStor backup: QIC-113-style QIC-122 extents with wide fields, records marked "<<NoVaStOr>>".
+#
+# Written from Dmitry Brant's QICStreamReader (novastor/Program.cs, read on
+# 2026-11-07; never a dependency, no code copied). No tape on the bench
+# carries it, so the profile is untested and every volume it reads warns
+# `untested` until one does. What the reader's code says, and what this
+# profile has to assume, are kept apart below.
+#
+# READ FROM THE CODE:
+#   * The stream is "the same QIC 113 encoding/compression that is used in
+#     other QIC formats", but each extent's uncompressed offset is 64 bits and
+#     each frame's size field 32 bits (Program.cs lines 15-18; the author
+#     expands it with `--absposwidth 8 --framesizewidth 4`, line 22). Hence
+#     [extent] offset_bytes = 8, frame_size_bytes = 4, the one place the
+#     volume profile schema already allowed for "NovaStor tapes".
+#   * After expansion, every file or directory is a 0x80-byte header on a
+#     0x400-byte boundary (lines 32-36) carrying the 12-byte mark
+#     "<<NoVaStOr>>" at header offset 0x74 (lines 57, 208-211). The header:
+#     u32 size at 0 (0 for a directory), DOS create date/time at 4/6, modify
+#     date/time at 8/0xA, attributes at 0xD (0x10 = directory), a NUL-padded
+#     0x52-byte name from 0xE (0xFF there means the name follows the header
+#     in its own 0x100-byte block), a "backup date (?)" at 0x64. Contents
+#     follow the header; the next header sits on the next 0x400 boundary.
+#   * The image the reader expects starts with a 0x400-byte ANSI-labelled
+#     block ("HDR1", the mark, "AnsiToOem"; lines 24-26), before the
+#     compressed stream. That block is a tape-label record, not QIC-80 data.
+#
+# INFERRED (the assumptions a real tape must confirm):
+#   * That the first record of the expanded stream sits at volume byte 0, so
+#     the mark lands at volume byte 0x74 = 116: the [match] below. The reader
+#     expands from image byte 0x400 (the label block skipped) and places
+#     headers on 0x400 boundaries from there, which puts record 0 at offset
+#     0; if a QIC-80 cartridge written by this software carries anything
+#     before it, the gate misses and the tape falls to vendor-unknown.
+#   * That such a tape has a VTBL at all. The reader never looks at one; its
+#     image is SCSI-shaped. Nothing past byte 56 is read here ([vtbl] empty)
+#     for the same reason vendor-unknown reads nothing: no layout is known.
+#   * No parser: the record layout above is enough to write one
+#     (`novastor` in qiclib.volume.fileset would walk 0x400-aligned headers,
+#     check the mark at 0x74, and follow the 0xFF long-name rule), but with
+#     no tape to probe it against the honest answer is `none`: identify names
+#     the writer, extract still yields a TWVL, and the volume carries
+#     `no-parser`.
+#
+# Like qicstream-v2 this profile's only fingerprint is in the volume bytes,
+# so it is DEFERRED at the table stage (qiclib.volume.profile.rank) and only
+# reached once qiclib.extract has built the volume and applied `volume_bytes`.
+
+name = "novastor"
+description = "NovaStor backup: '<<NoVaStOr>>' at byte 0x74 of each 0x400-aligned record header; 8-byte extent offsets, 4-byte frame sizes"
+status = "untested"
+
+[match]
+volume_bytes = [[116, "3c3c4e6f566153744f723e3e"]]
+
+[extent]
+offset_bytes = 8
+frame_size_bytes = 4
+
+[fileset]
+parser = "none"

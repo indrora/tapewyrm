@@ -21,7 +21,7 @@ from qiclib.testing.builders import (
     with_parity,
 )
 from qiclib.types import RawSector, Segment
-from qiclib.volume import SIG_EXVT, VTBL_ENTRY_LEN
+from qiclib.volume.table import SIG_EXVT, VTBL_ENTRY_LEN
 from tests.test_volume_bench import HEADER as BENCH_HEADER
 from tests.test_volume_bench import VTBL as BENCH_VTBL
 

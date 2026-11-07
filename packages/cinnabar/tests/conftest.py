@@ -16,8 +16,8 @@ import struct
 from pathlib import Path
 
 import pytest
+from qiclib import header as header_mod
 from qiclib import qic100
-from qiclib import volume as volume_mod
 from qiclib.build import build_image
 from qiclib.testing.builders import (
     build_data_entry,
@@ -58,7 +58,7 @@ def basic_volume_stream() -> bytes:
 def tape_segments():
     """(header, vtbl, volume) segments of the synthetic tape, as qiclib Segments."""
     header = build_header_segment(0)
-    vol_info, _bsm = volume_mod.parse_header(header)
+    vol_info, _bsm = header_mod.parse_header(header)
     vtbl_at = vol_info.first_data_seg or 1
     entry = build_vtbl_entry(start_seg=vtbl_at + 1, end_seg=vtbl_at + 1, description="TEST BACKUP")
     vtbl = build_volume_table_segment(vtbl_at, [entry])

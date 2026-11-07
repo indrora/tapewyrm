@@ -1,8 +1,8 @@
 """Spans for the header segment: the format parameter record and the bad-sector map.
 
 Offsets are those of QIC-80-MC Rev N section 7.1 (docs/qic-standards/qic80n.pdf),
-the same ones :class:`qiclib.volume.VolumeInfo` documents field by field, and
-of the bad-sector map in DESIGN.md 7.3 / :func:`qiclib.volume._parse_bsm`.
+the same ones :class:`qiclib.header.VolumeInfo` documents field by field, and
+of the bad-sector map in DESIGN.md 7.3 / :func:`qiclib.header._parse_bsm`.
 Positions are byte offsets into the segment's data (sector 0 at 0).
 
 Three levels come out, which is what the sketch's stacked "Fields" lanes
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import struct
 
-from qiclib import volume as volume_mod
+from qiclib import header as header_mod
 from tapewyrm_archive.qic80date import decode_short_date
 
 from cinnabar.model import Shape, Span, assign_rows
@@ -115,11 +115,11 @@ def bsm_spans(data: bytes, format_code: int) -> Span:
     entries from offset 256, high bit of the third byte flagging a whole bad
     segment, ``00 00 00`` ending the list. The fixed formats (codes 2, 3, 5)
     keep one 32-bit mask per segment from offset 2048. Both layouts per
-    :func:`qiclib.volume._parse_bsm`.
+    :func:`qiclib.header._parse_bsm`.
     """
     entries: list[Span] = []
     if format_code != 4:
-        off = volume_mod.FIXED_BSM_OFFSET
+        off = header_mod.FIXED_BSM_OFFSET
         end = min(len(data), 29 * 1024)
         seg_abs = 0
         while off + 4 <= end:
@@ -140,7 +140,7 @@ def bsm_spans(data: bytes, format_code: int) -> Span:
             off += 4
             seg_abs += 1
         return Span(
-            volume_mod.FIXED_BSM_OFFSET,
+            header_mod.FIXED_BSM_OFFSET,
             end,
             "Bad Sector Map",
             f"{len(entries)} entries, fixed layout",
@@ -150,7 +150,7 @@ def bsm_spans(data: bytes, format_code: int) -> Span:
             tuple(entries),
         )
 
-    off = volume_mod.BSM_OFFSET
+    off = header_mod.BSM_OFFSET
     while off + 3 <= len(data):
         b0, b1, b2 = data[off], data[off + 1], data[off + 2]
         if b0 == 0 and b1 == 0 and b2 == 0:
@@ -172,8 +172,8 @@ def bsm_spans(data: bytes, format_code: int) -> Span:
         )
         off += 3
     return Span(
-        volume_mod.BSM_OFFSET,
-        max(off, volume_mod.BSM_OFFSET + 3),
+        header_mod.BSM_OFFSET,
+        max(off, header_mod.BSM_OFFSET + 3),
         "Bad Sector Map",
         f"{max(len(entries) - 1, 0)} entries",
         "bsm",

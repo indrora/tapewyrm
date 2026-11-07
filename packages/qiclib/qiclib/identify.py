@@ -22,7 +22,7 @@ On top of the raw fields it makes two guesses:
   * **the cartridge** (:mod:`qiclib.cartridge`) from tracks and
     segments per track, cross-checked against what the drive itself reported
     when the source is a TWRF capture;
-  * **the volume profile** (:mod:`qiclib.volume_profile`): which software's
+  * **the volume profile** (:mod:`qiclib.volume.profile`): which software's
     volume-table layout fits, since only bytes 0-56 of an entry are universal.
 
 Sources, all offline:
@@ -53,14 +53,16 @@ from tapewyrm_archive.qic117 import TAPE_TYPES, DriveConfig, TapeStatus, decode_
 from tapewyrm_archive.types import TapeFormat
 
 from qiclib import cartridge
+from qiclib import header as header_mod
 from qiclib import segment as seg_mod
-from qiclib import volume as volume_mod
-from qiclib import volume_profile as vp
 from qiclib.build import reporting_drive
 from qiclib.geometry import Geometry
+from qiclib.header import BadSectorMap, VolumeInfo
 from qiclib.types import RawSector, SegmentStatus
-from qiclib.verdict import warning_names
-from qiclib.volume import BadSectorMap, VolumeInfo, VtblEntry
+from qiclib.volume import profile as vp
+from qiclib.volume import table as table_mod
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import warning_names
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +72,7 @@ log = logging.getLogger(__name__)
 # (qiclib.build.build_image uses the same default).
 FALLBACK_GEOMETRY = Geometry(tracks=28, segments_per_track=207)
 
-DATA_BYTES_PER_SEGMENT = volume_mod.DATA_SECTORS_PER_SEGMENT * 1024
+DATA_BYTES_PER_SEGMENT = table_mod.DATA_SECTORS_PER_SEGMENT * 1024
 FPR_LEN = 256  # the format parameter record is bytes 0-255 of sector 0 (Rev N §7.1)
 
 # Bytes of the format parameter record that QIC-80-MC Rev N §7.1 calls
@@ -117,7 +119,7 @@ class TapeInfo:
     first (the survivors of each profile's fingerprint gate by score, then the
     eliminated); with ``--volume-profile NAME`` it holds just that one.
     ``volumes`` is the chosen reading and ``warnings`` its caveats
-    (:class:`~qiclib.verdict.VolumeWarning`). The file-set parser is named
+    (:class:`~qiclib.volume.verdict.VolumeWarning`). The file-set parser is named
     here but not run: a probe needs the volume's segments, and ``identify``
     reads only the header and the table (``qiclib.extract`` probes).
     """
@@ -153,7 +155,7 @@ class TapeInfo:
 
     @property
     def fileset_parser(self) -> str | None:
-        """The file-set parser the chosen profile names (``qiclib.fileset``)."""
+        """The file-set parser the chosen profile names (``qiclib.volume.fileset``)."""
         return self.verdicts[0].profile.fileset_parser if self.verdicts else None
 
 
@@ -199,7 +201,7 @@ def from_sectors(
     without it there is no geometry, no bad-sector map and no volume table.
     """
     log.debug("locating the header segment under fallback geometry %s", FALLBACK_GEOMETRY)
-    located = volume_mod.locate_header(sectors, FALLBACK_GEOMETRY)
+    located = header_mod.locate_header(sectors, FALLBACK_GEOMETRY)
     if located is None:
         log.debug("locate_header found no header segment; refusing")
         raise ValueError("no header segment found: the capture must include the start of track 0")
@@ -222,7 +224,7 @@ def from_sectors(
         # The header should always name the first data segment; if it doesn't,
         # or that segment never made it into the capture, fall back to looking
         # for a raw VTBL signature anywhere we have data.
-        vtbl_seg = volume_mod.find_volume_table_segment(located.segs)
+        vtbl_seg = table_mod.find_volume_table_segment(located.segs)
         if vtbl_seg is not None and vol.first_data_seg:
             notes.append(
                 f"volume table found by signature in segment {vtbl_seg.seg}, "
@@ -305,7 +307,7 @@ def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeIn
         raise ValueError("neither copy of the header segment was recovered in this image")
     log.debug("parsing header segment %d", header_seg)
     header_data = img.segment(header_seg)
-    vol, bsm = volume_mod.parse_header_data(header_data)
+    vol, bsm = header_mod.parse_header_data(header_data)
     if not vol.valid_signature:
         log.debug(
             "segment %d starts %r, not the FPR signature; refusing", header_seg, header_data[:4]
@@ -364,7 +366,7 @@ def _assemble(
     drive: dict | None,
 ) -> TapeInfo:
     """The source-independent half: pick a profile, guess the cartridge, gather notes."""
-    records = volume_mod.vtbl_records(vtbl_data) if vtbl_data is not None else []
+    records = table_mod.vtbl_records(vtbl_data) if vtbl_data is not None else []
     log.debug("volume table: %d records", len(records))
     if vtbl_data is not None:
         notes += _extension_notes(vtbl_data)
@@ -453,7 +455,7 @@ def _standard_hint(vol: VolumeInfo, drive: dict | None) -> tuple[str | None, str
 def _header_raw(seg) -> bytes:
     """The header segment's format parameter record (RS-corrected if needed)."""
     data = seg_mod.segment_data(seg)
-    if data[:4] != volume_mod.FPR_SIGNATURE:
+    if data[:4] != header_mod.FPR_SIGNATURE:
         log.debug(
             "header segment %d raw data starts %r, not the FPR signature; RS-correcting",
             seg.seg,
@@ -493,12 +495,12 @@ def _extension_notes(data: bytes) -> list[str]:
     list printed here is incomplete.
     """
     notes: list[str] = []
-    for off in range(0, len(data) - volume_mod.VTBL_ENTRY_LEN + 1, volume_mod.VTBL_ENTRY_LEN):
+    for off in range(0, len(data) - table_mod.VTBL_ENTRY_LEN + 1, table_mod.VTBL_ENTRY_LEN):
         sig = data[off : off + 4]
         if sig == b"\x00\x00\x00\x00":
             log.debug("volume table: zero signature at offset %d; end of records", off)
             break
-        if sig == volume_mod.SIG_EXVT:
+        if sig == table_mod.SIG_EXVT:
             child = int.from_bytes(data[off + 6 : off + 8], "little")
             log.debug("volume table: EXVT at offset %d -> segment %d (not followed)", off, child)
             # TODO: follow EXVT chains (same TODO as volume.vtbl_records).
@@ -506,7 +508,7 @@ def _extension_notes(data: bytes) -> list[str]:
                 f"volume table continues in segment {child} (EXVT); "
                 "volumes listed there are not shown"
             )
-        elif sig == volume_mod.SIG_UTID:
+        elif sig == table_mod.SIG_UTID:
             notes.append("tape also carries a unicode name (UTID), not decoded")
     return notes
 

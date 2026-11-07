@@ -1,11 +1,11 @@
 """The file-set parser base class and the registry the volume profiles name parsers in.
 
-A parser turns a TWVL volume's bytes into :class:`~qiclib.fileset.entry.VolumeEntry`
+A parser turns a TWVL volume's bytes into :class:`~qiclib.volume.fileset.entry.VolumeEntry`
 records and says how sure it is. Subclasses implement :meth:`FileSetParser.read`
 only: parse the volume into a :class:`Reading` (the entries, plus any checks
 and warnings only that parser can make, such as "the data-entry signatures
 are where the directory says"). :meth:`FileSetParser.probe` wraps that with
-the standard checks every catalog must pass (:func:`qiclib.fileset.common.standard_checks`)
+the standard checks every catalog must pass (:func:`qiclib.volume.fileset.common.standard_checks`)
 and turns an exception into a fatal verdict, so a parser never needs its
 own scoring loop and can never crash a probe.
 
@@ -34,10 +34,10 @@ from typing import Any
 from tapewyrm_archive.errors import MalformedFileError
 from tapewyrm_archive.twvl import Volume
 
-from qiclib.fileset.common import standard_checks
-from qiclib.fileset.entry import VolumeEntry
-from qiclib.verdict import Check, Probe, VolumeWarning
-from qiclib.volume import VtblEntry
+from qiclib.volume.fileset.common import standard_checks
+from qiclib.volume.fileset.entry import VolumeEntry
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import Check, Probe, VolumeWarning
 
 log = logging.getLogger(__name__)
 

@@ -525,7 +525,7 @@ or `extract` failing on the first volume. Run
 `qicsilver identify --raw IMG` to see each profile's score, then force the
 right one with `--volume-profile NAME` on both `identify` and `extract`. If
 none fits, the tape came from backup software Tapewyrm does not know yet: write
-a new profile in `packages/qiclib/qiclib/profiles/volume/` (the existing files
+a new profile in `packages/qiclib/qiclib/volume/profiles/` (the existing files
 explain their offsets) and pass its path.
 
 ### A dirty head

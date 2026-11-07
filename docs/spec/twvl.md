@@ -213,7 +213,7 @@ fixed by [QIC-80]; when byte 56 bit 0 (vendor specific) is set, "only
 this bit and the previous bytes" are defined. Bytes 57-127 are placed
 differently by different backup programs. The extractor decodes them
 through a volume profile, chosen by the user or by scoring every known
-profile against the record (Tapewyrm's `qiclib.volume_profile`). A
+profile against the record (Tapewyrm's `qiclib.volume.profile`). A
 member the chosen profile does not place is `null`.
 
 Readers that need a field the profile could not supply, or that
@@ -259,7 +259,7 @@ each possibly `null`. Readers MUST NOT require any of them.
 
 The volume bytes were laid out by whichever backup program wrote the
 tape; the `fileset` object says which of the reference reader's file-set
-parsers (`qiclib.fileset`) reads them, and how sure that is. A reader
+parsers (`qiclib.volume.fileset`) reads them, and how sure that is. A reader
 dispatches on it (Section 6.2, rule 12) instead of deciding the format
 from the VTBL record again, which is how a volume carries its own
 reading instructions wherever it goes.
@@ -286,7 +286,7 @@ profile's own (`untested`, `single-tape`, `generic`), the selection's
 (`low-confidence`, `vtbl-ambiguous`) and the parser's (`no-parser`,
 `special-fs`, `lossy-names`, `spans-cartridges`, `compression-unknown`,
 `directory-damaged`, `directory-reconstructed`). The names are a closed
-set, defined with their meanings by `qiclib.verdict.VolumeWarning`; a
+set, defined with their meanings by `qiclib.volume.verdict.VolumeWarning`; a
 reader that meets a name it does not know MUST treat the header as
 malformed (Section 8.1), since the set only grows with this document.
 The array is sorted and holds no duplicates.
@@ -645,7 +645,7 @@ that needs a media type MAY use the unregistered
 - **[QIC-123]** Quarter-Inch Cartridge Drive Standards, Inc., "QIC-123:
   Compression Algorithm Registration" (compression codes).
 - **[REF-IMPL]** Tapewyrm, `tapewyrm_archive.twvl` (format) and
-  `qiclib.extract` (writer), `qiclib.qic113`, `qiclib.qic113ext` and
+  `qiclib.extract` (writer), `qiclib.volume.qic113`, `qiclib.volume.qic113ext` and
   `qicsilver.tar` (readers), https://github.com/indrora/tapewyrm.
 
 ## Appendix A. Examples

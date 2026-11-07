@@ -4,7 +4,7 @@
 lists them, so both read the volume through :func:`read_volume` /
 :func:`list_volume` and can never disagree about which entries there are,
 how big they are, or which are damaged. The walk itself is a file-set
-parser (:mod:`qiclib.fileset`), and which one is the TWVL header's to say:
+parser (:mod:`qiclib.volume.fileset`), and which one is the TWVL header's to say:
 ``fileset.parser`` (TWS-3 section 3.4) was written by ``qicsilver extract``
 from the volume profile that fit the tape and confirmed by that parser's
 probe, so a volume carries its own reading instructions. The header's
@@ -15,8 +15,8 @@ A volume whose header names no parser (written before headers did, or by
 hand) is probed with every parser and read with the best that passes; one
 whose profile has no parser (``none``) is refused with the reason.
 
-The entry record, :class:`~qiclib.fileset.entry.VolumeEntry`, and the
-header's VTBL (:func:`~qiclib.fileset.common.header_vtbl`) live in qiclib,
+The entry record, :class:`~qiclib.volume.fileset.entry.VolumeEntry`, and the
+header's VTBL (:func:`~qiclib.volume.fileset.common.header_vtbl`) live in qiclib,
 where the parsers are, and are re-exported here for the two consumers.
 
 Library code (STYLE.md §2.5): it logs, raises ``ValueError`` /
@@ -31,10 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from qiclib import fileset as fs
-from qiclib.fileset import VolumeEntry, directory_offset, header_vtbl, tar_name
-from qiclib.verdict import VolumeWarning, parse_warning, warning_names
-from qiclib.volume import VtblEntry
+from qiclib.volume import fileset as fs
+from qiclib.volume.fileset import VolumeEntry, directory_offset, header_vtbl, tar_name
+from qiclib.volume.table import VtblEntry
+from qiclib.volume.verdict import VolumeWarning, parse_warning, warning_names
 from tapewyrm_archive.errors import MalformedFileError
 from tapewyrm_archive.qic80date import format_short_date
 from tapewyrm_archive.twvl import Volume
@@ -67,7 +67,7 @@ class VolumeListing:
     path: Path  # the file the volume came from: a TWVL, or the tape image it was read out of
     volume: Volume
     vtbl: VtblEntry
-    parser: str  # the file-set parser that read it (a qiclib.fileset name)
+    parser: str  # the file-set parser that read it (a qiclib.volume.fileset name)
     entries: list[VolumeEntry]
     warnings: set[VolumeWarning] = field(default_factory=set)
 

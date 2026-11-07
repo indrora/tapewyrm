@@ -6,7 +6,7 @@ Two kinds of position come out of here:
   table segment (one 128-byte record per entry, QIC-113 section 5).
 - :func:`volume_spans` positions in **volume byte stream offsets**: the
   concatenated data areas of the volume's segments, BSM-bad segments
-  skipped, exactly as :func:`qiclib.volume.volume_streams` builds it. The
+  skipped, exactly as :func:`qiclib.volume.table.volume_streams` builds it. The
   loader knows which stream offset each segment starts at and clips.
 - :func:`extent_spans` positions in segment data offsets, because a
   compressed volume's structure (QIC-113 section 9) is per segment: one
@@ -20,8 +20,8 @@ Levels, as the sketch stacks them:
       VTBL | VTBL | XTBL | end             entry | entry ...   Data Entry | Data Entry
         sig | segs | desc | date ...                             sig | entry | path | data
 
-The parsers are qiclib's own (``qiclib.volume``, ``qiclib.qic113``,
-``qiclib.qic113ext``), so what cinnabar labels is what ``qicsilver extract``
+The parsers are qiclib's own (``qiclib.volume.table``, ``qiclib.volume.qic113``,
+``qiclib.volume.qic113ext``), so what cinnabar labels is what ``qicsilver extract``
 would read. Private helpers of those modules are used on purpose: they are
 the walkers that honour every quirk the bench tapes taught the project
 (MTN's 9-byte fixed portion, unknown sizes), and a second copy would drift.
@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import struct
 
-from qiclib import qic113, qic113ext
-from qiclib import volume as volume_mod
-from qiclib.volume import VtblEntry
+from qiclib.volume import qic113, qic113ext
+from qiclib.volume import table as table_mod
+from qiclib.volume.table import VtblEntry
 from tapewyrm_archive.qic80date import decode_short_date
 
 from cinnabar.model import Shape, Span, assign_rows
@@ -120,9 +120,9 @@ def _vtbl_value(rec: bytes, off: int, length: int, key: str) -> str:
 
 def _vtbl_entry_span(rec: bytes, off: int, entry: VtblEntry | None) -> Span:
     sig = rec[:4]
-    if sig == volume_mod.SIG_VTBL:
+    if sig == table_mod.SIG_VTBL:
         style, label = "vtbl-entry", "Volume"
-    elif sig == volume_mod.SIG_XTBL:
+    elif sig == table_mod.SIG_XTBL:
         style, label = "vtbl-ext", "XTBL"
     elif sig in (b"UTID", b"EXVT"):
         style, label = "vtbl-ext", sig.decode("ascii")
@@ -134,7 +134,7 @@ def _vtbl_entry_span(rec: bytes, off: int, entry: VtblEntry | None) -> Span:
     # that the bytes are shown but labelled as such.
     vendor_only = bool(rec[56] & 0x01) and entry is not None and not qic113.is_extended_os(entry)
     for f_off, length, short, key in _VTBL_FIELDS:
-        if sig != volume_mod.SIG_VTBL and f_off >= 4:
+        if sig != table_mod.SIG_VTBL and f_off >= 4:
             break
         value = _vtbl_value(rec, f_off, length, key)
         name = short if not (vendor_only and f_off > 56) else "vendor"
@@ -149,7 +149,7 @@ def _vtbl_entry_span(rec: bytes, off: int, entry: VtblEntry | None) -> Span:
                 (("field", key), ("offset", f"{f_off}-{f_off + length - 1}"), ("value", value)),
             )
         )
-    desc = _vtbl_value(rec, 8, 44, "description") if sig == volume_mod.SIG_VTBL else ""
+    desc = _vtbl_value(rec, 8, 44, "description") if sig == table_mod.SIG_VTBL else ""
     detail: list[tuple[str, str]] = [("signature", sig.decode("ascii", "replace"))]
     if entry is not None:
         detail += [
@@ -180,7 +180,7 @@ def vtbl_spans(data: bytes, entries: list[VtblEntry]) -> list[Span]:
     while off + VTBL_RECORD <= len(data):
         rec = data[off : off + VTBL_RECORD]
         entry = None
-        if rec[:4] == volume_mod.SIG_VTBL and entry_i < len(entries):
+        if rec[:4] == table_mod.SIG_VTBL and entry_i < len(entries):
             entry = entries[entry_i]
             entry_i += 1
         child = _vtbl_entry_span(rec, off, entry)
@@ -296,10 +296,10 @@ def _extended_data(stream: bytes, dir_at: int | None) -> list[Span]:
     An Extended-OS volume's directory (at ``dir_at``, segment aligned at the
     end) is the authority on where each file's Data Entry sits: entry
     offsets are running sums of the directory's Data Entry sizes
-    (:func:`qiclib.qic113ext.layout`), and the file's bytes are the DATA
+    (:func:`qiclib.volume.qic113ext.layout`), and the file's bytes are the DATA
     area inside it. Walking the data section by each entry's own size
     does not work: the root entry carries an "unknown" size. Names and
-    paths come from the directory's preorder (:func:`qiclib.qic113ext.directory_paths`).
+    paths come from the directory's preorder (:func:`qiclib.volume.qic113ext.directory_paths`).
     """
     if dir_at is None or dir_at > len(stream):
         return []

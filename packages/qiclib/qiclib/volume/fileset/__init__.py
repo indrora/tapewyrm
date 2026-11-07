@@ -11,18 +11,18 @@ control codes, Microsoft Tape Format, NovaStor, Mountain FileSafe...). Each
 layout is a parser here, named by a volume profile's ``[fileset] parser``
 key, and every parser answers two questions:
 
-* :meth:`~qiclib.fileset.base.FileSetParser.probe`: *could this be right?*
+* :meth:`~qiclib.volume.fileset.base.FileSetParser.probe`: *could this be right?*
   It parses, then scores what came out with the checks every backup catalog
   must pass (names that are text, sizes inside the volume, dates in the
   backup's era, data where the directory says) and its own. The
-  :class:`~qiclib.verdict.Probe` is the yea/nay a profile's fingerprint can
+  :class:`~qiclib.volume.verdict.Probe` is the yea/nay a profile's fingerprint can
   only guess at: a layout whose fingerprint fits but whose parse reads 186
   nameless zero-byte files loses here.
-* :meth:`~qiclib.fileset.base.FileSetParser.entries`: the listing itself,
-  one :class:`~qiclib.fileset.entry.VolumeEntry` per directory or file, the
+* :meth:`~qiclib.volume.fileset.base.FileSetParser.entries`: the listing itself,
+  one :class:`~qiclib.volume.fileset.entry.VolumeEntry` per directory or file, the
   record ``qicsilver tar`` writes and ``qicsilver inspect`` lists.
 
-Warnings a parser raises (:class:`~qiclib.verdict.VolumeWarning`) ride on
+Warnings a parser raises (:class:`~qiclib.volume.verdict.VolumeWarning`) ride on
 the probe: that the directory had holes, that entries carry what a tar
 cannot hold. ``qiclib.extract`` writes the chosen parser and the warnings
 into the TWVL header (TWS-3 section 3.4), so a volume carries its own
@@ -35,13 +35,13 @@ importing this package does. A parser is stdlib-only library code
 
 from __future__ import annotations
 
-from qiclib.fileset import (  # noqa: F401  (registers)
+from qiclib.volume.fileset import (  # noqa: F401  (registers)
     none,
     qic113_basic,
     qic113_extended,
     qicstream_fset,
 )
-from qiclib.fileset.base import (
+from qiclib.volume.fileset.base import (
     NONE,
     FileSetParser,
     Reading,
@@ -51,8 +51,8 @@ from qiclib.fileset.base import (
     probe_all,
     register,
 )
-from qiclib.fileset.common import directory_offset, header_member, header_vtbl, volume_name
-from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry, tar_name
+from qiclib.volume.fileset.common import directory_offset, header_member, header_vtbl, volume_name
+from qiclib.volume.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry, tar_name
 
 __all__ = [
     "DIR_MODE",

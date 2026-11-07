@@ -60,7 +60,7 @@ Do not narrate what the code obviously does.
 
 ### 1.5 Prefer the standard library and existing helpers
 
-Reuse what the codebase already has (`qiclib.volume`, `qiclib.place`,
+Reuse what the codebase already has (`qiclib.header`, `qiclib.volume.table`, `qiclib.place`,
 `qiclib.segment`, `tapewyrm_archive.twrf`, `tape.dump.drive_identity`, ...) before
 writing a new helper. When two call sites do the same multi-step dance, factor
 it into one function both call.
@@ -217,25 +217,31 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
 
 Anything that varies by *who made the tape* is data, not code: drive quirks
 (`tapewyrm/profiles/drive`), cartridges (`qiclib/profiles/cartridge`) and the
-backup program's layout (`qiclib/profiles/volume`). A volume profile names
+backup program's layout (`qiclib/volume/profiles`). A volume profile names
 three layers -- the VTBL field offsets, the extent widths and the file-set
-parser -- and the rules for writing one are:
+parser -- and all three live in the `qiclib.volume` package: `table` (the
+VTBL records), `profile` (the TOML loader, gate and scoring), `qic122` (the
+extents), `fileset` (the parsers, with the `qic113` / `qic113ext` decoders
+behind two of them) and `verdict` (the shared vocabulary). The header
+segment, which describes the tape and no volume, is `qiclib.header`. Nothing
+is re-exported from `qiclib.volume` itself; import the submodule you mean.
+The rules for writing a profile are:
 
 - **A `[match]` item is something the writer wrote**, never a flag it may or
   may not have set: `113` at byte 58, `"CMS"` at 62, `"MTN"` at 58. The
   items are a gate, not a hint; a profile that fails one is out for that
   tape. (The CMS profile once matched on the vendor-specific bit, which the
   same software sets on QIC-80 and not on QIC-3010; see
-  `profiles/volume/cms-qic113.toml`.)
+  `volume/profiles/cms-qic113.toml`.)
 - **Say how exercised it is**: `status = "spec" | "bench" | "untested"`,
   and `tapes = [...]` for a bench profile. An untested profile warns; so does
   one confirmed on a single tape.
 - **A parser returns a verdict, not just entries.** It subclasses
-  `qiclib.fileset.FileSetParser`, implements `read` and adds the checks only
+  `qiclib.volume.fileset.FileSetParser`, implements `read` and adds the checks only
   it can make (the data-entry signatures are where the directory says);
-  the standard checks (`qiclib.fileset.common`) come free. A parse that
+  the standard checks (`qiclib.volume.fileset.common`) come free. A parse that
   raises is a fatal probe, never a crash.
-- **Warnings are a closed enum** (`qiclib.verdict.VolumeWarning`). A new
+- **Warnings are a closed enum** (`qiclib.volume.verdict.VolumeWarning`). A new
   caveat is a new member with a one-line meaning, not a free string; it
   travels in `identify --json`, the TWVL header (TWS-3 sections 3.4, 3.5),
   `inspect` and the tar's pax global header, and every consumer compares

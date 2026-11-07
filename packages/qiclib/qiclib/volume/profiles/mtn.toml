@@ -21,7 +21,7 @@
 # 164 MB in 3458 segments (~98 MB) is a 1.7:1 ratio, typical for QIC-122, which
 # is what makes this reading believable. Confirmed 2026-10-03: both MTN tapes
 # decompress, and their volumes are QIC-113 Basic-DOS, directory first, with
-# 9-byte directory entries (no extra-info byte; qiclib.qic113 handles it).
+# 9-byte directory entries (no extra-info byte; qiclib.volume.qic113 handles it).
 # `qicsilver tar` recovers old-connor's 2,452 files and the 3M tape's tree.
 
 name = "mtn"

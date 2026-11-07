@@ -10,7 +10,7 @@ checked and how that went, in one vocabulary:
 
 * a :class:`Check` is one yes/no test with a weight. A reading's score is
   the sum of its points and the best score wins
-  (:mod:`qiclib.volume_profile`); a failed check also names what it saw, so
+  (:mod:`qiclib.volume.profile`); a failed check also names what it saw, so
   ``identify --raw`` can show why a layout lost.
 * a :class:`VolumeWarning` is a fixed name for a caveat downstream tools
   must know about: that the profile has never met a real tape, that the
@@ -61,7 +61,7 @@ class VolumeWarning(StrEnum):
     appears in JSON, TWVL headers and pax headers.
     """
 
-    # About the profile itself (qiclib.volume_profile, from its status).
+    # About the profile itself (qiclib.volume.profile, from its status).
     UNTESTED = "untested"  # written from a spec or someone else's reader; no tape here has run it
     SINGLE_TAPE = "single-tape"  # confirmed on exactly one bench tape
     GENERIC = "generic"  # a default layout won because nothing positive matched the tape

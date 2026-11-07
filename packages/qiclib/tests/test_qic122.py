@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from qiclib import qic122
+from qiclib.volume import qic122
 
 
 def _bits_to_bytes(bits: str) -> bytes:
@@ -54,7 +54,7 @@ def test_truncated_string_token_is_a_qic122_error_not_a_bare_valueerror():
 
 
 def test_decode_extent_four_byte_offset():
-    # MTN tapes: a doubleword offset (profiles/volume/mtn.toml [extent]).
+    # MTN tapes: a doubleword offset (volume/profiles/mtn.toml [extent]).
     seg = struct.pack("<I", 29_690) + struct.pack("<H", 0x8000 | 5) + b"HELLO"
     ext = qic122.decode_extent(seg.ljust(29 * 1024, b"\x00"), offset_bytes=4)
     assert (ext.uncompressed_offset, ext.data) == (29_690, b"HELLO")
