@@ -48,6 +48,13 @@ files). The file kept is the last pass's unless an earlier one was better by
 the same measures (:func:`pass_rank`); ``dump.jsonl`` accounts for every pass.
 Only once the retries are spent do the stop rules judge the kept pass, exactly
 as they judge a single pass without retries.
+
+A dump that stopped, or a drive that went dark half-way, leaves a directory
+with some tracks done. ``--no-clobber`` resumes it: a track whose latest
+``dump.jsonl`` line is clean and whose file is whole is skipped
+(:func:`previous_results`), and one that is not is read again with its
+earlier capture seeded into the keep-best rule, so a new pass replaces the
+file on disk only if it is better.
 """
 
 from __future__ import annotations
@@ -58,7 +65,7 @@ import os
 import time
 from collections.abc import Callable, Iterable
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -108,6 +115,14 @@ CAPTURE_SUFFIX = ".twrf"
 # .twrf, so a run that dies mid-retry leaves nothing that `tw convert` or
 # cinnabar would take for a capture; the next attempt overwrites it.
 RETRY_SUFFIX = ".retry"
+# The log of every pass, one JSON line each (docs/spec/twrf.md Appendix B),
+# and what --no-clobber reads back (previous_results).
+SIDECAR = "dump.jsonl"
+
+
+def track_path(out_dir: Path, track: int) -> Path:
+    """Where ``track``'s capture lives in ``out_dir``: ``track-NN.twrf``."""
+    return out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
 
 
 class DumpStopped(Exception):
@@ -553,6 +568,7 @@ def read_track(
     *,
     retries: int = 0,
     best_index: int = 0,
+    existing: TrackResult | None = None,
 ) -> tuple[TrackResult, int]:
     """Read one track with up to ``retries`` re-reads: (kept result, its flux status).
 
@@ -580,6 +596,14 @@ def read_track(
     leaves what it got (and a later raised pass replaces it: ties go to the
     latest). Errors that mean the board is gone (``LINK_FATAL``) are not
     retried. If every pass raised, the last error is raised again.
+
+    ``existing`` is a pass already at ``path`` from an earlier run, with the
+    measurements its ``dump.jsonl`` line recorded (``--no-clobber``). It
+    competes like any pass, its flux status taken as clean (the sidecar does
+    not record it, and an overflow shows as ``end_reason`` OVERFLOW anyway),
+    and the new passes are numbered after its ``attempts``, so attempt
+    numbers stay unique for the track and the new line accounts for every
+    pass ever made on it in this directory.
     """
     if retries < 0:
         log.debug("retries=%d is negative; refusing", retries)
@@ -593,12 +617,24 @@ def read_track(
     kept_failure: str | None = None
     occupied = False  # something sits at `path`: the kept file, or a raised pass's partial
     rejected: list[RejectedPass] = []
+    first = 1
+    if existing is not None:
+        kept = replace(existing, path=str(path))
+        kept_failure = pass_failure(kept, kept_ack, best_index)
+        occupied = True
+        rejected = list(existing.rejected)
+        first = existing.attempts + 1
+        log.info(
+            f"track {track:2d}: an earlier run left attempt {existing.kept} of "
+            f"{existing.attempts} at {path} ({kept_failure or 'clean'}); a new pass "
+            "replaces it only if better"
+        )
     last_exc: Exception | None = None
-    attempt = 0
-    for attempt in range(1, retries + 2):
+    attempt = first - 1
+    for attempt in range(first, first + retries + 1):
         dest = scratch if occupied else path
-        if attempt > 1:
-            log.info(f"track {track:2d}: re-reading, attempt {attempt} of {retries + 1}")
+        if attempt > first:
+            log.info(f"track {track:2d}: re-reading, attempt {attempt} of {first + retries}")
         try:
             res, flux_ack = capture_pass(dest, attempt)
         except LINK_FATAL:
@@ -666,6 +702,50 @@ def read_track(
     return kept, kept_ack
 
 
+def previous_results(out_dir: Path) -> dict[int, TrackResult]:
+    """The last recorded pass of each track in ``out_dir``, read back from its sidecar.
+
+    What ``--no-clobber`` consults. The latest line for a track is the one
+    that counts: a directory dumped twice holds both runs' lines, and a
+    re-read's line supersedes the earlier one. A line counts only if the
+    track's file (:func:`track_path`) is there and holds at least the
+    recorded flux bytes, so a capture cut short by a crash, or deleted by
+    hand, is read again rather than trusted. Members this version does not
+    know are ignored, lines from before ``--retries`` read as one pass, and
+    a line that cannot be read is logged and ignored.
+    """
+    sidecar = out_dir / SIDECAR
+    if not sidecar.is_file():
+        log.debug("no %s in %s; nothing dumped before", SIDECAR, out_dir)
+        return {}
+    known = {f.name for f in fields(TrackResult)}
+    found: dict[int, TrackResult] = {}
+    for number, line in enumerate(sidecar.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+            members = {k: v for k, v in entry.items() if k in known}
+            members["rejected"] = [RejectedPass(**r) for r in members.get("rejected", [])]
+            res = TrackResult(**members)
+        except (ValueError, TypeError) as exc:
+            log.warning(f"{sidecar}:{number}: unreadable line ignored ({exc})")
+            continue
+        found[res.track] = res
+    for track, res in list(found.items()):
+        path = track_path(out_dir, track)
+        if not path.is_file() or path.stat().st_size < res.bytes:
+            log.debug(
+                "track %d: %s lists it but %s is missing or short; not trusting the line",
+                track,
+                SIDECAR,
+                path,
+            )
+            del found[track]
+    log.debug("%s: %d tracks dumped before with their files present", SIDECAR, len(found))
+    return found
+
+
 # ---------------------------------------------------------------------------
 # The dump
 # ---------------------------------------------------------------------------
@@ -679,6 +759,7 @@ def dump_tracks(
     progress: Progress = NULL_PROGRESS,
     check: bool = False,
     retries: int = 0,
+    no_clobber: bool = False,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble.
 
@@ -687,7 +768,10 @@ def dump_tracks(
     also decodes every pass (~17 s each) and stops on a low CRC-clean
     fraction; see the module docstring. ``retries`` re-reads a track whose
     pass failed up to that many more times (:func:`read_track`) before the
-    stop rules judge the pass that was kept.
+    stop rules judge the pass that was kept. ``no_clobber`` resumes an earlier
+    dump of ``out_dir``: a track whose last recorded pass is clean and whose
+    file is whole is skipped (and returned as it was), and one that is not is
+    read again with that pass seeded into keep-best (:func:`previous_results`).
     """
     log.debug("creating output directory %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -697,11 +781,23 @@ def dump_tracks(
         f"tape {template.tape_format.name}; writing TWRF to {out_dir}"
     )
     tracks = list(tracks) if tracks is not None else tracks_for_tape(template)
+    previous = previous_results(out_dir) if no_clobber else {}
     results: list[TrackResult] = []
     with progress.task("dumping tracks", total=len(tracks), unit="tracks") as overall:
         for track in tracks:
-            path = out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
-            best_index = max((r.index_pulses for r in results), default=0)
+            path = track_path(out_dir, track)
+            # The best pass so far counts the earlier run's too, so a resumed
+            # dump judges its new passes against the whole tape it knows.
+            best_index = max((r.index_pulses for r in [*results, *previous.values()]), default=0)
+            earlier = previous.get(track)
+            if earlier is not None and pass_failure(earlier, 0, best_index) is None:
+                log.info(
+                    f"track {track:2d}: already dumped clean ({earlier.index_pulses} segments "
+                    f"by INDEX, attempt {earlier.kept} of {earlier.attempts}); skipping"
+                )
+                results.append(earlier)
+                overall.advance()
+                continue
             res, flux_ack = read_track(
                 partial(
                     _capture_pass, drive, track, template=template, progress=progress, check=check
@@ -710,10 +806,11 @@ def dump_tracks(
                 path,
                 retries=retries,
                 best_index=best_index,
+                existing=earlier,
             )
             results.append(res)
-            log.debug("track %d: appending result to %s", track, out_dir / "dump.jsonl")
-            with (out_dir / "dump.jsonl").open("a") as f:
+            log.debug("track %d: appending result to %s", track, out_dir / SIDECAR)
+            with (out_dir / SIDECAR).open("a") as f:
                 f.write(json.dumps(asdict(res)) + "\n")
             reason = check_pass(res, best_index, flux_ack)
             if reason is not None:

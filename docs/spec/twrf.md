@@ -887,6 +887,11 @@ stop rules. The kept file's header carries the attempt number as `pass_id`.
 These members are appended to the line, so a reader that knows only the
 older ones finds them where they were.
 
+`tw dump --no-clobber` reads the sidecar back: a track whose latest line is
+clean, and whose `track-NN.twrf` is present and at least `bytes` long, is
+skipped; any other listed track is read again, its earlier pass competing
+with the new ones under the rule above and numbered before them.
+
 ## Appendix C. Change Log
 
 | Version | Date       | Change |

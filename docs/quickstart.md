@@ -235,7 +235,10 @@ done: 2 tracks, 414 segments by INDEX -> captures/NAME
 
 If the dump stops (`dump stopped: track N: ...`), read the reason, clean the
 head, and dump the rest into a **new** directory, e.g.
-`tw dump captures/NAME-pass2 5-27`. `tw convert` merges them.
+`tw dump captures/NAME-pass2 5-27`. `tw convert` merges them. Or resume in place:
+`tw dump captures/NAME --no-clobber` skips the tracks already dumped clean,
+reads again the one it stopped on (and any dumped with a failed pass), and
+keeps the earlier capture of a track unless the new pass is better.
 
 ## 6. Make a tape image: `tw convert`
 

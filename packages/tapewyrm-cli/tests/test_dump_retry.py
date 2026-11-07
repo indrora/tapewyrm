@@ -1,4 +1,4 @@
-"""tw dump --retries: re-reading a failed track, and which pass's file is kept.
+"""tw dump --retries and --no-clobber: re-reading a failed track, resuming a dump.
 
 The policy (``read_track``) runs over scripted passes that write a marker into
 their file, so a test can see which capture survived. The wiring
@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import struct
 from collections import deque
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -33,6 +33,7 @@ from tapewyrm.tape.dump import (
     dump_tracks,
     pass_failure,
     pass_rank,
+    previous_results,
     read_track,
 )
 
@@ -234,8 +235,10 @@ def test_a_board_that_is_gone_is_not_retried(path):
 
 CLK = 72_000_000
 PERIOD = 51_000_000  # ~710 ms of ticks between INDEX pulses: one segment on the 350
-# Report Drive Status bits (Rev J Table 2c): 0 ready, 2 cartridge, 5 referenced, 6 at BOT.
+# Report Drive Status bits (Rev J Table 2c): 0 ready, 2 cartridge, 5 referenced,
+# 6 at BOT, 7 at EOT.
 AT_BOT = DriveStatus.decode(0b0110_0101)
+AT_EOT = DriveStatus.decode(0b1010_0101)
 
 
 def _n28(x: int) -> bytes:
@@ -307,7 +310,7 @@ class FakeDrive:
 
     def command(self, cmd, arg=None) -> DriveStatus:
         self.sent.append(cmd.name)
-        return AT_BOT
+        return AT_EOT if cmd is commands.PHYSICAL_FORWARD else AT_BOT
 
     def wait_ready(self, timeout_s: float) -> DriveStatus:
         return AT_BOT
@@ -365,3 +368,119 @@ def test_dump_tracks_carries_on_with_a_few_missed_segments_once_the_retries_are_
     results = dump_tracks(FakeDrive(link), tmp_path, [0], retries=1)
     assert [(r.attempts, r.missing_est, r.index_pulses) for r in results] == [(2, 1, 24)]
     assert len(link.captures) == 2
+
+
+# ---------------------------------------------------------------------------
+# --no-clobber: an earlier run's pass is skipped if clean, else competes
+# ---------------------------------------------------------------------------
+
+
+def test_an_earlier_runs_pass_is_replaced_only_by_a_better_one(path):
+    """Seeded with the earlier pass, numbering continues and keep-best applies to it."""
+    path.write_bytes(b"earlier")
+    earlier = replace(
+        GOOD,
+        missing_est=2,
+        attempts=2,
+        kept=2,
+        rejected=[RejectedPass(1, "pass ended with WATCHDOG, not EOT")],
+    )
+    script = Script(replace(GOOD, index_pulses=190))  # clean, but holds less of the track
+    res, _ = read_track(script, 0, path, retries=0, existing=earlier)
+    assert (res.attempts, res.kept, res.missing_est) == (3, 2, 2)
+    assert [r.attempt for r in res.rejected] == [1, 3]
+    assert path.read_bytes() == b"earlier" and _leftovers(path) == ["track-00.twrf"]
+    assert script.calls == [(path.with_name("track-00.twrf" + RETRY_SUFFIX), 3)]
+
+
+def test_an_earlier_runs_pass_gives_way_to_a_clean_one(path):
+    path.write_bytes(b"earlier")
+    earlier = replace(GOOD, missing_est=2, attempts=2, kept=2, rejected=[RejectedPass(1, "x")])
+    res, _ = read_track(Script(GOOD), 0, path, retries=0, existing=earlier)
+    assert (res.attempts, res.kept) == (3, 3)
+    assert res.rejected == [
+        RejectedPass(1, "x"),
+        RejectedPass(2, "~2 segments missed inside the pass (207 found)"),
+    ]
+    assert path.read_bytes() == b"attempt-3" and _leftovers(path) == ["track-00.twrf"]
+
+
+def _write_sidecar(out_dir: Path, lines: list[dict]) -> None:
+    (out_dir / "dump.jsonl").write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+def test_previous_results_take_the_latest_line_per_track_with_a_whole_file(tmp_path):
+    before_retries = {
+        k: v for k, v in asdict(GOOD).items() if k not in ("attempts", "kept", "rejected")
+    }
+    _write_sidecar(
+        tmp_path,
+        [
+            {**before_retries, "track": 0, "path": "elsewhere/track-00.twrf", "bytes": 4},
+            asdict(replace(GOOD, track=1, bytes=4, end_reason="WATCHDOG")),
+            asdict(
+                replace(GOOD, track=1, bytes=4, attempts=2, kept=2, rejected=[RejectedPass(1, "r")])
+            ),  # the re-read's line supersedes the one before
+            asdict(replace(GOOD, track=2, bytes=4)),  # its file is missing
+            asdict(replace(GOOD, track=3, bytes=400)),  # its file is short
+        ],
+    )
+    for track in (0, 1, 3):
+        (tmp_path / f"track-{track:02d}.twrf").write_bytes(b"flux")
+    found = previous_results(tmp_path)
+    assert sorted(found) == [0, 1]
+    assert (found[0].attempts, found[0].kept, found[0].rejected) == (1, 1, [])
+    assert (found[1].attempts, found[1].end_reason, found[1].rejected) == (
+        2,
+        "EOT",
+        [RejectedPass(1, "r")],
+    )
+
+
+def test_previous_results_ignore_an_unreadable_line(tmp_path):
+    (tmp_path / "dump.jsonl").write_text(
+        '{"track": 0}\nnot json\n' + json.dumps(asdict(replace(GOOD, track=1, bytes=4))) + "\n"
+    )
+    (tmp_path / "track-01.twrf").write_bytes(b"flux")
+    assert sorted(previous_results(tmp_path)) == [1]
+
+
+def test_previous_results_without_a_sidecar(tmp_path):
+    assert previous_results(tmp_path) == {}
+
+
+def test_dump_tracks_no_clobber_skips_a_clean_track_and_re_reads_a_dirty_one(tmp_path, identity):
+    """An earlier run: track 0 clean, track 1 ended with WATCHDOG, both files whole."""
+    for track in (0, 1):
+        (tmp_path / f"track-{track:02d}.twrf").write_bytes(b"x" * 64)  # only its size is checked
+    _write_sidecar(
+        tmp_path,
+        [
+            asdict(replace(GOOD, track=0, index_pulses=8, bytes=10)),
+            asdict(replace(GOOD, track=1, index_pulses=8, bytes=10, end_reason="WATCHDOG")),
+        ],
+    )
+    link = FakeLink([_stream([PERIOD] * 8)])  # one capture: track 1's re-read
+    drive = FakeDrive(link)
+    results = dump_tracks(drive, tmp_path, [0, 1], no_clobber=True)
+    assert [(r.track, r.attempts, r.kept, r.end_reason) for r in results] == [
+        (0, 1, 1, "EOT"),
+        (1, 2, 2, "EOT"),
+    ]
+    # Track 0 was never touched; track 1 (odd) was wound to EOT and read as its attempt 2.
+    assert drive.sent == [commands.PHYSICAL_FORWARD.name, commands.SEEK_HEAD_TO_TRACK.name]
+    assert [(c["tpt"], c["pass_id"]) for c in link.captures] == [(1, 2)]
+    hdr, _ = read_header(tmp_path / "track-01.twrf")
+    assert hdr.pass_id == 2
+    lines = _sidecar(tmp_path)
+    assert len(lines) == 3 and lines[2]["track"] == 1  # one new line, for the re-read only
+    assert (lines[2]["attempts"], lines[2]["kept"]) == (2, 2)
+    assert lines[2]["rejected"] == [{"attempt": 1, "reason": "pass ended with WATCHDOG, not EOT"}]
+
+
+def test_dump_tracks_no_clobber_reads_a_track_whose_file_is_gone(tmp_path, identity):
+    _write_sidecar(tmp_path, [asdict(replace(GOOD, track=0, index_pulses=8, bytes=10))])
+    link = FakeLink([_stream([PERIOD] * 8)])
+    results = dump_tracks(FakeDrive(link), tmp_path, [0], no_clobber=True)
+    assert [(r.track, r.attempts, r.kept) for r in results] == [(0, 1, 1)]
+    assert [c["pass_id"] for c in link.captures] == [1]

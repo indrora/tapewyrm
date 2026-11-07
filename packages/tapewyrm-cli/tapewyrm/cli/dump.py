@@ -55,8 +55,24 @@ def _parse_tracks(spec: str) -> list[int]:
         "missed inside the pass (missing_est > 0); the best pass is kept"
     ),
 )
+@click.option(
+    "--no-clobber",
+    is_flag=True,
+    help=(
+        "resume a dump of OUTDIR: skip a track whose last dump.jsonl line is clean and "
+        "whose file is whole; a track dumped with a failed pass is read again, and its "
+        "earlier capture is replaced only by a better pass"
+    ),
+)
 @click.pass_obj
-def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool, retries: int) -> None:
+def dump(
+    app: AppContext,
+    outdir: Path,
+    tracks: str | None,
+    check: bool,
+    retries: int,
+    no_clobber: bool,
+) -> None:
     """Capture whole tracks to TWRF files in OUTDIR, one Logical Forward pass each.
 
     TRACKS is a list of tracks and ranges such as 0-12 or 0,2,5-7. Without it,
@@ -69,7 +85,10 @@ def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool, retries
     tape looks unhealthy. --check also decodes and checks sector CRCs.
     --retries N re-reads a track whose pass failed those checks (or skipped
     any segment, or raised) up to N more times first, keeping the best pass;
-    dump.jsonl records every attempt.
+    dump.jsonl records every attempt. --no-clobber resumes a dump that
+    stopped: tracks already dumped clean into OUTDIR are skipped, and a
+    track dumped with a failed pass is read again, its earlier capture
+    kept unless the new pass is better.
     Serpentine order: run tracks in ascending order to avoid rewinds.
     """
     from tapewyrm.tape.dump import DumpStopped, dump_tracks
@@ -77,16 +96,23 @@ def dump(app: AppContext, outdir: Path, tracks: str | None, check: bool, retries
     # Parse TRACKS before touching the drive so a typo fails fast.
     track_list = _parse_tracks(tracks) if tracks is not None else None
     log.debug(
-        "dumping tracks %s to %s (check=%s, retries=%d)",
+        "dumping tracks %s to %s (check=%s, retries=%d, no_clobber=%s)",
         track_list or "all",
         outdir,
         check,
         retries,
+        no_clobber,
     )
     with _drive_session(app) as d, app.progress() as prog:
         try:
             results = dump_tracks(
-                d, outdir, track_list, progress=prog, check=check, retries=retries
+                d,
+                outdir,
+                track_list,
+                progress=prog,
+                check=check,
+                retries=retries,
+                no_clobber=no_clobber,
             )
         except DumpStopped as exc:
             log.debug("dump stopped: %r", exc)
