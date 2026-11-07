@@ -1,11 +1,17 @@
 """`qicsilver tar`: turn an extracted QIC-113 backup volume into a tar archive.
 
-The last step after ``tw dump -> tw convert -> qicsilver extract``::
+The last step after ``tw dump -> tw convert``, with or without ``qicsilver
+extract`` in between::
 
+    qicsilver tar jc-1998.twtz jc-1998.tar --volume 0
     qicsilver tar jc-1998/vol-00.twvl jc-1998.tar
 
-The input is a TWVL volume written by ``qicsilver extract``. Every directory
-and file of the backup goes into a POSIX (pax) tar:
+The input is a TWVL volume written by ``qicsilver extract``, or one volume of
+a TWTI/TWTZ tape image, built in memory by ``qiclib.extract.load_volume``
+exactly as ``extract`` would have saved it; :mod:`qicsilver.cli` tells the
+two apart (the routing ``qicsilver inspect`` uses too) and hands this module
+the listing. Every directory and file of the backup goes into a POSIX (pax)
+tar:
 
 * paths come from the backup's own directory (in the extended format, long
   Windows 95 names, and the root, e.g. ``C:``, becomes the top-level
@@ -38,7 +44,7 @@ from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
-from qicsilver.entries import entry_data, read_volume
+from qicsilver.entries import VolumeListing, entry_data, read_volume
 
 log = logging.getLogger(__name__)
 
@@ -61,21 +67,30 @@ def default_report_path(out: Path) -> Path:
 
 
 def write_tar(
-    volume_path: Path,
+    source: Path | VolumeListing,
     out: Path,
     *,
     report_path: Path | None = None,
     skip_damaged: bool = False,
     progress: Progress = NULL_PROGRESS,
 ) -> TarResult:
-    """Write every directory and file of a TWVL volume into a pax tar at ``out``.
+    """Write every directory and file of a backup volume into a pax tar at ``out``.
+
+    ``source`` is a TWVL file, read here through
+    :func:`qicsilver.entries.read_volume`, or a
+    :class:`~qicsilver.entries.VolumeListing` already in hand. The CLI always
+    passes a listing, whether the volume came from a .twvl or was built out
+    of a tape image: deciding what a file is, and which volume of it is
+    meant, happens once in ``qicsilver.cli``, and this module only writes.
+    The tar, the result and the damage report are the same either way; the
+    report names ``listing.path``, the file the bytes came from.
 
     Raises ``ValueError`` for a volume this cannot read (no QIC-113 section
     sizes in its table entry). See the module docstring for the tar layout
     and the damage report.
     """
     report_path = report_path or default_report_path(out)
-    listing = read_volume(volume_path)
+    listing = source if isinstance(source, VolumeListing) else read_volume(source)
     vol = listing.volume
     result = TarResult(out=out, report=report_path)
 
@@ -107,7 +122,7 @@ def write_tar(
 
     log.info("writing damage report %s...", report_path)
     with report_path.open("w", encoding="utf-8") as rep:
-        rep.write(f"# qicsilver damage report for {volume_path}\n")
+        rep.write(f"# qicsilver damage report for {listing.path}\n")
         rep.write(f"# tape {listing.tape_name!r}; volume {listing.description!r}\n")
         lost = listing.lost_segments
         rep.write(f"# lost tape segments: {len(lost)} {lost}\n")
