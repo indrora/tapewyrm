@@ -15,6 +15,7 @@ loaders see exactly what ``tw dump`` would have written.
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -253,3 +254,42 @@ def qic100_capture(tmp_path_factory) -> Path:
         cells += bytes([0, 1, 0, 1]) * 100
     intervals = cells_to_intervals(cells, ticks)
     return write_capture(tmp_path_factory.mktemp("gcr") / "track-00.twrf", 0, [], lead_in=intervals)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def qt_teardown():
+    """Take down every Qt widget the tests left behind while Python is still whole.
+
+    The Qt tests make hidden ``LaneStack``s and ``DetailsPanel``s and never
+    delete them (the two that show a stack do, with the same incantation;
+    ``cinnabar.ui.app.screenshot`` takes its own window down). A widget that
+    reaches interpreter exit alive is destroyed during module teardown, in
+    whatever order the garbage collector picks for its wrapper, its scene's
+    and its items', and PySide6 then segfaults on about one run in four
+    (2026-11-07: exit 139 after "58 passed", with Qt's "QObject: shared
+    QObject was deleted directly"), which made ``just host`` fail with every
+    check green. Closing and deleting the top-level widgets here, then
+    flushing the deferred deletes (``processEvents`` alone does not honour a
+    ``deleteLater`` posted outside an event loop), destroys them in Qt's
+    order before the interpreter starts taking modules apart; twelve runs in
+    a row were clean afterwards. Qt is looked up in ``sys.modules`` rather
+    than imported, so a run of the non-Qt tests stays Qt-free. The list can
+    hold a wrapper whose C++ widget is already gone (shiboken hands back a
+    stale wrapper for an address a new widget reuses); touching one raises
+    RuntimeError, so those are skipped.
+    """
+    yield
+    qtwidgets = sys.modules.get("PySide6.QtWidgets")
+    app = qtwidgets.QApplication.instance() if qtwidgets is not None else None
+    if app is None:
+        return
+    import shiboken6
+    from PySide6.QtCore import QEvent
+
+    for widget in app.topLevelWidgets():
+        if not shiboken6.isValid(widget):
+            continue
+        widget.close()
+        widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
