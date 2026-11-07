@@ -394,3 +394,117 @@ def build_twvl(
         }
         header["warnings"] = warnings or []
     return Volume(header=header, data=stream)
+
+
+# ---------------------------------------------------------------------------
+# QICStream v2 "FSET" volume (qiclib.fileset.qicstream_fset)
+# ---------------------------------------------------------------------------
+
+# The control codes and the name offset, copied from qiclib.fileset.qicstream_fset
+# so a builder bug cannot hide behind the parser's own constants.
+_FSET_CONTENTS, _FSET_CATALOG, _FSET_UP, _FSET_FILE, _FSET_DIR, _FSET_CHUNK = 1, 2, 3, 5, 6, 9
+_FSET_NAME_OFFSET = 0x16
+_FSET_HEADER_LEN = 0x3E  # the fixed part of the volume header, up to the label
+
+
+@dataclass(frozen=True)
+class FsetItem:
+    """One record of a synthetic FSET stream, in stream order.
+
+    A directory is pushed when met and stays current until an ``up`` item
+    (:data:`FSET_UP`) pops it. A file's ``data`` is written in chunks of
+    at most ``chunk`` bytes, and its header claims ``size`` bytes (``None``
+    = ``len(data)``; more makes a file whose chunks sum short). ``attrs``
+    is the DOS attribute byte, ``mtime`` a time_t.
+    """
+
+    name: str = ""
+    is_dir: bool = False
+    data: bytes = b""
+    mtime: int = 0
+    attrs: int = 0
+    size: int | None = None
+    chunk: int = 0xFFFF
+    up: bool = False
+
+
+#: The "up to the parent directory" record (control code 3).
+FSET_UP = FsetItem(up=True)
+
+
+def build_fset_header(
+    name: str, *, attrs: int = 0, mtime: int = 0, size: int = 0, struct_len: int | None = None
+) -> bytes:
+    """A file or directory header: the 3-byte prefix, then ``struct_len`` bytes.
+
+    The attribute byte at 0, the time_t at 4, the i32 size at 8, zeros to
+    0x16, then the name: the offsets QICStreamReader's code reads, which
+    index after the prefix. ``struct_len`` overrides the length the prefix
+    claims, to build a header that runs past the volume.
+    """
+    body = struct.pack("<B3xIi", attrs, mtime, size).ljust(_FSET_NAME_OFFSET, b"\x00")
+    body += name.encode("ascii")
+    claimed = len(body) if struct_len is None else struct_len
+    return struct.pack("<BH", 1, claimed) + body
+
+
+def build_fset_volume(
+    items: list[FsetItem],
+    *,
+    label: str = "BACKUP",
+    drive: str = "C:",
+    catalog: bool = True,
+    terminate: bool = True,
+) -> bytes:
+    """The bytes of a QICStream v2 volume: header, contents, catalog, end mark.
+
+    The volume header is 0x3E bytes with ``FSET`` at 4 and the label's
+    length at 0x3C, then the label, a pad to an even offset, the drive
+    name's length and the drive name. The contents region (code 1) writes
+    the items in order; a zero pad byte before each record keeps its code
+    on an even offset, as QICStreamReader's comment says real tapes do.
+    With ``catalog`` the same headers follow a code 2 without data; with
+    ``terminate`` a file header of structLen 0 ends the archive.
+    """
+    out = bytearray(_FSET_HEADER_LEN)
+    out[4:8] = b"FSET"
+    raw_label = label.encode("ascii")
+    struct.pack_into("<H", out, _FSET_HEADER_LEN - 2, len(raw_label))
+    out += raw_label
+    if len(out) % 2:
+        out.append(0)
+    raw_drive = drive.encode("ascii")
+    out += struct.pack("<H", len(raw_drive)) + raw_drive
+
+    def pad() -> None:
+        if len(out) % 2:
+            out.append(0)
+
+    def records(with_data: bool) -> None:
+        for item in items:
+            pad()
+            if item.up:
+                out.append(_FSET_UP)
+                continue
+            out.append(_FSET_DIR if item.is_dir else _FSET_FILE)
+            size = len(item.data) if item.size is None else item.size
+            out.extend(build_fset_header(item.name, attrs=item.attrs, mtime=item.mtime, size=size))
+            if item.is_dir or not with_data:
+                continue
+            for start in range(0, len(item.data), item.chunk):
+                pad()
+                piece = item.data[start : start + item.chunk]
+                out.extend(bytes([_FSET_CHUNK, 0]) + struct.pack("<H", len(piece)) + piece)
+
+    pad()
+    out.append(_FSET_CONTENTS)
+    records(True)
+    if catalog:
+        pad()
+        out.append(_FSET_CATALOG)
+        records(False)
+    if terminate:
+        pad()
+        out.append(_FSET_FILE)
+        out += struct.pack("<BH", 1, 0)
+    return bytes(out)

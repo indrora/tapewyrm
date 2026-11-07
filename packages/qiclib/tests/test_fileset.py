@@ -17,12 +17,16 @@ import pytest
 from qiclib import fileset as fs
 from qiclib import qic113ext as q
 from qiclib.fileset.common import standard_checks
-from qiclib.fileset.entry import RO_MODE, VolumeEntry
+from qiclib.fileset.entry import DIR_MODE, RO_MODE, RW_MODE, VolumeEntry
 from qiclib.testing.builders import (
+    FSET_UP,
     ExtItem,
+    FsetItem,
     build_data_entry,
     build_dir_entry,
     build_ext_volume,
+    build_fset_header,
+    build_fset_volume,
     build_twvl,
     build_vtbl_entry,
     make_short_date,
@@ -76,8 +80,12 @@ def _vtbl(vol):
 
 
 def test_registry_names_the_builtin_parsers():
-    assert {"none", "qic113-basic", "qic113-extended"} <= set(fs.names())
-    assert [p.name for p in fs.listable()] == ["qic113-basic", "qic113-extended"]
+    assert {"none", "qic113-basic", "qic113-extended", "qicstream-fset"} <= set(fs.names())
+    assert [p.name for p in fs.listable()] == [
+        "qic113-basic",
+        "qic113-extended",
+        "qicstream-fset",
+    ]
     with pytest.raises(ValueError, match="qic113-basic"):
         fs.get("no-such-parser")
 
@@ -116,9 +124,10 @@ def test_extended_parser_fails_on_a_basic_volume():
 
 
 def test_probe_all_ranks_the_right_parser_first():
-    ext, basic = _extended_volume(), _basic_volume()
+    ext, basic, fset = _extended_volume(), _basic_volume(), _fset_volume()
     assert fs.probe_all(ext, _vtbl(ext), SOURCE, now=NOW)[0][0].name == "qic113-extended"
     assert fs.probe_all(basic, _vtbl(basic), SOURCE, now=NOW)[0][0].name == "qic113-basic"
+    assert fs.probe_all(fset, _vtbl(fset), SOURCE, now=NOW)[0][0].name == "qicstream-fset"
 
 
 def test_none_parser_is_always_fatal_and_says_why():
@@ -161,3 +170,97 @@ def test_probe_round_trips_through_its_dict():
     again = Probe.from_dict(probe.to_dict())
     assert again.score == probe.score and again.passed and again.entries == probe.entries
     assert [c.name for c in again.checks] == [c.name for c in probe.checks]
+
+
+# ---------------------------------------------------------------------------
+# QICStream v2 "FSET" (qicstream-fset): synthetic volumes only, no bench tape
+# ---------------------------------------------------------------------------
+
+FSET_ITEMS = [
+    FsetItem("DOCS", is_dir=True, mtime=MTIME, attrs=0x10),
+    FsetItem("A.TXT", data=b"hello world\n", mtime=MTIME, attrs=0x01),
+    FsetItem("OLD", is_dir=True, mtime=MTIME, attrs=0x10),
+    FsetItem("B.DAT", data=b"x" * 50, mtime=MTIME),
+    FSET_UP,
+    FSET_UP,
+]
+
+
+def _fset_volume(items=FSET_ITEMS, **kwargs):
+    """A QICStream v2 volume: a directory, a file, a nested directory with a file, two pops."""
+    record = build_vtbl_entry(start_seg=3, end_seg=4, description="FSET", date=BACKUP_DATE)
+    return build_twvl(build_fset_volume(items, **kwargs), record)
+
+
+def test_fset_parser_passes_on_an_fset_volume():
+    vol = _fset_volume()
+    parser = fs.get("qicstream-fset")
+    probe = parser.probe(vol, _vtbl(vol), SOURCE, now=NOW)
+    assert probe.passed and probe.failures == [] and probe.entries == 4
+    assert probe.warnings == set()
+    assert {"FSET magic", "directory stack balanced"} <= {c.name for c in probe.checks}
+    entries = parser.entries(vol, _vtbl(vol), SOURCE)
+    assert [e.path for e in entries] == ["DOCS", "DOCS/A.TXT", "DOCS/OLD", "DOCS/OLD/B.DAT"]
+    assert [e.tar_name for e in entries] == [e.path for e in entries]
+    docs, a, _old, b = entries
+    assert docs.is_dir and docs.mode == DIR_MODE and docs.attrs == 0x10 and docs.mtime == MTIME
+    assert a.mode == RO_MODE and a.size == 12 and a.mtime == MTIME and a.attrs == 0x01
+    assert vol.data[a.data_offset : a.data_offset + a.size] == b"hello world\n"
+    assert b.mode == RW_MODE and b.missing == 0 and b.damage is None
+    assert vol.data[b.data_offset : b.data_offset + b.size] == b"x" * 50
+
+
+def test_fset_file_is_the_sum_of_its_chunks_and_short_chunks_are_missing():
+    """A 512-byte file in 100-byte chunks sums whole; a header claiming more than its chunks is lost."""
+    items = [
+        FsetItem("BIG.BIN", data=bytes(range(256)) * 2, chunk=100, mtime=MTIME),
+        FsetItem("CUT.TXT", data=b"only this", size=20, mtime=MTIME),
+    ]
+    vol = _fset_volume(items)
+    big, cut = fs.get("qicstream-fset").entries(vol, _vtbl(vol), SOURCE)
+    assert big.size == 512 and big.missing == 0
+    assert vol.data[big.data_offset : big.data_offset + 100] == bytes(range(100))
+    assert cut.size == 20 and cut.missing == 11 and cut.damage == "lost"
+    assert vol.data[cut.data_offset : cut.data_offset + 9] == b"only this"
+
+
+def test_fset_parser_reports_an_unbalanced_directory_stack():
+    """Every push must be popped by the end of the stream; one left open fails the check."""
+    vol = _fset_volume(FSET_ITEMS[:-1])
+    probe = fs.get("qicstream-fset").probe(vol, _vtbl(vol), SOURCE, now=NOW)
+    assert [c.name for c in probe.failures] == ["directory stack balanced"]
+    assert "1 directories left open" in probe.failures[0].detail
+
+
+def test_fset_header_in_a_hole_warns():
+    good = _fset_volume()
+    first_header = good.data.index(bytes([6, 1])) + 1  # the first directory's prefix
+    damaged = build_twvl(
+        good.data,
+        bytes.fromhex(good.header["vtbl"]["raw"]),
+        holes=[[first_header, first_header + 3]],
+    )
+    probe = fs.get("qicstream-fset").probe(damaged, _vtbl(damaged), SOURCE, now=NOW)
+    assert VolumeWarning.DIRECTORY_DAMAGED in probe.warnings
+
+
+def test_qic113_parsers_fail_on_an_fset_volume():
+    vol = _fset_volume()
+    for name in ("qic113-basic", "qic113-extended"):
+        assert not fs.get(name).probe(vol, _vtbl(vol), SOURCE, now=NOW).passed, name
+
+
+def test_fset_parser_fails_on_the_qic113_volumes():
+    for vol in (_extended_volume(), _basic_volume()):
+        probe = fs.get("qicstream-fset").probe(vol, _vtbl(vol), SOURCE, now=NOW)
+        assert not probe.passed, probe
+
+
+def test_fset_header_past_the_buffer_is_fatal_not_a_crash():
+    """A structLen that runs past the volume is the wrong layout: a fatal probe, no exception."""
+    stream = build_fset_volume([FsetItem("DOCS", is_dir=True)], catalog=False, terminate=False)
+    stream += bytes([5]) + build_fset_header("CUT.TXT", struct_len=0x4000)
+    record = build_vtbl_entry(start_seg=3, end_seg=4, description="FSET", date=BACKUP_DATE)
+    vol = build_twvl(stream, record)
+    probe = fs.get("qicstream-fset").probe(vol, _vtbl(vol), SOURCE, now=NOW)
+    assert probe.fatal is not None and "header" in probe.fatal and not probe.passed

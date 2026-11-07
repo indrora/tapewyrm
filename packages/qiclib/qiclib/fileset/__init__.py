@@ -35,7 +35,12 @@ importing this package does. A parser is stdlib-only library code
 
 from __future__ import annotations
 
-from qiclib.fileset import none, qic113_basic, qic113_extended  # noqa: F401  (registers)
+from qiclib.fileset import (  # noqa: F401  (registers)
+    none,
+    qic113_basic,
+    qic113_extended,
+    qicstream_fset,
+)
 from qiclib.fileset.base import (
     NONE,
     FileSetParser,

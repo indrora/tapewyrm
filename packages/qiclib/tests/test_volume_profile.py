@@ -270,3 +270,24 @@ def test_fileset_section_names_the_parser():
     assert vp.load("qic113-rev-g").fileset_parser == "qic113-extended"
     assert vp.load("mtn").fileset_parser == "qic113-basic"
     assert vp.load("vendor-unknown").fileset_parser == "qic113-basic"
+
+
+def test_volume_only_fingerprint_is_deferred_at_the_table_stage():
+    """qicstream-v2 has no table-stage gate: it must neither win nor warn against the real winner.
+
+    Before rank() seated deferred profiles last (2026-11-07), its Rev N
+    reading outscored vendor-unknown, which reads nothing past byte 56, on
+    every tape with the vendor bit set.
+    """
+    vol, _ = volume_mod.parse_header_data(build_format_parameter_record())
+    assert vp.load("qicstream-v2").deferred
+    assert not any(vp.load(n).deferred for n in vp.builtin_names() if n != "qicstream-v2")
+    for flags, winner in ((0x00, "qic80-rev-n"), (0x01, "vendor-unknown")):
+        rec = build_vtbl_entry(
+            start_seg=3, end_seg=40, description="C:", flags=flags, dir_section_size=4096
+        )
+        ranked = vp.guess([rec], vol, now=NOW)
+        alive = vp.survivors(ranked)
+        assert alive[0].profile.name == winner and alive[0].warnings == {VolumeWarning.GENERIC}
+        assert [v.profile.name for v in alive[1:]] == ["qicstream-v2"]
+        assert [v.profile.name for v in vp.contenders(ranked)] == [winner]

@@ -375,21 +375,22 @@ def _assemble(
             log.debug("guessing volume profile from %d records", len(records))
         verdicts = vp.guess(records, vol) if records else []
         alive = vp.survivors(verdicts)
+        rivals = vp.contenders(verdicts)  # the deferred cannot tie for the table
         if verdicts and not alive:
             log.debug("every volume profile was eliminated; showing the best reading anyway")
             notes.append(
                 "no volume profile's fingerprint matches this tape; the volumes are read "
                 f"with {verdicts[0].profile.name} and may be wrong"
             )
-        elif len(alive) > 1 and alive[0].score == alive[1].score:
+        elif len(rivals) > 1 and rivals[0].score == rivals[1].score:
             log.debug(
                 "profiles %s and %s tie at score %d; using the first",
-                alive[0].profile.name,
-                alive[1].profile.name,
-                alive[0].score,
+                rivals[0].profile.name,
+                rivals[1].profile.name,
+                rivals[0].score,
             )
             notes.append(
-                f"volume profiles {alive[0].profile.name} and {alive[1].profile.name} "
+                f"volume profiles {rivals[0].profile.name} and {rivals[1].profile.name} "
                 "fit equally well; showing the first. Pick one with --volume-profile"
             )
     else:

@@ -285,11 +285,12 @@ def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeT
     best = alive[0]
     profile = best.profile
     log.info("volume table read with volume profile %s (score %d)", profile.name, best.score)
-    if len(alive) > 1 and alive[1].score == best.score:
+    rivals = vp.contenders(verdicts)  # the deferred cannot tie for the table
+    if len(rivals) > 1 and rivals[1].score == best.score:
         log.warning(
             "volume profiles %s and %s fit equally well; using %s (pick one with --volume-profile)",
             profile.name,
-            alive[1].profile.name,
+            rivals[1].profile.name,
             profile.name,
         )
     table = VolumeTable(profile, best.entries, best, tuple(alive[1:]))

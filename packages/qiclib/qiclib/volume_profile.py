@@ -78,7 +78,12 @@ it ``vtbl-ambiguous``.
 whether the volume's bytes read as that software's catalog is the
 ``[fileset]`` parser's probe, run by ``qiclib.extract`` once the volume is
 built (:mod:`qiclib.fileset`). A profile whose parser fails there loses
-even after winning here.
+even after winning here. The reverse holds for a profile whose only
+fingerprint is in the volume bytes (``volume_bytes``: ``qicstream-v2``'s
+``FSET``): the table cannot vouch for it, so it never wins here, however
+its assumed offsets score. It is seated behind every other survivor
+(:func:`rank`, :func:`contenders`) and chosen only when the winner's
+parser fails and ``extract`` tries the survivors that built the same bytes.
 
 **Warnings.** A profile's ``status`` says how much it has been exercised:
 ``spec`` (from a standard), ``bench`` (confirmed on the tapes listed) or
@@ -182,6 +187,22 @@ class VolumeProfile:
     def positive_match(self) -> bool:
         """Does the fingerprint name anything the writer wrote (not just a flag)?"""
         return bool(self.vtbl_bytes or self.volume_bytes or self.format_codes)
+
+    @property
+    def deferred(self) -> bool:
+        """Is the volume the only place this profile can be told apart (``volume_bytes`` alone)?
+
+        Such a profile (``qicstream-v2``: ``FSET`` at volume byte 4) has no
+        gate the table stage can apply, so it survives on every tape and
+        reads the record with offsets it only assumes. Its plausibility
+        points are no evidence about the table: :func:`rank` seats it
+        behind every survivor the table can vouch for, and it is chosen
+        only when the winner's parser fails and ``qiclib.extract`` tries the
+        survivors that built the same bytes.
+        """
+        return bool(self.volume_bytes) and not (
+            self.vtbl_bytes or self.format_codes or self.vendor_bit is not None
+        )
 
     @property
     def static_warnings(self) -> frozenset[VolumeWarning]:
@@ -616,13 +637,31 @@ def evaluate(
 
 
 def rank(verdicts: list[Verdict]) -> list[Verdict]:
-    """Survivors first by score, then the eliminated by score (ties keep the given order)."""
-    return sorted(verdicts, key=lambda v: (not v.eliminated, v.score), reverse=True)
+    """Survivors first by score, then the eliminated by score (ties keep the given order).
+
+    Among the survivors, those the table can vouch for come before the
+    deferred (:attr:`VolumeProfile.deferred`), whatever the scores.
+    """
+    return sorted(
+        verdicts, key=lambda v: (not v.eliminated, not v.profile.deferred, v.score), reverse=True
+    )
 
 
 def survivors(verdicts: list[Verdict]) -> list[Verdict]:
     """The verdicts whose fingerprint held, in the order given."""
     return [v for v in verdicts if not v.eliminated]
+
+
+def contenders(verdicts: list[Verdict]) -> list[Verdict]:
+    """The survivors that can win the table stage, in the order given.
+
+    Leaves out the deferred (:attr:`VolumeProfile.deferred`), which are no
+    evidence about the table and must neither win nor make a winner
+    ``low-confidence``; when nothing else survived they are all there is,
+    and the survivors stand.
+    """
+    alive = survivors(verdicts)
+    return [v for v in alive if not v.profile.deferred] or alive
 
 
 def guess(
@@ -640,16 +679,17 @@ def guess(
     runner-up with the same reading but a lower score is no competitor: it
     is the winner's own generalisation (``qic113-rev-g`` under
     ``cms-qic113``), beaten by exactly the hint that makes the winner
-    specific. With no survivor at all the list is just the eliminated, best
-    first, and the caller decides what to make of that (``identify`` shows
-    it; ``extract`` refuses).
+    specific. A deferred profile (:func:`contenders`) is neither winner nor
+    competitor. With no survivor at all the list is just the eliminated,
+    best first, and the caller decides what to make of that (``identify``
+    shows it; ``extract`` refuses).
     """
     if profiles is None:
         log.debug("guess: no profiles given; loading the built-in ones")
     candidates = profiles if profiles is not None else load_builtin()
     log.debug("guess: scoring %d volume profiles against %d records", len(candidates), len(records))
     ranked = rank([evaluate(records, vol, p, now) for p in candidates])
-    alive = survivors(ranked)
+    alive = contenders(ranked)
     if len(alive) >= 2:
         best, runner = alive[0], alive[1]
         if runner.entries == best.entries:

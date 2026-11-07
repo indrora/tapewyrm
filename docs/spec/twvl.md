@@ -267,7 +267,7 @@ reading instructions wherever it goes.
 | Member    | JSON type      | Description |
 |-----------|----------------|-------------|
 | `profile` | string         | The volume profile the writer read the tape with (its `name`). |
-| `parser`  | string         | The parser that profile names: `"qic113-basic"`, `"qic113-extended"`, or `"none"` for a format the profile recognises but no parser can list. |
+| `parser`  | string         | The parser that profile names: `"qic113-basic"`, `"qic113-extended"`, `"qicstream-fset"`, or `"none"` for a format the profile recognises but no parser can list. |
 | `params`  | object         | The parser's parameters from the profile's `[fileset]` section, defaults filled in; `{}` when it takes none. |
 | `status`  | string         | The profile's status: `"spec"`, `"bench"` or `"untested"`. |
 | `probe`   | object or null | The parser's verdict on this volume (below), or `null` when the writer did not probe (a hand-written file). |
