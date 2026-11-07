@@ -14,12 +14,21 @@ each written as ``{out_dir}/{prefix}{NN}.twvl``, or ``outfile`` names the one
 selected volume's file. Every check that needs the volume table (does volume
 N exist? is exactly one selected for ``outfile``?) runs before anything is
 written, so a typo never leaves half an output directory behind.
+
+The same machinery serves a reader that wants one volume without a file in
+between: :func:`load_volume` opens the image, reads the table
+(:func:`read_volume_table`) and returns one volume as the in-memory
+:class:`~tapewyrm_archive.twvl.Volume` :func:`build_volume` makes, exactly
+the object ``extract`` would have saved. ``qicsilver inspect IMAGE`` lists a
+tape that way. Its selection rule (:func:`_pick_volume`) is deliberately
+stricter than ``extract``'s: a one-volume tape needs no choice, a tape with
+several needs an explicit number, never a guess.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
@@ -60,8 +69,8 @@ def _expected_data_len(excluded_mask: int) -> int:
 def _segment_bounds(img: TapeImage, start: int, end: int) -> tuple[list[int], int]:
     """Stream offsets where each non-BAD segment of an uncompressed volume starts, and the total.
 
-    Mirrors the layout loop in :func:`extract` exactly: BAD segments take no
-    room, MISSING/UNCORRECTABLE ones their expected size, read ones their data.
+    Mirrors the layout loop in :func:`build_volume` exactly: BAD segments take
+    no room, MISSING/UNCORRECTABLE ones their expected size, read ones their data.
     """
     bounds: list[int] = []
     pos = 0
@@ -151,6 +160,347 @@ def _select_volumes(volumes: list[int] | None, count: int, outfile: Path | None)
     return selected
 
 
+def _pick_volume(volume: int | None, count: int) -> int:
+    """The one volume-table index :func:`load_volume` builds, or a ``ValueError`` saying how to pick.
+
+    The rule ``qicsilver inspect IMAGE`` follows. A tape with exactly one
+    volume needs no choice, so ``None`` picks it. A tape with several needs
+    ``volume`` (``--volume N``): silently taking the first would list the
+    wrong backup without a word, and the error names the count and the
+    range instead. An explicit number is range-checked by
+    :func:`_select_volumes`, so ``inspect`` and ``extract`` word a missing
+    volume the same way ("no volume 7 on this tape; its volumes are 0-2").
+    """
+    if volume is not None:
+        [picked] = _select_volumes([volume], count, None)
+        return picked
+    if count == 1:
+        log.debug("no volume given and the table has one; taking volume 0")
+        return 0
+    if count == 0:
+        log.debug("no volume given and the volume table is empty; refusing")
+        raise ValueError("the volume table is empty; there is no volume to read")
+    log.debug("no volume given and the table has %d volumes; refusing", count)
+    raise ValueError(
+        f"this tape has {count} volumes (0-{count - 1}); pick one with --volume N "
+        "(`qicsilver identify` lists them)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reading the volume table
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VolumeTable:
+    """The volume table as the best-fitting volume profile read it.
+
+    ``profile`` is None when the segment parsed to no records at all; the
+    table is then empty and nothing can be extracted.
+    """
+
+    profile: vp.VolumeProfile | None
+    entries: list[volume_mod.VtblEntry]
+
+    @property
+    def extent_offset_bytes(self) -> int:
+        """Width of the uncompressed-offset field that heads each QIC-122 extent.
+
+        The profile knows it (Rev G's 8-byte quadword, or MTN's 4). With no
+        profile there is nothing to decode anyway, so the Rev G width stands.
+        """
+        return self.profile.extent_offset_bytes if self.profile is not None else 8
+
+
+def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeTable:
+    """The image's volume table, read through a volume profile as ``qicsilver identify`` reads it.
+
+    ``volume_profile`` is a name, a path, or ``"guess"``. Only bytes 0-56 of a
+    VTBL entry are universal: section sizes, the compression flag and the
+    extent offset width differ by the software that wrote the tape, and the
+    plain Rev N layout misreads them on e.g. MTN tapes -- a size taken from
+    the middle of the label, compression read as off. A table segment that
+    was never recovered is a ``ValueError``; a partly rebuilt one is parsed
+    for what it still holds.
+    """
+    # The FPR member extraction cannot do without, checked up front so a
+    # malformed header is a MalformedFileError naming the member, not a
+    # KeyError mid-way (TWS-2 sections 4.3 and 11.2; the checks live in
+    # TapeImage, see the note on qic80_segment there).
+    vt_seg = img.qic80_segment("first_data_seg")
+    vt_entry = img.entries[vt_seg]
+    log.debug(
+        "volume table at segment %d (first_data_seg): state %s, %d erasures, data_len %d",
+        vt_seg,
+        vt_entry.state.name,
+        vt_entry.erasures,
+        vt_entry.data_len,
+    )
+    if vt_entry.state in (SegmentState.MISSING, SegmentState.BAD):
+        log.debug("volume table segment %d is %s; refusing", vt_seg, vt_entry.state.name)
+        raise ValueError(f"volume table segment {vt_seg} was not recovered")
+    if vt_entry.state is SegmentState.UNCORRECTABLE:
+        # Not refused: a partly rebuilt table may still read. One that reads
+        # as garbage scores low with every volume profile, and a size it
+        # claims beyond what its segments can hold is refused in build_volume.
+        log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
+    log.debug("reading volume table from segment %d with volume profile %r", vt_seg, volume_profile)
+    # Deferred: identify pulls in build, segment and rs (the sector decode
+    # path), which only this step of extraction needs.
+    from qiclib.identify import from_image
+
+    verdicts = from_image(img, volume_profile=volume_profile).verdicts
+    if not verdicts:
+        log.debug("no VTBL records in segment %d; no profile to apply", vt_seg)
+        return VolumeTable(None, [])
+    best = verdicts[0]
+    profile = best.profile
+    log.info("volume table read with volume profile %s (score %d)", profile.name, best.score)
+    if len(verdicts) > 1 and verdicts[1].score == best.score:
+        log.warning(
+            "volume profiles %s and %s fit equally well; using %s (pick one with --volume-profile)",
+            profile.name,
+            verdicts[1].profile.name,
+            profile.name,
+        )
+    table = VolumeTable(profile, best.entries)
+    log.debug(
+        "volume table: %d entries; extent offsets are %d bytes",
+        len(table.entries),
+        table.extent_offset_bytes,
+    )
+    return table
+
+
+# ---------------------------------------------------------------------------
+# Building one volume
+# ---------------------------------------------------------------------------
+
+
+def build_volume(
+    img: TapeImage,
+    k: int,
+    e: volume_mod.VtblEntry,
+    *,
+    offset_bytes: int,
+    tape_name: str,
+    image_path: Path,
+    progress: Progress = NULL_PROGRESS,
+) -> Volume:
+    """Volume ``k`` of the image, table entry ``e``, as an in-memory TWVL volume.
+
+    QIC-122 extents are decoded (``offset_bytes`` wide offsets) and placed at
+    their uncompressed offsets, or an uncompressed volume's segments are laid
+    end to end; segments that were not recovered become holes. ``tape_name``
+    and ``image_path`` only fill in the header (TWS-3 section 3.1). A table
+    entry that runs past the image, or claims more bytes than its segments
+    could hold, is a ``ValueError`` before any segment is read.
+    """
+    size = (e.data_section_size or 0) + (e.dir_section_size or 0)
+    log.debug(
+        "volume %d %r: segments %d..%d, compressed=%r, data_section_size=%r, "
+        "dir_section_size=%r -> %d bytes",
+        k,
+        e.description,
+        e.start_seg,
+        e.end_seg,
+        e.compressed,
+        e.data_section_size,
+        e.dir_section_size,
+        size,
+    )
+    if e.end_seg < e.start_seg:
+        log.debug(
+            "volume %d: end_seg %d < start_seg %d; no segments will be read",
+            k,
+            e.end_seg,
+            e.start_seg,
+        )
+    elif e.end_seg >= len(img.entries):
+        log.debug(
+            "volume %d: end_seg %d is past the image's %d segments; refusing",
+            k,
+            e.end_seg,
+            len(img.entries),
+        )
+        raise ValueError(
+            f"volume {k}: the volume table says it ends at segment {e.end_seg}, "
+            f"past the end of the image ({len(img.entries)} segments, last is "
+            f"{len(img.entries) - 1}); the image is truncated or the table is read "
+            "with the wrong layout -- try another --volume-profile"
+        )
+    if size == 0:
+        log.debug(
+            "volume %d: section sizes give 0 bytes (missing/None in the table?); "
+            "volume body will be empty",
+            k,
+        )
+    if e.compressed is None:
+        log.debug("volume %d: compressed flag is None; treating segments as QIC-122 extents", k)
+    # The whole volume is allocated up front (SparseVolume.read), so a
+    # misread size is a MemoryError, not a bad file. Refuse anything
+    # the volume's segments could not hold even at the best plausible
+    # compression ratio -- the same bound volume_profile's size check uses.
+    span = max(0, e.end_seg - e.start_seg + 1)
+    ratio = 1 if e.compressed is False else vp.MAX_COMPRESSION_RATIO
+    max_size = span * vp.SEGMENT_DATA_BYTES * ratio
+    if size > max_size:
+        log.debug(
+            "volume %d: %d bytes > %d (%d segments x %d x %d); refusing",
+            k,
+            size,
+            max_size,
+            span,
+            vp.SEGMENT_DATA_BYTES,
+            ratio,
+        )
+        raise ValueError(
+            f"volume {k}: the volume table claims {size:,} bytes, but its {span} "
+            f"segments hold at most {max_size:,}; the table is probably read with the "
+            "wrong layout -- try another --volume-profile"
+        )
+    # Uncompressed volumes are the segments' usable data laid end to
+    # end, so their real length -- and every segment boundary -- is
+    # known before reading a byte. The table's data + directory sizes
+    # undercount it: QIC-113 Rev G §7 puts a Segment Gap between the
+    # sections (§7.1: the directory starts on a segment boundary), so
+    # sizing from the table cut the end off a Directory-Last directory.
+    # The boundaries also pin that directory exactly: the first one at
+    # or after the data section's end. (Compressed volumes are laid out
+    # by their extents' offsets, where the gap takes no room.)
+    directory_offset = None
+    if e.compressed is False:
+        bounds, total = _segment_bounds(img, e.start_seg, e.end_seg)
+        log.debug(
+            "volume %d: uncompressed; segments hold %d bytes (table says %d)",
+            k,
+            total,
+            size,
+        )
+        size = total
+        if e.directory_last and e.data_section_size is not None:
+            directory_offset = next((b for b in bounds if b >= e.data_section_size), None)
+            log.debug(
+                "volume %d: directory-last; directory at %r (first segment boundary "
+                "at or after the %d-byte data section)",
+                k,
+                directory_offset,
+                e.data_section_size,
+            )
+    stream = SparseVolume(size=size)
+    lost: list[int] = []
+    n_bad = 0
+    # Uncompressed volumes only: where the next segment's data goes.
+    # The volume is the concatenation of each segment's usable data in
+    # order, and segments differ in length (the bad-sector map shortens
+    # some, BAD ones hold nothing), so the offset is a running sum, not
+    # (n - start_seg) * segment size.
+    pos = 0
+    with progress.task(f"volume {k}", total=e.end_seg + 1 - e.start_seg, unit="segments") as bar:
+        for n in range(e.start_seg, e.end_seg + 1):
+            bar.advance()
+            st = img.entries[n].state
+            if st is SegmentState.BAD:
+                # Mapped out before the backup was written: the
+                # software skipped it, so it takes no room in the volume.
+                log.debug("segment %d (volume %d): BAD per bad-sector map; skipping", n, k)
+                n_bad += 1
+                continue
+            if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
+                hole = _expected_data_len(img.entries[n].excluded_mask)
+                log.debug(
+                    "segment %d (volume %d): state %s; marking lost (%d-byte hole "
+                    "at %d if uncompressed)",
+                    n,
+                    k,
+                    st.name,
+                    hole,
+                    pos,
+                )
+                lost.append(n)
+                pos += hole
+                continue
+            data = img.segment(n)
+            if e.compressed is False:
+                # Uncompressed volume: usable data laid end to end.
+                stream.add(pos, data)
+                pos += len(data)
+                continue
+            try:
+                ext = qic122.decode_extent(data, offset_bytes=offset_bytes)
+            except qic122.Qic122Error as exc:
+                log.debug(
+                    "segment %d (volume %d): QIC-122 decode failed (state %s, "
+                    "%d bytes): %s; marking lost",
+                    n,
+                    k,
+                    st.name,
+                    len(data),
+                    exc,
+                )
+                lost.append(n)
+                continue
+            if ext.uncompressed_offset + len(ext.data) > size:
+                log.debug(
+                    "segment %d (volume %d): extent at offset %d + %d bytes runs "
+                    "past volume size %d; bytes beyond it are dropped",
+                    n,
+                    k,
+                    ext.uncompressed_offset,
+                    len(ext.data),
+                    size,
+                )
+            stream.add(ext.uncompressed_offset, ext.data)
+    log.debug(
+        "volume %d: %d segments skipped (BAD), %d lost, %d of %d bytes covered",
+        k,
+        n_bad,
+        len(lost),
+        stream.coverage(),
+        size,
+    )
+    body, _ = stream.read(0, size)
+    holes = find_holes(stream, size)
+    vol = Volume(
+        header={
+            "format": "TWVL",
+            "version": VERSION,
+            "volume_index": k,
+            "tape_name": tape_name,
+            "vtbl": _vtbl_dict(e),
+            "data_section_size": e.data_section_size,
+            "dir_section_size": e.dir_section_size,
+            # Where the directory section starts in the volume bytes,
+            # when that is known exactly (uncompressed Directory-Last);
+            # None = consumers locate it (qiclib.qic113 does).
+            "directory_offset": directory_offset,
+            # The length of the volume bytes, so a reader can tell a
+            # truncated file from a short volume (TWS-3 3.1, 6.2).
+            "volume_size": size,
+            "holes": holes,
+            "lost_segments": lost,
+            # Only the image's directory name and file name: the
+            # full path as given would put the user's home directory
+            # (and user name) into every volume (TWS-3 8.2).
+            "source_image": provenance_path(image_path),
+            "drive": img.header.get("drive"),
+        },
+        data=body,
+    )
+    missing = sum(b - a for a, b in holes)
+    log.info(
+        f"volume {k}: {e.description!r}, {size:,} bytes, {missing:,} missing "
+        f"({len(lost)} segments lost)"
+    )
+    return vol
+
+
+# ---------------------------------------------------------------------------
+# The two entry points: every selected volume to files, or one volume in memory
+# ---------------------------------------------------------------------------
+
+
 def extract(
     image_path: Path,
     out_dir: Path,
@@ -170,64 +520,21 @@ def extract(
     unused); several volumes selected with it, or a volume the table does not
     have, is a ``ValueError`` raised before anything is written.
 
-    The volume table is read through a volume profile, exactly as ``qicsilver identify``
-    reads it (``volume_profile`` is a name, a path, or ``"guess"``). Only bytes
-    0-56 of a VTBL entry are universal: section sizes, the compression flag and
-    the extent offset width differ by the software that wrote the tape, and the
-    plain Rev N layout misreads them on e.g. MTN tapes -- a size taken from the
-    middle of the label, compression read as off.
+    The volume table is read through a volume profile, exactly as ``qicsilver
+    identify`` reads it (:func:`read_volume_table`, which says why that
+    matters).
     """
     log.info("extracting volumes from %s...", image_path.name)
     # A TWTZ image is decompressed to a temp file here; its finalizer deletes it
     # when img goes out of scope at return.
     img = TapeImage.open(image_path, progress=progress)
-    # The two FPR members extraction cannot do without, checked up front so a
-    # malformed header is a MalformedFileError naming the member, not a
-    # KeyError mid-way (TWS-2 sections 4.3 and 11.2; the checks live in
-    # TapeImage, see the note on qic80_segment there).
-    vt_seg = img.qic80_segment("first_data_seg")
+    # The other FPR member extraction needs (first_data_seg is
+    # read_volume_table's), checked up front for the same reason.
     tape_name = img.qic80_str("tape_name")
-    vt_entry = img.entries[vt_seg]
-    log.debug(
-        "volume table at segment %d (first_data_seg): state %s, %d erasures, data_len %d",
-        vt_seg,
-        vt_entry.state.name,
-        vt_entry.erasures,
-        vt_entry.data_len,
-    )
-    if vt_entry.state in (SegmentState.MISSING, SegmentState.BAD):
-        log.debug("volume table segment %d is %s; refusing", vt_seg, vt_entry.state.name)
-        raise ValueError(f"volume table segment {vt_seg} was not recovered")
-    if vt_entry.state is SegmentState.UNCORRECTABLE:
-        # Not refused: a partly rebuilt table may still read. One that reads
-        # as garbage scores low with every volume profile, and a size it
-        # claims beyond what its segments can hold is refused below.
-        log.debug("volume table segment %d is UNCORRECTABLE; parsing partial data anyway", vt_seg)
-    log.debug("reading volume table from segment %d with volume profile %r", vt_seg, volume_profile)
-    # Deferred: identify pulls in build, segment and rs (the sector decode
-    # path), which only this step of extraction needs.
-    from qiclib.identify import from_image
-
-    verdicts = from_image(img, volume_profile=volume_profile).verdicts
-    if verdicts:
-        best = verdicts[0]
-        profile = best.profile
-        vtbl = best.entries
-        log.info("volume table read with volume profile %s (score %d)", profile.name, best.score)
-        if len(verdicts) > 1 and verdicts[1].score == best.score:
-            log.warning(
-                "volume profiles %s and %s fit equally well; using %s (pick one with --volume-profile)",
-                profile.name,
-                verdicts[1].profile.name,
-                profile.name,
-            )
-    else:
-        log.debug("no VTBL records in segment %d; no profile to apply", vt_seg)
-        profile, vtbl = None, []
-    offset_bytes = profile.extent_offset_bytes if profile is not None else 8
-    log.debug("volume table: %d entries; extent offsets are %d bytes", len(vtbl), offset_bytes)
+    table = read_volume_table(img, volume_profile)
+    vtbl = table.entries
     if not vtbl:
-        log.debug("volume table segment %d parsed to no entries; nothing to extract", vt_seg)
+        log.debug("volume table parsed to no entries; nothing to extract")
     selected = _select_volumes(volumes, len(vtbl), outfile)
     log.debug("writing volumes %s of %d", selected, len(vtbl))
     # Create the one directory the output goes into: -o's parent, or out_dir.
@@ -237,210 +544,55 @@ def extract(
     written: list[Path] = []
     with progress.task("extracting volumes", total=len(selected), unit="volumes") as overall:
         for k in selected:
-            e = vtbl[k]
-            size = (e.data_section_size or 0) + (e.dir_section_size or 0)
-            log.debug(
-                "volume %d %r: segments %d..%d, compressed=%r, data_section_size=%r, "
-                "dir_section_size=%r -> %d bytes",
+            vol = build_volume(
+                img,
                 k,
-                e.description,
-                e.start_seg,
-                e.end_seg,
-                e.compressed,
-                e.data_section_size,
-                e.dir_section_size,
-                size,
-            )
-            if e.end_seg < e.start_seg:
-                log.debug(
-                    "volume %d: end_seg %d < start_seg %d; no segments will be read",
-                    k,
-                    e.end_seg,
-                    e.start_seg,
-                )
-            elif e.end_seg >= len(img.entries):
-                log.debug(
-                    "volume %d: end_seg %d is past the image's %d segments; refusing",
-                    k,
-                    e.end_seg,
-                    len(img.entries),
-                )
-                raise ValueError(
-                    f"volume {k}: the volume table says it ends at segment {e.end_seg}, "
-                    f"past the end of the image ({len(img.entries)} segments, last is "
-                    f"{len(img.entries) - 1}); the image is truncated or the table is read "
-                    "with the wrong layout -- try another --volume-profile"
-                )
-            if size == 0:
-                log.debug(
-                    "volume %d: section sizes give 0 bytes (missing/None in the table?); "
-                    "volume body will be empty",
-                    k,
-                )
-            if e.compressed is None:
-                log.debug(
-                    "volume %d: compressed flag is None; treating segments as QIC-122 extents", k
-                )
-            # The whole volume is allocated up front (SparseVolume.read), so a
-            # misread size is a MemoryError, not a bad file. Refuse anything
-            # the volume's segments could not hold even at the best plausible
-            # compression ratio -- the same bound volume_profile's size check uses.
-            span = max(0, e.end_seg - e.start_seg + 1)
-            ratio = 1 if e.compressed is False else vp.MAX_COMPRESSION_RATIO
-            max_size = span * vp.SEGMENT_DATA_BYTES * ratio
-            if size > max_size:
-                log.debug(
-                    "volume %d: %d bytes > %d (%d segments x %d x %d); refusing",
-                    k,
-                    size,
-                    max_size,
-                    span,
-                    vp.SEGMENT_DATA_BYTES,
-                    ratio,
-                )
-                raise ValueError(
-                    f"volume {k}: the volume table claims {size:,} bytes, but its {span} "
-                    f"segments hold at most {max_size:,}; the table is probably read with the "
-                    "wrong layout -- try another --volume-profile"
-                )
-            # Uncompressed volumes are the segments' usable data laid end to
-            # end, so their real length -- and every segment boundary -- is
-            # known before reading a byte. The table's data + directory sizes
-            # undercount it: QIC-113 Rev G §7 puts a Segment Gap between the
-            # sections (§7.1: the directory starts on a segment boundary), so
-            # sizing from the table cut the end off a Directory-Last directory.
-            # The boundaries also pin that directory exactly: the first one at
-            # or after the data section's end. (Compressed volumes are laid out
-            # by their extents' offsets, where the gap takes no room.)
-            directory_offset = None
-            if e.compressed is False:
-                bounds, total = _segment_bounds(img, e.start_seg, e.end_seg)
-                log.debug(
-                    "volume %d: uncompressed; segments hold %d bytes (table says %d)",
-                    k,
-                    total,
-                    size,
-                )
-                size = total
-                if e.directory_last and e.data_section_size is not None:
-                    directory_offset = next((b for b in bounds if b >= e.data_section_size), None)
-                    log.debug(
-                        "volume %d: directory-last; directory at %r (first segment boundary "
-                        "at or after the %d-byte data section)",
-                        k,
-                        directory_offset,
-                        e.data_section_size,
-                    )
-            stream = SparseVolume(size=size)
-            lost: list[int] = []
-            n_bad = 0
-            # Uncompressed volumes only: where the next segment's data goes.
-            # The volume is the concatenation of each segment's usable data in
-            # order, and segments differ in length (the bad-sector map shortens
-            # some, BAD ones hold nothing), so the offset is a running sum, not
-            # (n - start_seg) * segment size.
-            pos = 0
-            with progress.task(
-                f"volume {k}", total=e.end_seg + 1 - e.start_seg, unit="segments"
-            ) as bar:
-                for n in range(e.start_seg, e.end_seg + 1):
-                    bar.advance()
-                    st = img.entries[n].state
-                    if st is SegmentState.BAD:
-                        # Mapped out before the backup was written: the
-                        # software skipped it, so it takes no room in the volume.
-                        log.debug("segment %d (volume %d): BAD per bad-sector map; skipping", n, k)
-                        n_bad += 1
-                        continue
-                    if st in (SegmentState.MISSING, SegmentState.UNCORRECTABLE):
-                        hole = _expected_data_len(img.entries[n].excluded_mask)
-                        log.debug(
-                            "segment %d (volume %d): state %s; marking lost (%d-byte hole "
-                            "at %d if uncompressed)",
-                            n,
-                            k,
-                            st.name,
-                            hole,
-                            pos,
-                        )
-                        lost.append(n)
-                        pos += hole
-                        continue
-                    data = img.segment(n)
-                    if e.compressed is False:
-                        # Uncompressed volume: usable data laid end to end.
-                        stream.add(pos, data)
-                        pos += len(data)
-                        continue
-                    try:
-                        ext = qic122.decode_extent(data, offset_bytes=offset_bytes)
-                    except qic122.Qic122Error as exc:
-                        log.debug(
-                            "segment %d (volume %d): QIC-122 decode failed (state %s, "
-                            "%d bytes): %s; marking lost",
-                            n,
-                            k,
-                            st.name,
-                            len(data),
-                            exc,
-                        )
-                        lost.append(n)
-                        continue
-                    if ext.uncompressed_offset + len(ext.data) > size:
-                        log.debug(
-                            "segment %d (volume %d): extent at offset %d + %d bytes runs "
-                            "past volume size %d; bytes beyond it are dropped",
-                            n,
-                            k,
-                            ext.uncompressed_offset,
-                            len(ext.data),
-                            size,
-                        )
-                    stream.add(ext.uncompressed_offset, ext.data)
-            log.debug(
-                "volume %d: %d segments skipped (BAD), %d lost, %d of %d bytes covered",
-                k,
-                n_bad,
-                len(lost),
-                stream.coverage(),
-                size,
-            )
-            body, _ = stream.read(0, size)
-            holes = find_holes(stream, size)
-            vol = Volume(
-                header={
-                    "format": "TWVL",
-                    "version": VERSION,
-                    "volume_index": k,
-                    "tape_name": tape_name,
-                    "vtbl": _vtbl_dict(e),
-                    "data_section_size": e.data_section_size,
-                    "dir_section_size": e.dir_section_size,
-                    # Where the directory section starts in the volume bytes,
-                    # when that is known exactly (uncompressed Directory-Last);
-                    # None = consumers locate it (qiclib.qic113 does).
-                    "directory_offset": directory_offset,
-                    # The length of the volume bytes, so a reader can tell a
-                    # truncated file from a short volume (TWS-3 3.1, 6.2).
-                    "volume_size": size,
-                    "holes": holes,
-                    "lost_segments": lost,
-                    # Only the image's directory name and file name: the
-                    # full path as given would put the user's home directory
-                    # (and user name) into every volume (TWS-3 8.2).
-                    "source_image": provenance_path(image_path),
-                    "drive": img.header.get("drive"),
-                },
-                data=body,
+                vtbl[k],
+                offset_bytes=table.extent_offset_bytes,
+                tape_name=tape_name,
+                image_path=image_path,
+                progress=progress,
             )
             path = outfile if outfile is not None else out_dir / f"{prefix}{k:02d}.twvl"
-            log.debug("volume %d: %d holes; saving to %s", k, len(holes), path)
+            log.debug("volume %d: %d holes; saving to %s", k, len(vol.holes), path)
             vol.save(path)
-            missing = sum(b - a for a, b in holes)
-            log.info(
-                f"{path}: {e.description!r}, {size:,} bytes, {missing:,} missing "
-                f"({len(lost)} segments lost)"
-            )
+            log.info("%s: volume %d written", path, k)
             written.append(path)
             overall.advance()
     return written
+
+
+def load_volume(
+    image_path: Path,
+    volume: int | None = None,
+    *,
+    volume_profile: str = vp.GUESS,
+    progress: Progress = NULL_PROGRESS,
+) -> Volume:
+    """One volume of the tape image, in memory: what ``extract`` would have saved for it.
+
+    ``volume`` is its index in the volume table. ``None`` is allowed only when
+    the tape has exactly one volume (:func:`_pick_volume`); several volumes,
+    or an index the table lacks, is a ``ValueError`` that says how to pick.
+    ``volume_profile`` and ``progress`` are :func:`extract`'s.
+    """
+    log.info(
+        "reading volume %s from %s...",
+        "(the only one)" if volume is None else volume,
+        image_path.name,
+    )
+    # A TWTZ image is decompressed to a temp file; the context manager
+    # deletes it as soon as the volume's bytes are in hand.
+    with TapeImage.open(image_path, progress=progress) as img:
+        tape_name = img.qic80_str("tape_name")
+        table = read_volume_table(img, volume_profile)
+        k = _pick_volume(volume, len(table.entries))
+        return build_volume(
+            img,
+            k,
+            table.entries[k],
+            offset_bytes=table.extent_offset_bytes,
+            tape_name=tape_name,
+            image_path=image_path,
+            progress=progress,
+        )

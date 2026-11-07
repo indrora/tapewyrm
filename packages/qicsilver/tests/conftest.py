@@ -1,61 +1,79 @@
-"""Synthetic TWVL volumes shared by the tar, entries and inspect tests.
+"""Synthetic TWVL volumes, and TWTI images holding them, shared by the tar, entries and inspect tests.
 
-Both are built with ``qiclib.testing.builders`` and invented names only (the
+All are built with ``qiclib.testing.builders`` and invented names only (the
 bench tapes are strangers' backups; their listings stay out of the repo).
 """
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import pytest
 from qiclib import qic113ext as q
+from qiclib import segment as seg_mod
 from qiclib.testing.builders import (
     ExtItem,
     build_data_entry,
     build_dir_entry,
     build_ext_volume,
+    build_header_segment,
     build_twvl,
+    build_volume_table_segment,
     build_vtbl_entry,
     make_short_date,
 )
+from tapewyrm_archive.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, TapeImage
 
 #: 1998-12-23 05:13:20 UTC, the mtime of every synthetic extended file.
 EXT_MTIME = 914_390_000
 BACKUP_DATE = make_short_date(1998, 12, 23, 5, 13, 20)
 
 ROOT = q.T_ROOT | q.T_DIR | q.T_LAST_IN_DIR
+SEGMENT_BYTES = 29 * 1024
+TAPE_NAME = "EXAMPLE TAPE"
+
+#: The Extended-OS backup every extended fixture holds, one of each kind of entry:
+#:
+#:   C:                      root
+#:   C:/DOCS                 directory
+#:   C:/EXAMPLE.TXT          read-only, intact (12 bytes)
+#:   C:/BROKEN.DAT           100 bytes (the .twvl fixture puts 50 in a hole -> "lost 50")
+#:   C:/DOCS/NOTES.TXT       the backup software's error flag -> "error"
+EXT_ITEMS = [
+    ExtItem("C:", ROOT),
+    ExtItem("DOCS", q.T_DIR, mtime=EXT_MTIME),
+    ExtItem("EXAMPLE.TXT", 0, b"hello world\n", EXT_MTIME, attrs=0x01),
+    ExtItem("BROKEN.DAT", q.T_LAST_IN_DIR, b"x" * 100, EXT_MTIME, attrs=0x20),
+    ExtItem("NOTES.TXT", q.T_LAST_IN_DIR | q.T_LAST_IN_SET | q.T_ERROR, b"note", EXT_MTIME),
+]
 
 
-@pytest.fixture
-def extended_volume(tmp_path: Path) -> Path:
-    """An Extended-OS volume with one of each kind of entry.
-
-    C:                      root
-    C:/DOCS                 directory
-    C:/EXAMPLE.TXT          read-only, intact (12 bytes)
-    C:/BROKEN.DAT           100 bytes, 50 of them in a hole -> "lost 50"
-    C:/DOCS/NOTES.TXT       the backup software's error flag -> "error"
-    """
-    data_section, directory = build_ext_volume(
-        [
-            ExtItem("C:", ROOT),
-            ExtItem("DOCS", q.T_DIR, mtime=EXT_MTIME),
-            ExtItem("EXAMPLE.TXT", 0, b"hello world\n", EXT_MTIME, attrs=0x01),
-            ExtItem("BROKEN.DAT", q.T_LAST_IN_DIR, b"x" * 100, EXT_MTIME, attrs=0x20),
-            ExtItem("NOTES.TXT", q.T_LAST_IN_DIR | q.T_LAST_IN_SET | q.T_ERROR, b"note", EXT_MTIME),
-        ]
-    )
-    broken = list(q.layout(q.parse_directory(directory)))[3]
-    assert broken.data_offset is not None
-    hole = [broken.data_offset + 10, broken.data_offset + 60]
+def _ext_record(start_seg: int, end_seg: int, description: str, **kw) -> bytearray:
+    """A VTBL record for an Extended-OS volume: flag byte 0x01, QIC-113 Rev G signature."""
     record = bytearray(
         build_vtbl_entry(
-            start_seg=3, end_seg=4, description="EXAMPLE BACKUP", flags=0x01, date=BACKUP_DATE
+            start_seg=start_seg,
+            end_seg=end_seg,
+            description=description,
+            flags=0x01,
+            date=BACKUP_DATE,
+            **kw,
         )
     )
     record[58:60] = (113).to_bytes(2, "little")  # QIC-113 signature, Rev G (7)
     record[60:62] = (7).to_bytes(2, "little")
+    return record
+
+
+@pytest.fixture
+def extended_volume(tmp_path: Path) -> Path:
+    """EXT_ITEMS as a TWVL file, with BROKEN.DAT half in a hole and segment 4 lost."""
+    data_section, directory = build_ext_volume(EXT_ITEMS)
+    broken = list(q.layout(q.parse_directory(directory)))[3]
+    assert broken.data_offset is not None
+    hole = [broken.data_offset + 10, broken.data_offset + 60]
+    record = _ext_record(3, 4, "EXAMPLE BACKUP")
     path = tmp_path / "ext.twvl"
     build_twvl(
         data_section + directory,
@@ -66,6 +84,55 @@ def extended_volume(tmp_path: Path) -> Path:
         dir_section_size=len(directory),
     ).save(path)
     return path
+
+
+def build_extended_image(path: Path, count: int = 1) -> Path:
+    """A TWTI holding ``count`` copies of the EXT_ITEMS backup, one uncompressed segment each.
+
+    Volume k is segment 3 + k, labelled "EXAMPLE BACKUP k", and intact (no
+    holes, no lost segments), so against ``extended_volume`` only BROKEN.DAT's
+    damage differs. The section sizes sit where the Rev N layout keeps them
+    (data_section_size as a quadword at byte 96), the layout the volume
+    profile guess settles on for such a record.
+    """
+    data_section, directory = build_ext_volume(EXT_ITEMS)
+    records = []
+    for k in range(count):
+        rec = _ext_record(3 + k, 3 + k, f"EXAMPLE BACKUP {k}", dir_section_size=len(directory))
+        struct.pack_into("<Q", rec, 96, len(data_section))
+        records.append(bytes(rec))
+    segments = {
+        0: seg_mod.segment_data(build_header_segment(0, tape_name=TAPE_NAME)),
+        1: seg_mod.segment_data(build_header_segment(1, tape_name=TAPE_NAME)),
+        2: seg_mod.segment_data(build_volume_table_segment(2, records)),
+        **{3 + k: (data_section + directory).ljust(SEGMENT_BYTES, b"\x00") for k in range(count)},
+    }
+    entries = [SegmentEntry(SegmentState.CLEAN, 0, len(segments[n])) for n in range(3 + count)]
+    header = {
+        "format": "TWTI",
+        "segment_count": 3 + count,
+        "segment_stride": SEGMENT_STRIDE,
+        "qic80_header": {
+            "header_seg": 0,
+            "dup_header_seg": 1,
+            "first_data_seg": 2,
+            "tape_name": TAPE_NAME,
+        },
+    }
+    TapeImage(header=header, entries=entries).save(path, lambda n: segments[n])
+    return path
+
+
+@pytest.fixture
+def extended_image(tmp_path: Path) -> Path:
+    """The EXT_ITEMS backup as the one volume of a tape image."""
+    return build_extended_image(tmp_path / "ext.twti")
+
+
+@pytest.fixture
+def three_volume_image(tmp_path: Path) -> Path:
+    """Three copies of the EXT_ITEMS backup, volumes 0-2 of one tape image."""
+    return build_extended_image(tmp_path / "three.twti", count=3)
 
 
 @pytest.fixture

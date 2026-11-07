@@ -115,7 +115,7 @@ class VolumeEntry:
 class VolumeListing:
     """A TWVL volume and every entry of its backup, in directory order."""
 
-    path: Path
+    path: Path  # the file the volume came from: a TWVL, or the tape image it was read out of
     volume: Volume
     vtbl: VtblEntry
     extended: bool
@@ -135,6 +135,11 @@ class VolumeListing:
     @property
     def tape_name(self) -> str | None:
         return self.volume.header.get("tape_name")
+
+    @property
+    def volume_index(self) -> int | None:
+        """The volume's number in the tape's volume table (``qicsilver identify`` order)."""
+        return self.volume.header.get("volume_index")
 
     @property
     def description(self) -> str:
@@ -272,7 +277,7 @@ def _header_vtbl(volume_path: Path, hdr: dict) -> VtblEntry:
 
 
 def read_volume(volume_path: Path) -> VolumeListing:
-    """Load a TWVL volume and list every entry of its backup.
+    """Load a TWVL file and list every entry of its backup (:func:`list_volume`).
 
     Raises ``ValueError`` for a volume this cannot read (an Extended volume
     with no QIC-113 section sizes in its table entry), and
@@ -280,20 +285,42 @@ def read_volume(volume_path: Path) -> VolumeListing:
     missing or mistyped.
     """
     log.info("reading volume %s...", volume_path)
-    vol = Volume.load(volume_path)
+    return list_volume(Volume.load(volume_path), volume_path)
+
+
+def list_volume(vol: Volume, source: Path) -> VolumeListing:
+    """List every entry of a volume that is already in memory.
+
+    ``vol`` came from a TWVL file (:func:`read_volume`) or straight out of a
+    tape image (``qiclib.extract.load_volume``, how ``qicsilver inspect
+    IMAGE`` reads one). Both carry the same TWVL header, so a volume is
+    listed identically whichever way it arrived. ``source`` is the file the
+    bytes came from, named in messages and the listing. Raises as
+    :func:`read_volume` does.
+    """
     hdr = vol.header
-    vtbl = _header_vtbl(volume_path, hdr)
+    vtbl = _header_vtbl(source, hdr)
     # null = the writer did not know it exactly; consumers then locate the
     # directory themselves (TWS-3 4.4, 6.2 rule 8).
-    dir_at = _member(volume_path, hdr, "", "directory_offset", _INT, nullable=True)
+    dir_at = _member(source, hdr, "", "directory_offset", _INT, nullable=True)
     extended = qic113.is_extended_os(vtbl)
     if extended:
         log.info("QIC-113 extended directory format")
-        entries = list(_extended_entries(vol, vtbl, dir_at, str(volume_path)))
+        entries = list(_extended_entries(vol, vtbl, dir_at, _volume_name(vol, source)))
     else:
         log.info("QIC-113 Basic-DOS directory format")
         entries = list(_basic_entries(vol, vtbl, dir_at))
-    return VolumeListing(volume_path, vol, vtbl, extended, entries)
+    return VolumeListing(source, vol, vtbl, extended, entries)
+
+
+def _volume_name(vol: Volume, source: Path) -> str:
+    """``source``, plus ``volume N`` when the header says which volume of the tape it is.
+
+    For a message about a volume read out of an image, the image's name
+    alone would not say which of its volumes was meant.
+    """
+    index = vol.header.get("volume_index")
+    return str(source) if index is None else f"{source} volume {index}"
 
 
 def entry_data(vol: Volume, entry: VolumeEntry) -> bytes:

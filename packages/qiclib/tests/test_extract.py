@@ -8,6 +8,7 @@ with a 4-byte extent offset, not Rev G's 8.
 
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from tapewyrm_archive.twti import SEGMENT_STRIDE, SegmentEntry, SegmentState, Ta
 from tapewyrm_archive.twvl import Volume
 
 from qiclib import segment as seg_mod
-from qiclib.extract import extract
+from qiclib.extract import extract, load_volume
 from qiclib.testing.builders import (
     build_header_segment,
     build_volume_table_segment,
@@ -323,3 +324,36 @@ def test_volume_not_on_the_tape_is_refused_before_writing(tmp_path):
     with pytest.raises(ValueError, match=r"no volume 5.*0-2"):
         extract(_multi_image(tmp_path), tmp_path / "out", volumes=[0, 5])
     assert not (tmp_path / "out").exists()
+
+
+# ---------------------------------------------------------------------------
+# load_volume: one volume in memory, the way `qicsilver inspect IMAGE` reads a tape
+# ---------------------------------------------------------------------------
+
+
+def test_load_volume_takes_the_only_volume_without_being_told(tmp_path):
+    vol = load_volume(_multi_image(tmp_path, count=1))
+    assert vol.header["volume_index"] == 0
+    assert vol.data == bytes([0]) * (29 * K)
+
+
+def test_load_volume_is_what_extract_would_have_written(tmp_path):
+    """Header (after the JSON round trip a file makes) and bytes match extract's file."""
+    image = _multi_image(tmp_path)
+    [path] = extract(image, tmp_path / "out", volumes=[1])
+    vol = load_volume(image, 1)
+    assert json.loads(json.dumps(vol.header)) == Volume.load(path).header
+    assert vol.data == Volume.load(path).data == bytes([1]) * (29 * K)
+
+
+def test_load_volume_needs_a_number_when_the_tape_has_several(tmp_path):
+    """Never a silent first volume: the error says how many and how to pick."""
+    with pytest.raises(ValueError, match=r"3 volumes \(0-2\).*--volume N"):
+        load_volume(_multi_image(tmp_path))
+
+
+def test_load_volume_refuses_a_volume_the_tape_lacks(tmp_path):
+    with pytest.raises(ValueError, match=r"no volume 7.*0-2"):
+        load_volume(_multi_image(tmp_path), 7)
+    with pytest.raises(ValueError, match=r"no volume 1.*only volume is 0"):
+        load_volume(_multi_image(tmp_path, count=1), 1)

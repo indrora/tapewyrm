@@ -10,6 +10,7 @@ qicsilver does everything after that, offline.
 uv run --project packages/tapewyrm-cli tw --profile colorado dump captures/NAME
 uv run --project packages/tapewyrm-cli tw convert captures/NAME captures/NAME.twtz
 uv run --project packages/qicsilver qicsilver identify captures/NAME.twtz
+uv run --project packages/qicsilver qicsilver inspect captures/NAME.twtz --volume 0
 uv run --project packages/qicsilver qicsilver extract captures/NAME.twtz captures/NAME-vols
 uv run --project packages/qicsilver qicsilver inspect captures/NAME-vols/vol-00.twvl
 uv run --project packages/qicsilver qicsilver tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
@@ -42,13 +43,18 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   `--prefix P` renames the files (`P00.twvl`), `-o FILE` writes the one
   selected volume to FILE (exactly one volume; not with OUTDIR or `--prefix`).
   Takes `--volume-profile` like `identify`.
-- **`inspect VOLUME [PATH]...`**: list a volume like `tar tv`, without
-  extracting it. A summary (tape name, volume label, date, directory format,
+- **`inspect VOLUME|IMAGE [PATH]...`**: list a volume like `tar tv`, without
+  extracting it. The file is a TWVL volume or a TWTI/TWTZ image, told apart
+  by magic; an image is read as `extract` reads it, but nothing is written.
+  A tape with one volume lists it; a tape with several needs `--volume N`
+  (the number `identify` shows), and `--volume-profile` applies as for
+  `extract`. A summary (tape name, volume label, date, directory format,
   file / directory / damaged counts, missing bytes, lost segments), then one
   line per entry: type and mode, size, modification time (UTC), damage
   (`lost N` / `error`, as in tar's damage report) and path. `PATH` globs
   (fnmatch over the whole path) and `--damaged` narrow the listing; `--json`
-  prints `{"summary": ..., "entries": [...]}`. It shares tar's directory walk
+  prints `{"summary": ..., "entries": [...]}`, the summary naming the
+  volume's number as `volume_index`. It shares tar's directory walk
   (`qicsilver.entries`), so the two always agree.
 - **`tar VOLUME OUT.tar`**: a POSIX (pax) tar of the volume's files and
   directories, with the original names (long Windows 95 names), modification
@@ -68,8 +74,8 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
 
 | Module | What |
 |---|---|
-| `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes). |
-| `qicsilver.entries` | Reads a TWVL volume's header and QIC-113 directory (Extended or Basic-DOS) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag. The walk `tar` and `inspect` share. |
+| `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes); `inspect IMAGE` builds one volume in memory with `qiclib.extract.load_volume`. |
+| `qicsilver.entries` | Reads a TWVL volume's header and QIC-113 directory (Extended or Basic-DOS) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
 | `qicsilver.tar` | Those entries -> pax tar + damage report. |
 | `qicsilver.inspect` | Those entries -> the `inspect` listing, filters and `--json` document. |
 | `qicsilver.console` | Log handler and progress bars: a deliberate copy of `tapewyrm.console`; keep them in step ([STYLE.md](../../STYLE.md) §2). |

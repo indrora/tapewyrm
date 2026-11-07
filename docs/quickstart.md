@@ -377,13 +377,14 @@ Options:
 ## 8. Get the files: `qicsilver extract`, `inspect` and `tar`
 
 ```sh
+qicsilver inspect captures/NAME.twtz                    # a look first: the one volume, or --volume N
 qicsilver --progress extract captures/NAME.twtz captures/NAME-vols
 qicsilver inspect captures/NAME-vols/vol-00.twvl
 qicsilver --progress tar captures/NAME-vols/vol-00.twvl captures/NAME.tar
 ```
 
 The synopses are `qicsilver extract IMAGE [OUTDIR]`, `qicsilver inspect
-VOLUME [PATH]...` and `qicsilver tar VOLUME OUTPUT`: input first, output last.
+VOLUME|IMAGE [PATH]...` and `qicsilver tar VOLUME OUTPUT`: input first, output last.
 `extract` writes one `OUTDIR/vol-NN.twvl` per volume in the volume table (NN
 is the volume's number there, as `identify` lists it) and prints their paths.
 It decompresses QIC-122 data and lays each volume out by its QIC-113 offsets;
@@ -429,6 +430,13 @@ against the whole path, so quote them: `'*.TXT'`, `'C:/WINDOWS/*'`);
 `--damaged` lists only damaged files; `--json` prints the summary and the
 entries as JSON. `inspect` reads the volume with the same code as `tar`, so
 its counts are the ones `tar` prints.
+
+`inspect` also takes the tape image itself, so a tape can be looked at before
+anything is extracted: `qicsilver inspect captures/NAME.twtz` lists a tape
+with one volume, and `qicsilver inspect captures/NAME.twtz --volume 1` picks
+one of several (the number `identify` shows; leave it off and the error says
+how many there are). The image is read exactly as `extract` reads it (so
+`--volume-profile` applies), but no `.twvl` is written.
 
 `tar` turns one volume into a POSIX (pax) tar with the backup's own paths
 (including long Windows 95 names), modification times and DOS attributes:

@@ -6,7 +6,8 @@ Works on TWTI tape images (``tw convert`` output, or its zstd-compressed
     identify  TWTI image -> cartridge, header, dates, bad sectors, volumes
     extract   TWTI image -> one TWVL file per backup volume (QIC-122 decoded,
               holes recorded)
-    inspect   TWVL volume -> a tar-tv style listing: sizes, times, damage
+    inspect   TWVL volume, or one volume of a TWTI image (--volume N) -> a
+              tar-tv style listing: sizes, times, damage
     tar       TWVL volume -> pax tar of the backup's files + a damage report
 
 Output channels and flags follow ``tw`` exactly (STYLE.md §2, §2.5): results
@@ -197,16 +198,34 @@ def extract(
 
 @cli.command()
 @click.argument(
-    "volume", metavar="VOLUME", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+    "file", metavar="VOLUME|IMAGE", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
 @click.argument("paths", metavar="[PATH]...", nargs=-1)
+@click.option(
+    "--volume", "volume_index", metavar="N", type=click.IntRange(min=0), default=None,
+    help="which volume of a tape image to list (required when it has more than one)",
+)  # fmt: skip
+@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
 @click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
 @click.option("--damaged", is_flag=True, help="list only damaged files")
 @click.pass_obj
 def inspect(
-    app: AppContext, volume: Path, paths: tuple[str, ...], as_json: bool, damaged: bool
+    app: AppContext,
+    file: Path,
+    paths: tuple[str, ...],
+    volume_index: int | None,
+    volume_profile: str,
+    as_json: bool,
+    damaged: bool,
 ) -> None:
-    """List what is in a TWVL volume, like `tar tv`, without extracting it.
+    """List what is in a backup volume, like `tar tv`, without extracting it.
+
+    VOLUME|IMAGE is a TWVL volume (`qicsilver extract` output) or a TWTI/TWTZ
+    tape image, told apart by their magic, not their names. An image is read
+    the way `extract` reads it, volume table and all, but nothing is
+    written: a tape with one volume lists it, a tape with several needs
+    --volume N (the number `qicsilver identify` shows next to each volume).
+    --volume-profile is `extract`'s and applies to an image only.
 
     First a summary: tape name, volume label, backup date, the QIC-113
     directory format (Extended or Basic-DOS), file, directory and damaged
@@ -219,13 +238,48 @@ def inspect(
     """
     import json
 
-    from qicsilver.entries import read_volume
+    from qiclib.extract import load_volume
+    from qiclib.volume_profile import VolumeProfileError
+    from tapewyrm_archive.inspect import sniff
+
+    from qicsilver.entries import list_volume, read_volume
     from qicsilver.inspect import format_entries, format_summary, select_entries, to_dict
 
-    log.debug("inspecting %s (paths %r, damaged only %s)", volume, paths, damaged)
+    # The magic decides, as `tw inspect` decides: a renamed file still opens,
+    # and a capture or a stranger is refused by what it is, not what it is called.
+    kind = sniff(file)
+    log.debug(
+        "inspecting %s (%s; volume %r, profile %r, paths %r, damaged only %s)",
+        file,
+        kind or "unknown format",
+        volume_index,
+        volume_profile,
+        paths,
+        damaged,
+    )
     try:
-        listing = read_volume(volume)
-    except ValueError as exc:
+        if kind == "TWVL":
+            if volume_index is not None:
+                log.debug("--volume %d given with a TWVL file; refusing", volume_index)
+                raise click.UsageError(
+                    "--volume picks a volume in a tape image; this file is already one volume"
+                )
+            listing = read_volume(file)
+        elif kind in ("TWTI", "TWTZ"):
+            # The volume is built in memory exactly as `extract` would have
+            # written it; the only difference is that no .twvl lands on disk.
+            with app.progress() as prog:
+                vol = load_volume(file, volume_index, volume_profile=volume_profile, progress=prog)
+            listing = list_volume(vol, file)
+        elif kind == "TWRF":
+            log.debug("%s is a raw capture; refusing", file)
+            raise click.ClickException(
+                f"{file} is a raw capture; `tw convert` it into a tape image first"
+            )
+        else:
+            log.debug("%s is not a TWVL, TWTI or TWTZ; refusing", file)
+            raise click.ClickException(f"{file}: not a TWVL volume or a TWTI/TWTZ tape image")
+    except (ValueError, VolumeProfileError) as exc:
         log.debug("inspect failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
     entries = select_entries(listing.entries, paths, damaged)

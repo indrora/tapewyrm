@@ -1,8 +1,9 @@
-"""`qicsilver inspect`: a tar-tv style listing of a TWVL volume."""
+"""`qicsilver inspect`: a tar-tv style listing of a TWVL volume, or of one volume of an image."""
 
 from __future__ import annotations
 
 import json
+import re
 
 from click.testing import CliRunner
 
@@ -102,3 +103,75 @@ def test_inspect_counts_match_tar(extended_volume, basic_volume, tmp_path):
             f"{doc['files']} files, {doc['directories']} directories, {doc['damaged']} damaged"
             in tar.output
         )
+
+
+# ---------------------------------------------------------------------------
+# inspect IMAGE: the volume is read out of the tape image, nothing written
+# ---------------------------------------------------------------------------
+
+
+def _shape(lines: list[str]) -> list[tuple[str, str, str]]:
+    """(mode, size, path) of each entry line: the columns an intact copy shares with a holed one."""
+    return [(line[:10], line.split()[1], line.split()[-1]) for line in lines]
+
+
+def _error_text(result) -> str:
+    """The failed run's output with rich-click's panel (borders, wrapping) undone, for substring checks."""
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output, result.output
+    return " ".join(re.sub(r"[\u2500-\u257f]", " ", result.output).split())
+
+
+def test_an_image_with_one_volume_lists_it_without_a_number(extended_volume, extended_image):
+    """inspect IMAGE reads the tape's only volume as inspect reads its .twvl."""
+    from_image = _run(str(extended_image))
+    from_file = _run(str(extended_volume))
+    assert "tape name     EXAMPLE TAPE" in from_image
+    assert "volume        EXAMPLE BACKUP 0" in from_image
+    assert "missing       0 bytes missing" in from_image
+    # The same entries in the same order; only BROKEN.DAT's damage column
+    # differs (intact in the image, half in a hole in the .twvl fixture).
+    assert _shape(_listing_lines(from_image)) == _shape(_listing_lines(from_file))
+    [notes] = [line for line in _listing_lines(from_image) if line.endswith("NOTES.TXT")]
+    assert notes.split()[-2] == "error"
+
+
+def test_an_image_listing_names_the_file_and_the_volume_number(extended_image):
+    doc = json.loads(_run(str(extended_image), "--json"))
+    assert doc["summary"]["volume"] == str(extended_image)
+    assert doc["summary"]["volume_index"] == 0
+    assert (doc["summary"]["files"], doc["summary"]["directories"]) == (3, 2)
+
+
+def test_several_volumes_need_dash_dash_volume(three_volume_image):
+    """Never a silent first volume: the error says how many there are and how to pick."""
+    result = CliRunner().invoke(cli, ["inspect", str(three_volume_image)])
+    assert result.exit_code == 1, result.output
+    assert "3 volumes" in _error_text(result) and "--volume N" in _error_text(result)
+    chosen = _run(str(three_volume_image), "--volume", "2")
+    assert "volume        EXAMPLE BACKUP 2" in chosen
+    doc = json.loads(_run(str(three_volume_image), "--volume", "1", "--json"))
+    assert doc["summary"]["volume_index"] == 1
+
+
+def test_a_volume_the_tape_lacks_is_a_clean_error(three_volume_image):
+    result = CliRunner().invoke(cli, ["inspect", str(three_volume_image), "--volume", "7"])
+    assert result.exit_code == 1, result.output
+    assert "no volume 7" in _error_text(result) and "0-2" in _error_text(result)
+
+
+def test_dash_dash_volume_with_a_twvl_file_is_a_usage_error(extended_volume):
+    result = CliRunner().invoke(cli, ["inspect", str(extended_volume), "--volume", "0"])
+    assert result.exit_code == 2, result.output
+    assert "--volume" in _error_text(result) and "already one volume" in _error_text(result)
+
+
+def test_files_are_told_apart_by_magic_not_by_name(tmp_path):
+    capture = tmp_path / "lies.twvl"  # TWRF magic under a .twvl name
+    capture.write_bytes(b"TWRF" + bytes(64))
+    result = CliRunner().invoke(cli, ["inspect", str(capture)])
+    assert result.exit_code == 1 and "tw convert" in _error_text(result), result.output
+    junk = tmp_path / "junk.twti"
+    junk.write_bytes(b"nope nope")
+    result = CliRunner().invoke(cli, ["inspect", str(junk)])
+    assert result.exit_code == 1 and "not a TWVL volume" in _error_text(result), result.output

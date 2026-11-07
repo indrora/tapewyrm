@@ -114,10 +114,16 @@ def format_entries(entries: Sequence[VolumeEntry]) -> list[str]:
 
 
 def to_dict(listing: VolumeListing, entries: Sequence[VolumeEntry]) -> dict[str, Any]:
-    """The ``--json`` document: the whole volume's summary and the selected entries."""
+    """The ``--json`` document: the whole volume's summary and the selected entries.
+
+    ``volume`` is the file given (a TWVL, or the tape image) and
+    ``volume_index`` the volume's number in the tape's volume table, so a
+    consumer of ``inspect IMAGE --volume N`` sees which volume it got.
+    """
     return {
         "summary": {
             "volume": str(listing.path),
+            "volume_index": listing.volume_index,
             "tape_name": listing.tape_name,
             "description": listing.description,
             "date": listing.date,
