@@ -1,0 +1,32 @@
+# QIC-113 Rev G section 6: an extended-OS volume on a QIC-40/80 tape.
+#
+# The signature is word 113 at VTBL byte 58 with the QIC-113 revision at 60
+# (F = 6, G = 7); bytes 84-127 then follow the Rev N offsets. Section 6 also
+# says the writer sets the vendor-specific bit, but the CMS tapes show that is
+# not reliable (see cms-qic113.toml), so only the signature is matched.
+#
+# This is the layout every QIC-113 extended writer shares -- Windows 95 Backup
+# and Arcada Backup per QICStreamReader's qicstream95 / arcadabackup readers,
+# which walk the same 33CC33CC / 66996699 data entries -- and the one a more
+# specific profile (cms-qic113) refines by naming the vendor data at 62. The
+# two bench tapes carrying the signature are both CMS, so this profile has no
+# tape of its own yet; it is the spec's layout, and the parser's probe says
+# whether a tape reads as it.
+
+name = "qic113-rev-g"
+description = "QIC-113 Rev G extended volume: signature 113 at byte 58, Rev N offsets"
+status = "spec"
+
+[match]
+vtbl_bytes = [[58, "7100"]]     # word 113, little endian
+
+[vtbl]
+multi_cartridge_seq = [57, 1]
+dir_section_size = [92, 4]
+data_section_size = [96, 8]
+source_label = [106, 16]
+compression = [124, 1]
+os_type = [125, 1]
+
+[fileset]
+parser = "qic113-extended"

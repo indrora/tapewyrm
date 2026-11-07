@@ -29,8 +29,7 @@ import struct
 from dataclasses import dataclass, field
 
 from qiclib.types import FileEntry, FileSet
-from qiclib.volume import VtblEntry, decode_short_date
-from qiclib.volume_profile import SEGMENT_DATA_BYTES
+from qiclib.volume import SEGMENT_DATA_BYTES, VtblEntry, decode_short_date
 
 log = logging.getLogger(__name__)
 
@@ -483,35 +482,51 @@ def _parse_extended_data_section(stream: bytes, start: int) -> list[DataEntry]:
 def is_extended_os(vtbl: VtblEntry) -> bool:
     """Detect Extended-OS vs Basic-DOS from the VTBL entry (DESIGN.md §7.5).
 
-    Extended-OS if byte 56 bit 0 (vendor-specific) is set **and** the vendor
-    extension words at offsets 58/60 read 113 / a revision; Basic-DOS otherwise.
+    Extended-OS if the vendor extension words at offsets 58/60 read 113 and
+    a revision (QIC-113 Rev G section 6: F = 6, G = 7); Basic-DOS otherwise.
 
-    Byte 125 (Format & OS Type) is deliberately *not* a marker either way. On
-    QIC-40/80 tapes QIC-113 Rev G §6 makes the vendor bit plus the 113
-    signature the only mark of an extended volume, and the bench tape's
-    extended volume has OS type 6 only *behind* that mark. Reading "type != 1"
-    as Extended would misroute any plain QIC-80 volume with an odd byte 125,
-    and "type == 1" changes nothing (it is the default). This used to have a
-    separate byte-125 branch returning False -- dead code, now just logged.
+    The vendor-specific bit (byte 56 bit 0) is deliberately NOT required.
+    Rev G section 6 says a QIC-113 volume on a QIC-40/80 tape sets it, and
+    the bench tape "jc" does -- but the unk-co tape (the same CMS software
+    on a QIC-3010 cartridge, 2026-11-07) writes the identical 113 / 6 /
+    "CMS" bytes at 58-64 with the bit clear. Demanding the bit routed that
+    volume to the Basic-DOS parser, which "found" 186 nameless zero-byte
+    files. The 113 signature is what the software wrote; the bit is a flag
+    it set on one cartridge type and not another.
+
+    Byte 125 (Format & OS Type) is deliberately *not* a marker either way:
+    the bench tape's extended volume has OS type 6 only *behind* the 113
+    signature, and reading "type != 1" as Extended would misroute any plain
+    QIC-80 volume with an odd byte 125. This used to have a separate
+    byte-125 branch returning False -- dead code, now just logged.
+
+    This is the kind of gate :mod:`qiclib.fileset` replaces with a probe:
+    the parsers try the bytes and score the result, so a tape that lies
+    here still lists. It stays for :func:`extract`'s own framing walk and
+    for the viewer's annotations.
     """
     raw = vtbl.raw
-    if len(raw) >= 62 and (vtbl.flags & 0x01):
+    if len(raw) >= 62:
         ext1 = int.from_bytes(raw[58:60], "little")
         ext2 = int.from_bytes(raw[60:62], "little")
-        # 58/59 = 113 marks QIC-113; 60/61 is its revision (QIC-113 Rev G
-        # section 6: F = 6, G = 7). Any revision counts -- this used to demand
-        # exactly 7 and so misread the bench tape's Rev F volume as Basic DOS.
+        # Any revision counts -- this used to demand exactly 7 and so misread
+        # the bench tape's Rev F volume as Basic DOS.
         if ext1 == 113 and ext2 >= 1:
             log.debug(
-                "vtbl %r: QIC-113 signature %d rev %d; Extended-OS", vtbl.description, ext1, ext2
+                "vtbl %r: QIC-113 signature %d rev %d (vendor bit %d); Extended-OS",
+                vtbl.description,
+                ext1,
+                ext2,
+                vtbl.flags & 0x01,
             )
             return True
-        log.debug(
-            "vtbl %r: vendor bit set but ext words %d/%d; not Extended-OS",
-            vtbl.description,
-            ext1,
-            ext2,
-        )
+        if vtbl.flags & 0x01:
+            log.debug(
+                "vtbl %r: vendor bit set but ext words %d/%d; not Extended-OS",
+                vtbl.description,
+                ext1,
+                ext2,
+            )
     log.debug(
         "vtbl %r: no Extended-OS marker (OS type byte %r); Basic-DOS",
         vtbl.description,

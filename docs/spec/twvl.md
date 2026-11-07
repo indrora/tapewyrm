@@ -40,6 +40,8 @@ files.
   - [3.1. Top-Level Object](#31-top-level-object)
   - [3.2. The vtbl Object](#32-the-vtbl-object)
   - [3.3. The drive Object](#33-the-drive-object)
+  - [3.4. The fileset Object](#34-the-fileset-object)
+  - [3.5. Warnings](#35-warnings)
 - [4. Volume Bytes](#4-volume-bytes)
   - [4.1. Volume Size](#41-volume-size)
   - [4.2. Uncompressed Volumes](#42-uncompressed-volumes)
@@ -200,6 +202,8 @@ All members below are REQUIRED of a writer. A member whose value is
 | `lost_segments`     | array of integer           | Segment numbers, within the source image, of the volume's segments that were not recovered (Section 5). Empty array when none. |
 | `source_image`      | string                     | The TWTI or TWTZ image the volume was extracted from, as the name of the directory that held it, `/`, and its file name (e.g. `tapes/jc.twtz` for `/Users/x/tapes/jc.twtz`), or the bare file name when it was given without a directory (`jc.twtz`). Never an absolute path, and nothing above that one directory (Section 8.2). Informative only. |
 | `drive`             | object or null             | The `drive` member of the source image's header ([TWS-2]), copied verbatim, or `null` if the image has none (Section 3.3). |
+| `fileset`           | object or null             | Which file-set parser reads the volume bytes, and the verdict of its probe (Section 3.4); `null` when the writer had no volume profile to go by (an empty volume table). |
+| `warnings`          | array of string            | The caveats the read carries, by name (Section 3.5). Empty array when none. |
 
 ### 3.2. The vtbl Object
 
@@ -250,6 +254,49 @@ image's `drive` object unchanged. As of this document they are
 `device_serial`, `drive_status`, `drive_config`, `drive_rom`,
 `drive_vendor_id`, `tape_status`, `rate_kbps` and `firmware_commit`,
 each possibly `null`. Readers MUST NOT require any of them.
+
+### 3.4. The fileset Object
+
+The volume bytes were laid out by whichever backup program wrote the
+tape; the `fileset` object says which of the reference reader's file-set
+parsers (`qiclib.fileset`) reads them, and how sure that is. A reader
+dispatches on it (Section 6.2, rule 12) instead of deciding the format
+from the VTBL record again, which is how a volume carries its own
+reading instructions wherever it goes.
+
+| Member    | JSON type      | Description |
+|-----------|----------------|-------------|
+| `profile` | string         | The volume profile the writer read the tape with (its `name`). |
+| `parser`  | string         | The parser that profile names: `"qic113-basic"`, `"qic113-extended"`, or `"none"` for a format the profile recognises but no parser can list. |
+| `params`  | object         | The parser's parameters from the profile's `[fileset]` section, defaults filled in; `{}` when it takes none. |
+| `status`  | string         | The profile's status: `"spec"`, `"bench"` or `"untested"`. |
+| `probe`   | object or null | The parser's verdict on this volume (below), or `null` when the writer did not probe (a hand-written file). |
+
+The `probe` object is the parser's `Probe` serialised: `passed`
+(boolean), `score` (integer), `entries` (integer: how many the parser
+would list), `fatal` (string, or `null`: why the parse cannot be right at
+all), `warnings` (array of string, Section 3.5) and `checks`, an array
+of `{"name", "ok", "points", "detail"}` objects, one per plausibility
+check. A reader MAY show it and MUST NOT need it.
+
+### 3.5. Warnings
+
+`warnings` lists, by name, every caveat the volume's read carries: the
+profile's own (`untested`, `single-tape`, `generic`), the selection's
+(`low-confidence`, `vtbl-ambiguous`) and the parser's (`no-parser`,
+`special-fs`, `lossy-names`, `spans-cartridges`, `compression-unknown`,
+`directory-damaged`, `directory-reconstructed`). The names are a closed
+set, defined with their meanings by `qiclib.verdict.VolumeWarning`; a
+reader that meets a name it does not know MUST treat the header as
+malformed (Section 8.1), since the set only grows with this document.
+The array is sorted and holds no duplicates.
+
+Warnings are advice to whoever uses the entries -- a tar writer, a
+listing, a person -- not instructions to the reader: `low-confidence`
+says to look twice, `no-parser` says the volume cannot be listed,
+`special-fs` says a plain tar will lose something. They travel: the
+reference reader's `inspect` prints them, and its `tar` writes them into
+the archive's pax global header as `TAPEWYRM.warnings`.
 
 ## 4. Volume Bytes
 
@@ -413,6 +460,11 @@ can have holes and no lost segments.
     name of the image's directory and its file name only, derived from
     the path as given without resolving it, so that neither an absolute
     path nor the current directory's name is ever written.
+11. A writer MUST write `fileset` and `warnings`. It MUST NOT name a
+    parser it did not run: `fileset.probe` records the probe it ran, and
+    a probe that did not pass is written as such, never dropped or
+    improved. A writer with no volume profile for the volume writes
+    `fileset` as `null` and `warnings` as `[]`.
 
 ### 6.2. Reader Requirements
 
@@ -455,6 +507,13 @@ can have holes and no lost segments.
     file cut short is a failed copy, and the remedy is to copy it, or
     extract it from its image, again. Damage inside a complete file is
     what `holes` records.
+12. A reader SHOULD read the volume bytes with the parser `fileset`
+    names, and SHOULD refuse, with a diagnostic, a volume whose parser
+    is `"none"`. When `fileset` is absent (a file written before Section
+    3.4 existed) a reader MAY try every parser it has and use the best
+    whose probe passes; when it is `null`, there was no profile to go by
+    and the reader is on its own. A reader MUST reject a `warnings`
+    member that is not an array of known names (Section 3.5).
 
 ## 7. Versioning and Extensibility
 
@@ -470,6 +529,11 @@ members (Section 6.2, rule 4).
 
 Members of `vtbl` follow the decoded VTBL fields; a future volume
 profile that decodes more of the record MAY add members to `vtbl`.
+
+`fileset` and `warnings` (Sections 3.4 and 3.5) were added to version 1
+this way on 2026-11-07: a reader from before them still reads the volume
+bytes correctly, and a reader from after them treats a file without them
+as Section 6.2, rule 12 says.
 
 ## 8. Security and Privacy Considerations
 
@@ -678,6 +742,26 @@ Notes on the header:
   A reader tries offset 32 (`data_section_size`) first.
 - `holes` is `[[16, 32]]`: the bytes the missing segment 4 would have
   supplied. Segment 4 is in `lost_segments`.
+- The example predates `fileset` and `warnings` (Sections 3.4 and 3.5),
+  so its header length is as shown. A writer today adds, after `drive`:
+
+  ```json
+   "fileset": {
+    "profile": "qic80-rev-n",
+    "parser": "qic113-basic",
+    "params": {},
+    "status": "spec",
+    "probe": {
+     "passed": true, "score": 7, "entries": 3, "fatal": null,
+     "warnings": [],
+     "checks": [{"name": "entries", "ok": true, "points": 2, "detail": "3 entries"}]
+    }
+   },
+   "warnings": ["generic"]
+  ```
+
+  (`generic`: the Rev N layout has no fingerprint of its own and won by
+  default.)
 
 Volume bytes (offsets 0x482-0x4b1, volume offsets 0-47):
 
@@ -702,6 +786,7 @@ bytes missing.
 | Format version | Date       | Changes |
 |---------------:|------------|---------|
 | 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. Same date, before release: added `volume_size`, which is required, and readers MUST reject a header without it; readers MUST reject truncated files (Section 6.2); `source_image` records only the directory name and file name. |
+| 1              | 2026-11-07 | Added `fileset` (Section 3.4) and `warnings` (Section 3.5): the file-set parser the writer probed the volume with, that probe's verdict, and the caveats of the read, as a closed set of names; writer rule 11, reader rule 12. No version change (Section 7). |
 
 ## Author's Address
 

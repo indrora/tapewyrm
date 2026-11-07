@@ -19,8 +19,10 @@ otherwise **stdlib-only**: no rich or click ([STYLE.md](../../STYLE.md) §2).
 | `qiclib.rs`, `qiclib.segment` | QIC-80 Reed-Solomon erasure decoding, per-segment correction. |
 | `qiclib.volume` | Header segment, bad-sector map and volume table (QIC-80-MC Rev N). |
 | `qiclib.cartridge` + `profiles/cartridge/*.toml` | Which cartridge a header's geometry implies (QIC-40/80/3010/3020 lengths and widths, e.g. `qic-extra` = Verbatim MC3020EX QIC-Extra). |
-| `qiclib.volume_profile` + `profiles/volume/*.toml` | Which backup software wrote the volume table, and where its fields are. |
-| `qiclib.qic113`, `qiclib.qic113ext` | QIC-113 directories: Basic-DOS and extended (Rev G §8). |
+| `qiclib.volume_profile` + `profiles/volume/*.toml` | Which backup software wrote the tape: its VTBL field offsets, its extent widths and its file-set parser, matched by a fingerprint gate and scored for plausibility. |
+| `qiclib.verdict` | The shared vocabulary of a read: `Check`s, the closed `VolumeWarning` enum and a parser's `Probe`. |
+| `qiclib.fileset` | File-set parsers (`qic113-basic`, `qic113-extended`, `none`): a volume's bytes to `VolumeEntry` records, with a probe that says whether the parse can be right. |
+| `qiclib.qic113`, `qiclib.qic113ext` | QIC-113 directories: Basic-DOS and extended (Rev G §8), the decoders behind the two parsers. |
 | `qiclib.qic122` | QIC-122 (Stac LZS) decompression and QIC-113 compression extents. |
 | `qiclib.build` | Sectors -> TWTI image: the layout half of `tw convert`. |
 | `qiclib.identify` | What is on a tape, from a TWTI/TWTZ image (`qicsilver identify`). |

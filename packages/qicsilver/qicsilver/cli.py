@@ -291,9 +291,10 @@ def inspect(
     --volume N (the number `qicsilver identify` shows next to each volume).
     --volume-profile is `extract`'s and applies to an image only.
 
-    First a summary: tape name, volume label, backup date, the QIC-113
-    directory format (Extended or Basic-DOS), file, directory and damaged
-    counts, missing bytes and lost segments. Then one line per entry: type
+    First a summary: tape name, volume label, backup date, the directory
+    format and the parser that read it, file, directory and damaged counts,
+    missing bytes and lost segments, and the warnings the volume carries
+    (low-confidence, directory-damaged, ...). Then one line per entry: type
     and mode, size in bytes, modification time (UTC), damage (`lost N` = N
     bytes fell in unrecovered tape; `error` = the backup software could not
     read the file) and the path. Each PATH is a glob matched against the
@@ -354,7 +355,8 @@ def tar(
 
     Keeps the backup's own paths, modification times and attributes (pax
     header TAPEWYRM.dos_attributes, or TAPEWYRM.qic113_attributes for a
-    Basic-DOS volume). Files with bytes in unrecovered segments are written
+    Basic-DOS volume), and the volume's warnings in the pax global header
+    TAPEWYRM.warnings. Files with bytes in unrecovered segments are written
     zero-filled unless --skip-damaged.
     """
     from qicsilver.tar import write_tar

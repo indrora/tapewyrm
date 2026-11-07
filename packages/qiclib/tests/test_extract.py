@@ -357,3 +357,21 @@ def test_load_volume_refuses_a_volume_the_tape_lacks(tmp_path):
         load_volume(_multi_image(tmp_path), 7)
     with pytest.raises(ValueError, match=r"no volume 1.*only volume is 0"):
         load_volume(_multi_image(tmp_path, count=1), 1)
+
+
+def test_header_names_the_parser_and_the_warnings(tmp_path):
+    """TWS-3 3.4 / 3.5: the volume carries its own reading instructions.
+
+    The MTN fixture is extent plumbing, not a catalog, so its probe fails;
+    the header still records which parser the profile names, and that the
+    probe did not pass, rather than pretending.
+    """
+    [path] = extract(_mtn_image(tmp_path), tmp_path / "out")
+    hdr = Volume.load(path).header
+    fileset = hdr["fileset"]
+    assert fileset["profile"] == "mtn" and fileset["parser"] == "qic113-basic"
+    assert fileset["status"] == "bench" and fileset["params"] == {}
+    assert fileset["probe"]["passed"] is False and fileset["probe"]["entries"] == 0
+    # The record is thin (no description, tiny sizes), so Rev N's reading of
+    # it is only one check behind MTN's: a fair low-confidence, and nothing else.
+    assert set(hdr["warnings"]) <= {"low-confidence"}

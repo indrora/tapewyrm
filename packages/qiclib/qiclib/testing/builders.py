@@ -354,31 +354,43 @@ def build_twvl(
     dir_section_size: int | None = None,
     directory_offset: int | None = None,
     compressed: bool | None = False,
+    fileset: str | None = None,
+    warnings: list[str] | None = None,
 ) -> Volume:
     """A TWVL :class:`~tapewyrm_archive.twvl.Volume` around ``stream``.
 
     The header carries what ``qicsilver tar`` and ``qicsilver inspect`` read
     (TWS-3 section 3.1): the raw VTBL record (``vtbl_record``, e.g. from
     :func:`build_vtbl_entry`), its flag byte, the section sizes, holes and
-    lost segments. Save it with ``.save(path)``.
+    lost segments. ``fileset`` names the file-set parser as ``extract``
+    would (TWS-3 3.4, the profile named after the parser); left None, the
+    header names none and a reader probes every parser, the pre-3.4 path.
+    ``warnings`` fills the header's list (3.5). Save it with ``.save(path)``.
     """
-    return Volume(
-        header={
-            "format": "TWVL",
-            "tape_name": tape_name,
-            "holes": holes or [],
-            "lost_segments": lost_segments or [],
+    header: dict = {
+        "format": "TWVL",
+        "tape_name": tape_name,
+        "holes": holes or [],
+        "lost_segments": lost_segments or [],
+        "data_section_size": data_section_size,
+        "dir_section_size": dir_section_size,
+        "directory_offset": directory_offset,
+        "volume_size": len(stream),
+        "vtbl": {
+            "raw": vtbl_record.hex(),
+            "flags": vtbl_record[56],
+            "compressed": compressed,
             "data_section_size": data_section_size,
             "dir_section_size": dir_section_size,
-            "directory_offset": directory_offset,
-            "volume_size": len(stream),
-            "vtbl": {
-                "raw": vtbl_record.hex(),
-                "flags": vtbl_record[56],
-                "compressed": compressed,
-                "data_section_size": data_section_size,
-                "dir_section_size": dir_section_size,
-            },
         },
-        data=stream,
-    )
+    }
+    if fileset is not None:
+        header["fileset"] = {
+            "profile": fileset,
+            "parser": fileset,
+            "params": {},
+            "status": "bench",
+            "probe": None,
+        }
+        header["warnings"] = warnings or []
+    return Volume(header=header, data=stream)

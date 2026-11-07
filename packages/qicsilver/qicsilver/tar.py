@@ -28,10 +28,14 @@ default), separately from files the original backup software could not read.
 
 Both QIC-113 directory formats are supported (Extended: DOS attributes kept
 as pax ``TAPEWYRM.dos_attributes``; Basic-DOS: QIC-113 attribute bits kept as
-pax ``TAPEWYRM.qic113_attributes``). Reading the volume -- the header, the
-directory walk, sizes, modes and damage -- is :mod:`qicsilver.entries`, shared
-with ``qicsilver inspect`` so a listing and a tar can never disagree; this
-module only writes what it yields.
+pax ``TAPEWYRM.qic113_attributes``). The warnings the volume carries (its
+TWVL header's, plus the parser's: ``low-confidence``, ``directory-damaged``,
+...) go into the tar's pax *global* header as ``TAPEWYRM.warnings`` and into
+the damage report, so whoever opens the tar later knows how sure the read
+was. Reading the volume -- the header, the directory walk, sizes, modes and
+damage -- is :mod:`qicsilver.entries`, shared with ``qicsilver inspect`` so
+a listing and a tar can never disagree; this module only writes what it
+yields.
 """
 
 from __future__ import annotations
@@ -94,9 +98,15 @@ def write_tar(
     vol = listing.volume
     result = TarResult(out=out, report=report_path)
 
+    # A pax global header applies to every member after it: the one place
+    # in a tar for "this whole archive was read with these caveats".
+    global_headers = {}
+    if listing.warnings:
+        log.debug("tar global header TAPEWYRM.warnings = %s", listing.warning_names)
+        global_headers["TAPEWYRM.warnings"] = ",".join(listing.warning_names)
     log.info("writing %s...", out)
     with (
-        tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as tar,
+        tarfile.open(out, "w", format=tarfile.PAX_FORMAT, pax_headers=global_headers) as tar,
         progress.task("writing tar", total=len(listing.entries), unit="entries") as bar,
     ):
         for entry in listing.entries:
@@ -124,6 +134,9 @@ def write_tar(
     with report_path.open("w", encoding="utf-8") as rep:
         rep.write(f"# qicsilver damage report for {listing.path}\n")
         rep.write(f"# tape {listing.tape_name!r}; volume {listing.description!r}\n")
+        rep.write(f"# read with the {listing.parser} parser\n")
+        if listing.warnings:
+            rep.write(f"# warnings: {', '.join(listing.warning_names)}\n")
         lost = listing.lost_segments
         rep.write(f"# lost tape segments: {len(lost)} {lost}\n")
         rep.write(

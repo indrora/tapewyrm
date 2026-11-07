@@ -6,8 +6,9 @@ which entries exist, their sizes and which are damaged. This module only
 filters and formats them:
 
 * a summary of the whole volume (tape name, volume label, backup date, the
-  QIC-113 directory format, file / directory / damaged counts, missing
-  bytes, lost segments), then
+  directory format and the parser that read it, file / directory / damaged
+  counts, missing bytes, lost segments, and any warnings the volume
+  carries), then
 * one line per entry, plain aligned columns so it stays greppable::
 
       -r--r--r--     12  1998-12-23 05:13:20           C:/EXAMPLE.TXT
@@ -83,20 +84,32 @@ def _plural(count: int, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
+def _directory_line(listing: VolumeListing) -> str:
+    """``QIC-113 Extended (qic113-extended parser, profile cms-qic113)`` and the like."""
+    name = f"QIC-113 {listing.format_name}" if listing.is_qic113 else listing.format_name
+    via = f"{listing.parser} parser"
+    if listing.profile:
+        via += f", profile {listing.profile}"
+    return f"{name} ({via})"
+
+
 def format_summary(listing: VolumeListing) -> list[str]:
     """The header lines: what the volume is and how much of it survived."""
     lost = len(listing.lost_segments)
-    return [
+    lines = [
         f"tape name     {listing.tape_name or '-'}",
         f"volume        {listing.description or '-'}",
         f"date          {listing.date or '-'}",
-        f"directory     QIC-113 {listing.format_name}",
+        f"directory     {_directory_line(listing)}",
         f"entries       {_plural(listing.files, 'file')}, "
         f"{listing.dirs} {'directory' if listing.dirs == 1 else 'directories'}, "
         f"{listing.damaged} damaged",
         f"missing       {decimal(listing.missing_bytes)} missing of "
         f"{decimal(listing.volume_bytes)}; {_plural(lost, 'lost segment')}",
     ]
+    if listing.warnings:
+        lines.append(f"warnings      {', '.join(listing.warning_names)}")
+    return lines
 
 
 def format_entries(entries: Sequence[VolumeEntry]) -> list[str]:
@@ -128,6 +141,9 @@ def to_dict(listing: VolumeListing, entries: Sequence[VolumeEntry]) -> dict[str,
             "description": listing.description,
             "date": listing.date,
             "directory_format": listing.format_name,
+            "parser": listing.parser,
+            "profile": listing.profile,
+            "warnings": listing.warning_names,
             "files": listing.files,
             "directories": listing.dirs,
             "damaged": listing.damaged,

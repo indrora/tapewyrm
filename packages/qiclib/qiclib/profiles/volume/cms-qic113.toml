@@ -1,16 +1,27 @@
-# Colorado Memory Systems backup (and anything else writing QIC-113 volumes).
+# Colorado Memory Systems backup (HP Colorado Backup): QIC-113 extended volumes.
 #
-# The entry sets the vendor-specific bit (byte 56 bit 0) and carries the QIC-113
-# signature: word 113 at byte 58, the QIC-113 revision at 60 (F = 6, G = 7).
-# QIC-113 Rev G §6 then defines bytes 84-127 with the Rev N offsets. Seen on the
-# bench Colorado tape "jc" (QIC-113 Rev F, DOS extended format).
+# The entry carries the QIC-113 signature -- word 113 at byte 58, the QIC-113
+# revision at 60 (F = 6, G = 7) -- and CMS's own mark, "CMS" in the vendor data
+# at 62 (QIC-113 Rev G section 6 gives the writer 22 bytes there). Rev G then
+# defines bytes 84-127 with the Rev N offsets. Seen on two bench tapes:
+#   jc      QIC-80,   1998, flags 0x25: vendor-specific bit SET
+#   unk-co  QIC-3010, 1997, flags 0x24: vendor-specific bit CLEAR
+# Bytes 57-65 are otherwise identical (01 | 71 00 | 06 00 | "CMS\0"), so the
+# vendor bit is NOT part of this fingerprint: it is a flag the same software
+# set on one cartridge type and not the other, and matching on it routed
+# unk-co to the Rev N profile and the Basic-DOS parser (2026-11-07). Match on
+# what the software wrote.
+#
+# The same layout without the CMS mark is qic113-rev-g; this one scores a hint
+# higher on a CMS tape and names the writer.
 
 name = "cms-qic113"
-description = "Vendor-specific entry carrying the QIC-113 signature (Colorado CMS backup)"
+description = "Colorado/HP CMS backup: QIC-113 signature at 58 and 'CMS' at 62"
+status = "bench"
+tapes = ["jc", "unk-co"]
 
 [match]
-vendor_bit = true
-vtbl_bytes = [[58, "7100"]]     # word 113, little endian
+vtbl_bytes = [[58, "7100"], [62, "434d53"]]   # word 113, little endian; "CMS"
 
 [vtbl]
 multi_cartridge_seq = [57, 1]
@@ -19,3 +30,6 @@ data_section_size = [96, 8]
 source_label = [106, 16]
 compression = [124, 1]
 os_type = [125, 1]
+
+[fileset]
+parser = "qic113-extended"

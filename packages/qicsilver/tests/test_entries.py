@@ -78,3 +78,62 @@ def test_tar_and_the_entry_walk_agree(fixture, request, tmp_path):
     assert res.damaged == [
         (e.path, e.missing, e.size, e.error) for e in listing.entries if e.damage
     ]
+
+
+# ---------------------------------------------------------------------------
+# Which parser reads the volume: the header's say, or a probe of them all
+# ---------------------------------------------------------------------------
+
+
+def _named(tmp_path, volume, fileset: dict | None, warnings: list[str]):
+    from tapewyrm_archive.twvl import Volume
+
+    vol = Volume.load(volume)
+    vol.header["fileset"] = fileset
+    vol.header["warnings"] = warnings
+    path = tmp_path / "named.twvl"
+    vol.save(path)
+    return path
+
+
+def test_volume_without_a_named_parser_is_probed(extended_volume, basic_volume):
+    assert read_volume(extended_volume).parser == "qic113-extended"
+    assert read_volume(basic_volume).parser == "qic113-basic"
+
+
+def test_volume_header_names_its_parser(tmp_path, extended_volume):
+    fileset = {
+        "profile": "cms-qic113",
+        "parser": "qic113-extended",
+        "params": {},
+        "status": "bench",
+        "probe": None,
+    }
+    listing = read_volume(_named(tmp_path, extended_volume, fileset, ["single-tape"]))
+    assert listing.parser == "qic113-extended" and listing.profile == "cms-qic113"
+    assert listing.warning_names == ["single-tape"] and listing.format_name == "Extended"
+
+
+def test_volume_whose_profile_has_no_parser_is_refused(tmp_path, extended_volume):
+    fileset = {"profile": "novastor", "parser": "none", "params": {}, "status": "untested"}
+    path = _named(tmp_path, extended_volume, fileset, ["no-parser", "untested"])
+    with pytest.raises(ValueError, match="no file-set parser"):
+        read_volume(path)
+
+
+@pytest.mark.parametrize(
+    ("fileset", "warnings", "problem"),
+    [
+        ({"parser": "zip"}, [], "zip"),
+        ({"profile": "x"}, [], "names no parser"),
+        (None, ["spooky"], "spooky"),
+        (None, "generic", "not an array"),
+    ],
+)
+def test_unknown_parser_or_warning_in_the_header_is_malformed(
+    tmp_path, extended_volume, fileset, warnings, problem
+):
+    from tapewyrm_archive.errors import MalformedFileError
+
+    with pytest.raises(MalformedFileError, match=problem):
+        read_volume(_named(tmp_path, extended_volume, fileset, warnings))

@@ -36,9 +36,11 @@ from tapewyrm_archive.provenance import provenance_path
 from tapewyrm_archive.twti import SegmentState, TapeImage
 from tapewyrm_archive.twvl import VERSION, SparseVolume, Volume, find_holes
 
+from qiclib import fileset as fs
 from qiclib import qic122
 from qiclib import volume as volume_mod
 from qiclib import volume_profile as vp
+from qiclib.verdict import Probe, VolumeWarning, warning_names
 
 log = logging.getLogger(__name__)
 
@@ -197,11 +199,16 @@ class VolumeTable:
     """The volume table as the best-fitting volume profile read it.
 
     ``profile`` is None when the segment parsed to no records at all; the
-    table is then empty and nothing can be extracted.
+    table is then empty and nothing can be extracted. ``verdict`` is that
+    profile's full reading and ``alternatives`` the other survivors of the
+    fingerprint gate, best first, which :func:`stamp_fileset` falls back to
+    when the chosen profile's parser does not pass.
     """
 
     profile: vp.VolumeProfile | None
     entries: list[volume_mod.VtblEntry]
+    verdict: vp.Verdict | None = None
+    alternatives: tuple[vp.Verdict, ...] = ()
 
     @property
     def extent_offset_bytes(self) -> int:
@@ -211,6 +218,11 @@ class VolumeTable:
         profile there is nothing to decode anyway, so the Rev G width stands.
         """
         return self.profile.extent_offset_bytes if self.profile is not None else 8
+
+    @property
+    def extent_frame_size_bytes(self) -> int:
+        """Width of each compression frame's size field (Rev G's 2, or NovaStor's 4)."""
+        return self.profile.extent_frame_size_bytes if self.profile is not None else 2
 
 
 def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeTable:
@@ -254,17 +266,33 @@ def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeT
     if not verdicts:
         log.debug("no VTBL records in segment %d; no profile to apply", vt_seg)
         return VolumeTable(None, [])
-    best = verdicts[0]
+    alive = vp.survivors(verdicts)
+    if not alive:
+        # Every fingerprint failed. A forced profile is the user's call and
+        # stands (identify notes the mismatch); a guess with no survivor has
+        # no business sizing a volume.
+        if volume_profile == vp.GUESS:
+            log.debug("every volume profile eliminated by its fingerprint; refusing")
+            raise ValueError(
+                "no volume profile's fingerprint matches this tape's volume table; pick "
+                "one with --volume-profile (`qicsilver identify --raw` shows the scoring)"
+            )
+        log.warning(
+            "volume profile %s was forced, but its fingerprint does not match this tape",
+            verdicts[0].profile.name,
+        )
+        alive = verdicts
+    best = alive[0]
     profile = best.profile
     log.info("volume table read with volume profile %s (score %d)", profile.name, best.score)
-    if len(verdicts) > 1 and verdicts[1].score == best.score:
+    if len(alive) > 1 and alive[1].score == best.score:
         log.warning(
             "volume profiles %s and %s fit equally well; using %s (pick one with --volume-profile)",
             profile.name,
-            verdicts[1].profile.name,
+            alive[1].profile.name,
             profile.name,
         )
-    table = VolumeTable(profile, best.entries)
+    table = VolumeTable(profile, best.entries, best, tuple(alive[1:]))
     log.debug(
         "volume table: %d entries; extent offsets are %d bytes",
         len(table.entries),
@@ -284,13 +312,15 @@ def build_volume(
     e: volume_mod.VtblEntry,
     *,
     offset_bytes: int,
+    frame_size_bytes: int = 2,
     tape_name: str,
     image_path: Path,
     progress: Progress = NULL_PROGRESS,
 ) -> Volume:
     """Volume ``k`` of the image, table entry ``e``, as an in-memory TWVL volume.
 
-    QIC-122 extents are decoded (``offset_bytes`` wide offsets) and placed at
+    QIC-122 extents are decoded (``offset_bytes`` wide offsets,
+    ``frame_size_bytes`` wide frame sizes, both the profile's) and placed at
     their uncompressed offsets, or an uncompressed volume's segments are laid
     end to end; segments that were not recovered become holes. ``tape_name``
     and ``image_path`` only fill in the header (TWS-3 section 3.1). A table
@@ -428,7 +458,9 @@ def build_volume(
                 pos += len(data)
                 continue
             try:
-                ext = qic122.decode_extent(data, offset_bytes=offset_bytes)
+                ext = qic122.decode_extent(
+                    data, offset_bytes=offset_bytes, frame_size_bytes=frame_size_bytes
+                )
             except qic122.Qic122Error as exc:
                 log.debug(
                     "segment %d (volume %d): QIC-122 decode failed (state %s, "
@@ -497,6 +529,143 @@ def build_volume(
 
 
 # ---------------------------------------------------------------------------
+# The file-set verdict: which parser reads the volume, stamped into its header
+# ---------------------------------------------------------------------------
+
+
+def _same_bytes(a: vp.Verdict, b: vp.Verdict, k: int) -> bool:
+    """Would profiles ``a`` and ``b`` have built volume ``k`` from the same bytes?
+
+    Only then can ``b``'s parser be tried on a volume built under ``a``: the
+    extent widths must agree, and so must the section sizes and the
+    compression flag the build took from the table entry.
+    """
+    pa, pb = a.profile, b.profile
+    if (pa.extent_offset_bytes, pa.extent_frame_size_bytes) != (
+        pb.extent_offset_bytes,
+        pb.extent_frame_size_bytes,
+    ):
+        return False
+    ea, eb = a.entries[k], b.entries[k]
+    return (ea.data_section_size, ea.dir_section_size, ea.compressed) == (
+        eb.data_section_size,
+        eb.dir_section_size,
+        eb.compressed,
+    )
+
+
+def _probe_with(
+    vol: Volume, vtbl: volume_mod.VtblEntry, verdict: vp.Verdict, k: int, source: Path
+) -> Probe:
+    """One profile's parser probe of volume ``k``, its ``volume_bytes`` gate included.
+
+    The gate is the one fingerprint the table could not answer (bytes at
+    the start of the volume, e.g. QICStream's ``FSET``); it fails the probe
+    outright, since a parser for a different format has nothing to say.
+    """
+    profile = verdict.profile
+    head_len = max((off + len(sig) for off, sig in profile.volume_bytes), default=0)
+    gate = vp.volume_gate(profile, bytes(vol.data[:head_len]))
+    failed = [c for c in gate if not c.ok]
+    if failed:
+        log.debug("volume %d: %s fails its volume fingerprint; fatal", k, profile.name)
+        return Probe(
+            checks=gate,
+            fatal="volume fingerprint failed: " + "; ".join(f"{c.name} {c.detail}" for c in failed),
+        )
+    parser = fs.get(profile.fileset_parser)
+    log.debug("volume %d: probing with parser %s (profile %s)", k, parser.name, profile.name)
+    probe = parser.probe(vol, vtbl, source, profile.fileset_params)
+    probe.checks[:0] = gate
+    return probe
+
+
+def stamp_fileset(vol: Volume, table: VolumeTable, k: int, source: Path) -> Probe | None:
+    """Probe volume ``k`` with its profile's parser and write the verdict into its header.
+
+    The table said who wrote the tape; this says whether the volume's bytes
+    read as that software's catalog (:mod:`qiclib.fileset`). The header
+    gains ``fileset`` (profile, parser, parameters, status and the probe)
+    and ``warnings`` (TWS-3 sections 3.4 and 3.5), which ``qicsilver
+    inspect`` and ``tar`` dispatch on, so a volume carries its own reading
+    instructions wherever it goes.
+
+    When the chosen parser does not pass, the other survivors of the
+    fingerprint gate that would have built the same bytes
+    (:func:`_same_bytes`) are tried in rank order; the first whose parser
+    passes takes over, with ``low-confidence``. None passing keeps the
+    chosen profile's reading, failed probe and all: the TWVL is still worth
+    keeping, and the warning travels with it. A probe that passed with a
+    failed check is ``low-confidence`` too.
+    """
+    hdr = vol.header
+    verdict = table.verdict
+    if verdict is None:
+        log.debug("volume %d: no profile; nothing to probe", k)
+        hdr["fileset"] = None
+        hdr["warnings"] = []
+        return None
+    vtbl = fs.header_vtbl(source, hdr)
+    chosen, probe = verdict, _probe_with(vol, vtbl, verdict, k, source)
+    if not probe.passed:
+        why = probe.fatal or f"score {probe.score}, {len(probe.failures)} checks failed"
+        for alt in table.alternatives:
+            if not _same_bytes(verdict, alt, k):
+                log.debug(
+                    "volume %d: %s would have built different bytes; not tried", k, alt.profile.name
+                )
+                continue
+            alt_probe = _probe_with(vol, vtbl, alt, k, source)
+            if alt_probe.passed:
+                log.warning(
+                    "volume %d: the %s parser (profile %s) did not pass its probe (%s); "
+                    "the %s parser (profile %s) does, using it",
+                    k,
+                    verdict.profile.fileset_parser,
+                    verdict.profile.name,
+                    why,
+                    alt.profile.fileset_parser,
+                    alt.profile.name,
+                )
+                chosen, probe = alt, alt_probe
+                probe.warnings.add(VolumeWarning.LOW_CONFIDENCE)
+                break
+        else:
+            log.warning(
+                "volume %d: the %s parser (profile %s) did not pass its probe (%s); "
+                "the volume may not list",
+                k,
+                verdict.profile.fileset_parser,
+                verdict.profile.name,
+                why,
+            )
+    elif probe.failures:
+        log.debug(
+            "volume %d: probe passed with %d failed checks; low-confidence", k, len(probe.failures)
+        )
+        probe.warnings.add(VolumeWarning.LOW_CONFIDENCE)
+    profile = chosen.profile
+    warnings = set(chosen.warnings) | probe.warnings
+    hdr["fileset"] = {
+        "profile": profile.name,
+        "parser": profile.fileset_parser,
+        "params": dict(profile.fileset_params),
+        "status": profile.status,
+        "probe": probe.to_dict(),
+    }
+    hdr["warnings"] = warning_names(warnings)
+    log.info(
+        "volume %d: file set %s via profile %s (%s%s)",
+        k,
+        profile.fileset_parser,
+        profile.name,
+        "probe passed" if probe.passed else "probe FAILED",
+        f"; warnings: {', '.join(hdr['warnings'])}" if warnings else "",
+    )
+    return probe
+
+
+# ---------------------------------------------------------------------------
 # The two entry points: every selected volume to files, or one volume in memory
 # ---------------------------------------------------------------------------
 
@@ -549,10 +718,12 @@ def extract(
                 k,
                 vtbl[k],
                 offset_bytes=table.extent_offset_bytes,
+                frame_size_bytes=table.extent_frame_size_bytes,
                 tape_name=tape_name,
                 image_path=image_path,
                 progress=progress,
             )
+            stamp_fileset(vol, table, k, image_path)
             path = outfile if outfile is not None else out_dir / f"{prefix}{k:02d}.twvl"
             log.debug("volume %d: %d holes; saving to %s", k, len(vol.holes), path)
             vol.save(path)
@@ -587,12 +758,15 @@ def load_volume(
         tape_name = img.qic80_str("tape_name")
         table = read_volume_table(img, volume_profile)
         k = _pick_volume(volume, len(table.entries))
-        return build_volume(
+        vol = build_volume(
             img,
             k,
             table.entries[k],
             offset_bytes=table.extent_offset_bytes,
+            frame_size_bytes=table.extent_frame_size_bytes,
             tape_name=tape_name,
             image_path=image_path,
             progress=progress,
         )
+        stamp_fileset(vol, table, k, image_path)
+        return vol

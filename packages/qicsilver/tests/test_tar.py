@@ -244,3 +244,24 @@ def test_dash_dash_volume_with_a_twvl_file_is_a_usage_error(extended_volume, tmp
     result = CliRunner().invoke(cli, ["tar", str(extended_volume), out, "--volume", "0"])
     assert result.exit_code == 2, result.output
     assert "--volume" in error_text(result) and "already one volume" in error_text(result)
+
+
+def test_tar_keeps_the_warnings_in_a_global_header(tmp_path, extended_volume):
+    """Whoever opens the tar later learns how sure the read was (pax global header)."""
+    vol = Volume.load(extended_volume)
+    vol.header["fileset"] = {
+        "profile": "cms-qic113",
+        "parser": "qic113-extended",
+        "params": {},
+        "status": "bench",
+        "probe": None,
+    }
+    vol.header["warnings"] = ["single-tape", "low-confidence"]
+    path = tmp_path / "w.twvl"
+    vol.save(path)
+    write_tar(path, tmp_path / "w.tar")
+    with tarfile.open(tmp_path / "w.tar") as tar:
+        assert tar.pax_headers["TAPEWYRM.warnings"] == "low-confidence,single-tape"
+    report = (tmp_path / "w.tar.damaged.txt").read_text()
+    assert "# read with the qic113-extended parser" in report
+    assert "# warnings: low-confidence, single-tape" in report

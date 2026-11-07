@@ -59,6 +59,7 @@ from qiclib import volume_profile as vp
 from qiclib.build import reporting_drive
 from qiclib.geometry import Geometry
 from qiclib.types import RawSector, SegmentStatus
+from qiclib.verdict import warning_names
 from qiclib.volume import BadSectorMap, VolumeInfo, VtblEntry
 
 log = logging.getLogger(__name__)
@@ -113,8 +114,12 @@ class TapeInfo:
     ``bad`` (the bad-sector map marks the whole segment unusable).
 
     ``verdicts`` holds every volume profile's reading of the volume table, best
-    first; with ``--volume-profile NAME`` it holds just that one. ``volumes`` is
-    the chosen reading.
+    first (the survivors of each profile's fingerprint gate by score, then the
+    eliminated); with ``--volume-profile NAME`` it holds just that one.
+    ``volumes`` is the chosen reading and ``warnings`` its caveats
+    (:class:`~qiclib.verdict.VolumeWarning`). The file-set parser is named
+    here but not run: a probe needs the volume's segments, and ``identify``
+    reads only the header and the table (``qiclib.extract`` probes).
     """
 
     vol: VolumeInfo
@@ -140,6 +145,16 @@ class TapeInfo:
     @property
     def profile(self) -> str:
         return self.verdicts[0].profile.name if self.verdicts else ""
+
+    @property
+    def warnings(self) -> list[str]:
+        """The chosen profile's warnings (its own and the selection's), as strings."""
+        return warning_names(self.verdicts[0].warnings) if self.verdicts else []
+
+    @property
+    def fileset_parser(self) -> str | None:
+        """The file-set parser the chosen profile names (``qiclib.fileset``)."""
+        return self.verdicts[0].profile.fileset_parser if self.verdicts else None
 
 
 # ---------------------------------------------------------------------------
@@ -359,20 +374,34 @@ def _assemble(
         else:
             log.debug("guessing volume profile from %d records", len(records))
         verdicts = vp.guess(records, vol) if records else []
-        if len(verdicts) > 1 and verdicts[0].score == verdicts[1].score:
+        alive = vp.survivors(verdicts)
+        if verdicts and not alive:
+            log.debug("every volume profile was eliminated; showing the best reading anyway")
+            notes.append(
+                "no volume profile's fingerprint matches this tape; the volumes are read "
+                f"with {verdicts[0].profile.name} and may be wrong"
+            )
+        elif len(alive) > 1 and alive[0].score == alive[1].score:
             log.debug(
                 "profiles %s and %s tie at score %d; using the first",
-                verdicts[0].profile.name,
-                verdicts[1].profile.name,
-                verdicts[0].score,
+                alive[0].profile.name,
+                alive[1].profile.name,
+                alive[0].score,
             )
             notes.append(
-                f"volume profiles {verdicts[0].profile.name} and {verdicts[1].profile.name} "
+                f"volume profiles {alive[0].profile.name} and {alive[1].profile.name} "
                 "fit equally well; showing the first. Pick one with --volume-profile"
             )
     else:
         log.debug("loading forced volume profile %r", volume_profile)
         verdicts = [vp.evaluate(records, vol, vp.load(volume_profile))]
+        if verdicts[0].eliminated:
+            failed = "; ".join(f"{c.name} {c.detail}" for c in verdicts[0].gate if not c.ok)
+            log.debug("forced profile %s fails its fingerprint: %s", volume_profile, failed)
+            notes.append(
+                f"profile {verdicts[0].profile.name} was forced, but its fingerprint does "
+                f"not match this tape: {failed}"
+            )
     hint, hint_from = _standard_hint(vol, drive)
     guess = cartridge.guess(vol.tracks, vol.segments_per_track, hint, hint_from)
     return TapeInfo(
@@ -624,9 +653,14 @@ def format_info(info: TapeInfo, *, verbose: bool = False) -> list[str]:
     ]
     if info.verdicts:
         best = info.verdicts[0]
-        others = ", ".join(f"{v.profile.name} {v.score}" for v in info.verdicts[1:])
-        line = f"volume profile  {best.profile.name} (score {best.score})"
+        others = ", ".join(_score_text(v) for v in info.verdicts[1:])
+        line = f"volume profile  {_score_text(best, 'score ')}"
         lines.append(line + (f"; others: {others}" if others else ""))
+        lines.append(
+            f"file set      {best.profile.fileset_parser} parser, per the profile (not probed)"
+        )
+        if info.warnings:
+            lines.append(f"warnings      {', '.join(info.warnings)}")
     if vol.reformat_error:
         lines.append("WARNING       a re-format error lost some header fields (byte 128 = 0xFF)")
 
@@ -654,6 +688,12 @@ def format_info(info: TapeInfo, *, verbose: bool = False) -> list[str]:
     return lines
 
 
+def _score_text(verdict: vp.Verdict, label: str = "") -> str:
+    """``name (score N)``, or ``name (score N, eliminated)`` when its fingerprint failed."""
+    tail = ", eliminated" if verdict.eliminated else ""
+    return f"{verdict.profile.name} ({label}{verdict.score}{tail})"
+
+
 def _verbose(info: TapeInfo) -> list[str]:
     lines = ["", "format parameter record (header sector 0, bytes 0-255):"]
     lines += _hexdump(info.header_raw.rstrip(bytes(1)).ljust(16, b"\x00"))
@@ -667,12 +707,14 @@ def _verbose(info: TapeInfo) -> list[str]:
         lines += _hexdump(rec)
     for verdict in info.verdicts:
         lines.append("")
-        lines.append(
-            f"profile {verdict.profile.name}: score {verdict.score} -- {verdict.profile.description}"
-        )
+        status = "ELIMINATED by its fingerprint" if verdict.eliminated else f"score {verdict.score}"
+        lines.append(f"profile {verdict.profile.name}: {status} -- {verdict.profile.description}")
         for check in verdict.checks:
             mark = "ok  " if check.ok else "FAIL"
-            lines.append(f"    {mark} {check.points:+d}  {check.name}: {check.detail}")
+            kind = "  [fingerprint]" if check in verdict.gate else ""
+            lines.append(f"    {mark} {check.points:+d}  {check.name}: {check.detail}{kind}")
+        if verdict.warnings:
+            lines.append(f"    warnings: {', '.join(warning_names(verdict.warnings))}")
     return lines
 
 
@@ -722,6 +764,9 @@ def to_dict(info: TapeInfo) -> dict[str, Any]:
         "drive": info.drive,
         "volume_profile": info.profile,
         "volume_profile_scores": {v.profile.name: v.score for v in info.verdicts},
+        "volume_profiles": [v.to_dict() for v in info.verdicts],
+        "fileset_parser": info.fileset_parser,
+        "warnings": info.warnings,
         "volumes": volumes,
         "notes": info.notes,
     }

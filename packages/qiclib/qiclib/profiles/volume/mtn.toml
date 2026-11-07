@@ -1,13 +1,14 @@
 # Volume tables carrying "MTN" at VTBL bytes 58-60.
 #
 # Seen on the 3M DC2120 "XIMAT" tape labelled "WIN3.11 Office Borland WP6.0"
-# (captures/3m-unknown-1, format code 2, written 1998-11-10). Who wrote it is
+# (captures/3m-unknown-1, format code 2, written 1998-11-10) and on
+# captures/old-connor (Medionix tape, written 1998-02-25). Who wrote them is
 # not confirmed -- "MTN" may well be Mountain Network Solutions' backup
 # software -- so the name stays the bytes we saw.
 #
-# The vendor bit is CLEAR, yet the layout is not Rev N. Worked out from that
-# one record (bench, 2026-10-01); every offset below is a reading of real
-# bytes, not a spec:
+# The vendor bit is CLEAR, yet the layout is not Rev N. Worked out from the 3M
+# record (bench, 2026-10-01); every offset below is a reading of real bytes,
+# not a spec:
 #   57       01                    -> 1: cartridge 1 of the set (plausible)
 #   92-95    00 e0 00 00           -> 57,344: directory section size
 #   96-99    05 8e 41 0a           -> 172,068,357: data section size (~164 MB);
@@ -25,9 +26,10 @@
 
 name = "mtn"
 description = "'MTN' at VTBL byte 58, vendor bit clear, label at 102 (3M DC2120 bench tape)"
+status = "bench"
+tapes = ["3m-unknown-1", "old-connor"]
 
 [match]
-vendor_bit = false
 vtbl_bytes = [[58, "4d544e"]]   # "MTN"
 
 [vtbl]
@@ -45,3 +47,8 @@ compression = [120, 1]
 # section starts there). With 8 bytes, 1,659 of 1,668 readable segments fail.
 [extent]
 offset_bytes = 4
+
+# QIC-113 Basic-DOS with the 9-byte fixed portion, which the parser detects
+# from the size byte; no parameter needed.
+[fileset]
+parser = "qic113-basic"

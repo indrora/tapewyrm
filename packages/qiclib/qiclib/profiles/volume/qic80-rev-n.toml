@@ -1,12 +1,19 @@
 # QIC-80-MC Revision N §8 volume table entries (docs/qic-standards/qic80n.pdf).
 #
 # The spec layout, for software that follows it to the letter: vendor-specific
-# bit clear, every field at its Rev N offset. qiclib.volume._parse_vtbl_entry
+# bit clear, every field at its Rev N offset, and a QIC-113 Basic-DOS file set
+# inside (the volume of a plain DOS backup). qiclib.volume._parse_vtbl_entry
 # (the reference parser) uses the same offsets; tests/test_volume_profile.py
 # keeps the two in step.
+#
+# It has no positive fingerprint -- nothing the writer wrote, only a flag it
+# left clear -- so it wins by default and carries the `generic` warning when it
+# does. A tape it reads well is a candidate for a profile of its own, naming
+# whatever that software did write in bytes 57-127.
 
 name = "qic80-rev-n"
-description = "QIC-80-MC Rev N volume table (vendor bit clear)"
+description = "QIC-80-MC Rev N volume table (vendor bit clear), QIC-113 Basic-DOS inside"
+status = "spec"
 
 [match]
 vendor_bit = false
@@ -18,3 +25,6 @@ data_section_size = [96, 8]     # quadword
 source_label = [106, 16]
 compression = [124, 1]          # bit 7 = compressed, bits 0-5 = QIC-123 code
 os_type = [125, 1]              # 1 = DOS
+
+[fileset]
+parser = "qic113-basic"

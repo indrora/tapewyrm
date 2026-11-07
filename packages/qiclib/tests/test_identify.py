@@ -343,3 +343,47 @@ def test_image_drive_disagreement_keeps_first_and_warns(tmp_path, caplog):
 
 def test_image_drive_none_when_nothing_reported(tmp_path):
     assert _image_drive(tmp_path, _NULL_TWRF, _NULL_TWRF) is None
+
+
+# ---------------------------------------------------------------------------
+# The fingerprint gate and the warnings, on the unk-co tape and a synthetic one
+# ---------------------------------------------------------------------------
+
+
+def _unk_co_sectors() -> list[RawSector]:
+    from qiclib.testing import bench_unk_co
+
+    data = bench_unk_co.header_data()
+    header = make_segment_from_sectors(
+        0, 0, 0, [data[k * 1024 : (k + 1) * 1024] for k in range(29)]
+    )
+    vtbl = make_segment_from_sectors(0, 2, 2, [bench_unk_co.VTBL])
+    return _sectors(header, vtbl)
+
+
+def test_unk_co_tape_is_cms_despite_the_clear_vendor_bit():
+    """The 2026-11-07 tape: 113 at 58 and 'CMS' at 62 decide it, not byte 56 bit 0."""
+    info = ident.from_sectors(_unk_co_sectors())
+    assert info.profile == "cms-qic113" and info.warnings == []
+    assert info.fileset_parser == "qic113-extended"
+    assert info.volumes[0].data_section_size == 386_322_749
+    text = "\n".join(ident.format_info(info, verbose=True))
+    assert "file set      qic113-extended" in text and "eliminated" in text
+    assert "[fingerprint]" in text and "ELIMINATED" in text
+    doc = ident.to_dict(info)
+    assert doc["volume_profile"] == "cms-qic113" and doc["warnings"] == []
+    rows = {row["name"]: row for row in doc["volume_profiles"]}
+    assert rows["vendor-unknown"]["eliminated"] and not rows["qic80-rev-n"]["eliminated"]
+    assert doc["fileset_parser"] == "qic113-extended"
+
+
+def test_generic_profile_warns_in_the_report():
+    info = ident.from_sectors(_sectors(_header(0), _vtbl()))
+    assert info.profile == "qic80-rev-n" and info.warnings == ["generic"]
+    assert "warnings      generic" in "\n".join(ident.format_info(info))
+
+
+def test_forced_profile_whose_fingerprint_fails_is_noted():
+    info = ident.from_sectors(_3m_sectors(), volume_profile="cms-qic113")
+    assert info.profile == "cms-qic113" and info.verdicts[0].eliminated
+    assert any("fingerprint does not match" in note for note in info.notes)

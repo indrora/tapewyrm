@@ -213,6 +213,37 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
   builders rather than hand-rolling bytes in a test.
 - Each test has a docstring or a name that says what behaviour it pins down.
 
+### 2.7 Profiles, parsers and verdicts
+
+Anything that varies by *who made the tape* is data, not code: drive quirks
+(`tapewyrm/profiles/drive`), cartridges (`qiclib/profiles/cartridge`) and the
+backup program's layout (`qiclib/profiles/volume`). A volume profile names
+three layers -- the VTBL field offsets, the extent widths and the file-set
+parser -- and the rules for writing one are:
+
+- **A `[match]` item is something the writer wrote**, never a flag it may or
+  may not have set: `113` at byte 58, `"CMS"` at 62, `"MTN"` at 58. The
+  items are a gate, not a hint; a profile that fails one is out for that
+  tape. (The CMS profile once matched on the vendor-specific bit, which the
+  same software sets on QIC-80 and not on QIC-3010; see
+  `profiles/volume/cms-qic113.toml`.)
+- **Say how exercised it is**: `status = "spec" | "bench" | "untested"`,
+  and `tapes = [...]` for a bench profile. An untested profile warns; so does
+  one confirmed on a single tape.
+- **A parser returns a verdict, not just entries.** It subclasses
+  `qiclib.fileset.FileSetParser`, implements `read` and adds the checks only
+  it can make (the data-entry signatures are where the directory says);
+  the standard checks (`qiclib.fileset.common`) come free. A parse that
+  raises is a fatal probe, never a crash.
+- **Warnings are a closed enum** (`qiclib.verdict.VolumeWarning`). A new
+  caveat is a new member with a one-line meaning, not a free string; it
+  travels in `identify --json`, the TWVL header (TWS-3 sections 3.4, 3.5),
+  `inspect` and the tar's pax global header, and every consumer compares
+  against the member.
+- **Nothing downstream re-decides.** `qicsilver inspect` and `tar` read the
+  parser the TWVL header names; they probe every parser only when the header
+  names none.
+
 ---
 
 ## 3. Firmware (C, `firmware/`)

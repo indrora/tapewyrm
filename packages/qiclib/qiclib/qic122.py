@@ -25,8 +25,10 @@ QIC-113 segment layout (non-spanning volume, the only kind seen so far)::
            w = 8 per Rev G, 4 on MTN tapes (the volume profile's
            [extent] offset_bytes, passed as ``offset_bytes``)
     w, ... Compression Frames, back to back:
-             0, 2  Frame Size n (hi bit set = n bytes stored raw, not compressed)
-             2, n  data
+             0, f  Frame Size n (hi bit set = n bytes stored raw, not compressed);
+                   f = 2 per Rev G, 4 on NovaStor tapes (the profile's
+                   [extent] frame_size_bytes, passed as ``frame_size_bytes``)
+             f, n  data
            Fewer than 18 bytes left after a frame = null fill, end of extent.
 """
 
@@ -147,7 +149,9 @@ class Extent:
     frames: int
 
 
-def decode_extent(segment_data: bytes, *, offset_bytes: int = 8) -> Extent:
+def decode_extent(
+    segment_data: bytes, *, offset_bytes: int = 8, frame_size_bytes: int = 2
+) -> Extent:
     """Decompress a non-spanning QIC-113 Compression Extent (one segment).
 
     ``offset_bytes`` is the width of the extent's leading uncompressed-offset
@@ -155,13 +159,24 @@ def decode_extent(segment_data: bytes, *, offset_bytes: int = 8) -> Extent:
     doubleword (4) -- the "MTN" tapes do, see profiles/volume/mtn.toml. Read with
     the wrong width, the first frame size lands inside the offset and nearly
     every segment fails to decode. The volume profile carries the width.
+
+    ``frame_size_bytes`` is the width of each frame's size field: 2 per Rev
+    G section 9.1.4. NovaStor wrote 4 (QICStreamReader's novastor reader,
+    which also keeps the raw flag in bit 15 and the size in bits 0-14, so
+    the upper half is expected to be zero). TODO(bench): no NovaStor tape
+    has been read here; the 4-byte form is the C# reader's word only.
     """
     if offset_bytes not in (4, 8):
         log.debug("extent: offset width %d not 4 or 8; raising", offset_bytes)
         raise ValueError(f"extent offset width must be 4 or 8 bytes, not {offset_bytes}")
-    if len(segment_data) < offset_bytes + 2:
+    if frame_size_bytes not in (2, 4):
+        log.debug("extent: frame size width %d not 2 or 4; raising", frame_size_bytes)
+        raise ValueError(f"extent frame size width must be 2 or 4 bytes, not {frame_size_bytes}")
+    if len(segment_data) < offset_bytes + frame_size_bytes:
         log.debug(
-            "extent: segment data is %d bytes (< %d); raising", len(segment_data), offset_bytes + 2
+            "extent: segment data is %d bytes (< %d); raising",
+            len(segment_data),
+            offset_bytes + frame_size_bytes,
         )
         raise Qic122Error("segment too short for an extent")
     (uoff,) = struct.unpack_from("<Q" if offset_bytes == 8 else "<I", segment_data, 0)
@@ -174,18 +189,19 @@ def decode_extent(segment_data: bytes, *, offset_bytes: int = 8) -> Extent:
     pos, end = offset_bytes, len(segment_data)
     out = bytearray()
     frames = 0
+    size_fmt = "<H" if frame_size_bytes == 2 else "<I"
     while end - pos >= _TAIL_FILL:
-        (size,) = struct.unpack_from("<H", segment_data, pos)
+        (size,) = struct.unpack_from(size_fmt, segment_data, pos)
         n = size & ~_RAW_FRAME
         if n == 0:
             log.debug("extent: null fill at %d after %d frames; stopping", pos, frames)
             break  # null fill
-        body = segment_data[pos + 2 : pos + 2 + n]
+        body = segment_data[pos + frame_size_bytes : pos + frame_size_bytes + n]
         if len(body) != n:
             log.debug("extent: frame at %d wants %d bytes, %d remain; raising", pos, n, len(body))
             raise Qic122Error(f"frame of {n} bytes overruns the segment at {pos}")
         out += body if size & _RAW_FRAME else decompress(body)
         frames += 1
-        pos += 2 + n
+        pos += frame_size_bytes + n
     log.debug("extent: %d frames -> %d bytes", frames, len(out))
     return Extent(uncompressed_offset=uoff, data=bytes(out), frames=frames)

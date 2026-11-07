@@ -49,6 +49,10 @@ SIG_EXVT = b"EXVT"  # overflow to another segment
 VTBL_ENTRY_LEN = 128
 
 DATA_SECTORS_PER_SEGMENT = Segment.DATA_ROWS  # 29
+#: Volume bytes one segment carries: its 29 data sectors (no ECC, nothing
+#: excluded). The volume profile's size checks, the extract layout and the
+#: QIC-113 segment-gap arithmetic all count in these.
+SEGMENT_DATA_BYTES = DATA_SECTORS_PER_SEGMENT * 1024
 
 
 @dataclass

@@ -29,11 +29,15 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
 `--port`, `--profile` or `--config`; it never touches hardware.)
 
 - **`identify IMAGE`**: cartridge, factory stamp, dates, bad sectors and the
-  volume table, read through the volume profile that fits best.
+  volume table, read through the volume profile that fits best: every
+  profile whose fingerprint (bytes the backup program wrote) matches is
+  scored for plausibility, the rest are eliminated. The report names the
+  profile, the file-set parser it implies and any **warnings** (`generic`,
+  `low-confidence`, `untested`, ...; `qiclib.verdict`).
   `--volume-profile NAME|PATH` forces one (default `guess`), `--json` prints
-  machine-readable JSON, `--raw` adds the raw records and the profile scoring.
-  Only the header and the volume table at the start of track 0 are needed, so
-  a short capture of track 0 is enough.
+  machine-readable JSON, `--raw` adds the raw records and every profile's
+  checks, fingerprint items marked. Only the header and the volume table at
+  the start of track 0 are needed, so a short capture of track 0 is enough.
 - **`extract IMAGE [OUTDIR]`**: one TWVL file (`OUTDIR/vol-NN.twvl`, OUTDIR
   defaulting to `.`, NN the volume's number in the volume table) per backup
   volume. QIC-122 data is decompressed and each volume is laid out by its
@@ -42,7 +46,11 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   `0,2-4`; a number the tape lacks is an error before anything is written),
   `--prefix P` renames the files (`P00.twvl`), `-o FILE` writes the one
   selected volume to FILE (exactly one volume; not with OUTDIR or `--prefix`).
-  Takes `--volume-profile` like `identify`.
+  Takes `--volume-profile` like `identify`. Once a volume is built, the
+  profile's file-set parser **probes** it (does it read as that software's
+  catalog?); the header records the parser and the probe (TWS-3 section
+  3.4) and the warnings (3.5), and a parser that fails hands over to the
+  next profile that would have built the same bytes.
 - **`inspect VOLUME|IMAGE [PATH]...`**: list a volume like `tar tv`, without
   extracting it. The file is a TWVL volume or a TWTI/TWTZ image, told apart
   by magic; an image is read as `extract` reads it, but nothing is written.
@@ -54,8 +62,10 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   (`lost N` / `error`, as in tar's damage report) and path. `PATH` globs
   (fnmatch over the whole path) and `--damaged` narrow the listing; `--json`
   prints `{"summary": ..., "entries": [...]}`, the summary naming the
-  volume's number as `volume_index`. It shares tar's directory walk
-  (`qicsilver.entries`), so the two always agree.
+  volume's number as `volume_index`, the `parser` that read it and its
+  `warnings`. It shares tar's directory walk (`qicsilver.entries`), so the
+  two always agree: both read the parser the TWVL header names, and probe
+  every parser only for a header that names none.
 - **`tar VOLUME|IMAGE OUT.tar`**: a POSIX (pax) tar of the volume's files and
   directories, with the original names (long Windows 95 names), modification
   times and DOS attributes (pax header `TAPEWYRM.dos_attributes`). The input
@@ -64,7 +74,9 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   `extract`), so a tape can be tarred without extracting it first. Both QIC-113
   directory formats work: **extended** (Colorado/HP backup software) and
   **Basic-DOS** (e.g. the "MTN" tapes; QIC-113 attribute bits in
-  `TAPEWYRM.qic113_attributes`). It also writes a damage report,
+  `TAPEWYRM.qic113_attributes`). The volume's warnings go into the tar's
+  pax *global* header as `TAPEWYRM.warnings` and into the damage report.
+  It also writes a damage report,
   `OUT.tar.damaged.txt` (or `--report PATH`), one line per damaged file:
   - `lost`: some of the file's bytes (or, for a Basic-DOS file whose data
     header was lost, all of them) were in tape segments that could not be
@@ -78,7 +90,7 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
 | Module | What |
 |---|---|
 | `qicsilver.cli` | The `qicsilver` command group (rich-click). `identify` and `extract` call `qiclib.identify` and `qiclib.extract` (which also selects and names the volumes); `inspect IMAGE` and `tar IMAGE` build one volume in memory with `qiclib.extract.load_volume`, through the one routing (magic, `--volume`, error wording) both commands share. |
-| `qicsilver.entries` | Reads a TWVL volume's header and QIC-113 directory (Extended or Basic-DOS) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
+| `qicsilver.entries` | Reads a TWVL volume through the file-set parser its header names (`qiclib.fileset`; every parser probed when it names none) into one record per entry: path, size, mtime, attributes and mode, data offset, missing bytes, error flag, plus the volume's warnings. The walk `tar` and `inspect` share, from a `.twvl` file or a volume read straight out of an image. |
 | `qicsilver.tar` | Those entries -> pax tar + damage report. |
 | `qicsilver.inspect` | Those entries -> the `inspect` listing, filters and `--json` document. |
 | `qicsilver.console` | Log handler and progress bars: a deliberate copy of `tapewyrm.console`; keep them in step ([STYLE.md](../../STYLE.md) §2). |

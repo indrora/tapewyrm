@@ -168,3 +168,28 @@ def test_files_are_told_apart_by_magic_not_by_name(tmp_path):
     junk.write_bytes(b"nope nope")
     result = CliRunner().invoke(cli, ["inspect", str(junk)])
     assert result.exit_code == 1 and "not a TWVL volume" in error_text(result), result.output
+
+
+def test_summary_names_the_parser_and_the_warnings(tmp_path, extended_volume):
+    """The listing says which parser read the volume and what caveats it carries."""
+    import json
+
+    from tapewyrm_archive.twvl import Volume
+
+    vol = Volume.load(extended_volume)
+    vol.header["fileset"] = {
+        "profile": "cms-qic113",
+        "parser": "qic113-extended",
+        "params": {},
+        "status": "bench",
+        "probe": None,
+    }
+    vol.header["warnings"] = ["single-tape"]
+    path = tmp_path / "named.twvl"
+    vol.save(path)
+    text = _run(str(path))
+    assert "directory     QIC-113 Extended (qic113-extended parser, profile cms-qic113)" in text
+    assert "warnings      single-tape" in text
+    summary = json.loads(_run("--json", str(path)))["summary"]
+    assert summary["parser"] == "qic113-extended" and summary["profile"] == "cms-qic113"
+    assert summary["warnings"] == ["single-tape"]
