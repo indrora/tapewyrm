@@ -188,6 +188,12 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
   and wrap themselves in `with progress.task(desc, total=..., unit=...) as bar:`,
   calling `bar.advance()` / `bar.update()`. Advance at the *top* of a loop body
   that uses `continue`. `total=None` when the length is unknown (a capture).
+- A loop that runs in a worker process reports through a
+  `tapewyrm_archive.progress.QueueProgress` (its tasks become messages on a
+  `multiprocessing` queue) and the parent replays them onto its real
+  `Progress` with a `ProgressRelay`; the worker's log records cross the same
+  queue through a stdlib `QueueHandler`. `tapewyrm.image.convert.decode_captures`
+  is the pattern. A worker never sees `rich` either.
 - Library code never imports `rich` or `click`. Presentation lives in each
   CLI's `console.py` (rich log handler, progress bars) and its commands
   (`tapewyrm/cli/`, `qicsilver/cli.py`).

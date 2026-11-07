@@ -23,7 +23,7 @@ from qiclib.testing.builders import (
 from qiclib.types import RawSector
 from tapewyrm_archive import twrf
 from tapewyrm_archive.twrf import RawFluxCapture
-from tapewyrm_archive.twti import SegmentState
+from tapewyrm_archive.twti import SegmentState, TapeImage
 from tapewyrm_archive.types import CaptureHeader, Direction, TapeFormat
 
 from tapewyrm.codec import gwpll, gwstream, mfm
@@ -277,6 +277,122 @@ def test_convert_runs_one_outer_bar_per_capture_then_builds(tmp_path, tape_flux,
     assert "cartridge: " in text
     assert "segments: 3 clean, 0 corrected, 0 uncorrectable, 5 missing, 0 bad (map)" in text
     assert "converted 2 capture(s) in " in text
+
+
+# ---------------------------------------------------------------------------
+# Decoding in worker processes (-j)
+# ---------------------------------------------------------------------------
+
+
+def _two_track_dump(tmp_path, blob: bytes):
+    dump = tmp_path / "dump"
+    dump.mkdir()
+    for n in (0, 1):
+        RawFluxCapture(header=HDR, flux=blob).save(dump / f"track-0{n}.twrf")
+    return dump
+
+
+def _segments(path) -> list[bytes]:
+    with TapeImage.open(path) as img:
+        return [img.segment(n) for n in range(len(img.entries))]
+
+
+def test_two_workers_build_the_same_image_as_one(tmp_path, tape_flux, caplog):
+    """-j 2 decodes in spawned processes; the passes land in source order and the image is the same.
+
+    Also pins what crosses back from the workers: their stage bars, prefixed
+    with the file name, and their INFO narrative.
+    """
+    blob, _, sectors = tape_flux
+    dump = _two_track_dump(tmp_path, blob)
+    serial = convert.convert([dump], tmp_path / "serial.twti")
+    progress = RecordingProgress()
+    with caplog.at_level(logging.INFO):
+        parallel = convert.convert([dump], tmp_path / "parallel.twti", progress=progress, jobs=2)
+
+    assert parallel.entries == serial.entries
+    assert _segments(tmp_path / "parallel.twti") == _segments(tmp_path / "serial.twti")
+    timeless = [
+        {k: v for k, v in img.header.items() if k != "created"} for img in (serial, parallel)
+    ]
+    assert timeless[0] == timeless[1]
+
+    (overall,) = progress.named("decoding captures")
+    assert (overall.total, overall.position, overall.closed) == (2, 2, True)
+    assert not [t for t in progress.tasks if t.description.startswith("capture ")]
+    for name in (
+        "track-00.twrf: parsing flux stream",
+        "track-00.twrf: PLL: flux -> bitcells",
+        "track-01.twrf: framing MFM bytes",
+        "track-01.twrf: scanning for sectors",
+    ):
+        (bar,) = progress.named(name)
+        assert bar.closed and bar.position == bar.total, bar
+    for name in ("merging passes", "correcting segments", "writing image"):
+        (bar,) = progress.named(name)
+        assert bar.closed and bar.position == bar.total, bar
+
+    text = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
+    assert "decoding 2 captures, 2 at a time" in text
+    for n in (0, 1):  # relayed from the workers
+        assert f"track-0{n}.twrf: {len(sectors)} sectors: {len(sectors)} CRC-clean" in text
+    assert "converted 2 capture(s) in " in text
+
+
+def test_a_capture_that_is_not_twrf_stops_a_parallel_convert(tmp_path, tape_flux, caplog):
+    """A worker's ValueError comes back as the same ValueError, naming the file, and the
+    captures behind the window of ``jobs`` never start (nothing is queued ahead).
+
+    track-00 fails in its worker's first microseconds, before any other
+    capture can finish, so tracks 02 and 03 are never submitted: the decode
+    (whose first INFO line names every capture it starts) never mentions
+    them. Only the decode's own logger is checked: writing the fixtures logs
+    the same names at DEBUG when an earlier test left that level on.
+    """
+    blob, _, _ = tape_flux
+    dump = tmp_path / "dump"
+    dump.mkdir()
+    for n in range(4):
+        RawFluxCapture(header=HDR, flux=blob).save(dump / f"track-0{n}.twrf")
+    (dump / "track-00.twrf").write_bytes(b"not a capture at all")
+    with caplog.at_level(logging.INFO), pytest.raises(ValueError, match="track-00.twrf"):
+        convert.convert([dump], tmp_path / "t.twti", jobs=2)
+    assert not (tmp_path / "t.twti").exists()
+    decode = [r.getMessage() for r in caplog.records if r.name == convert.__name__]
+    text = "\n".join(decode)
+    assert "track-02.twrf" not in text and "track-03.twrf" not in text, decode
+
+
+def test_worker_count_auto_fits_cores_ram_and_the_capture_count(tmp_path, monkeypatch):
+    """0 picks min(cores, RAM share / per-worker need, captures); unknown RAM means cores."""
+    files = [tmp_path / f"track-0{n}.twrf" for n in range(3)]
+    for path in files:
+        path.write_bytes(bytes(1_000_000))  # need = 25 MB + the 100 MB floor = 125 MB each
+    monkeypatch.setattr(convert.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(convert, "physical_memory", lambda: 100_000_000_000)
+    assert convert.worker_count(0, files) == 3  # the captures bound it
+    monkeypatch.setattr(convert, "physical_memory", lambda: 400_000_000)
+    assert convert.worker_count(0, files) == 2  # 300 MB share // 125 MB
+    monkeypatch.setattr(convert, "physical_memory", lambda: 10_000_000)
+    assert convert.worker_count(0, files) == 1  # never fewer than one
+    monkeypatch.setattr(convert, "physical_memory", lambda: None)
+    monkeypatch.setattr(convert.os, "cpu_count", lambda: 2)
+    assert convert.worker_count(0, files) == 2  # cores alone
+
+
+def test_worker_count_explicit_is_capped_by_the_captures_and_refuses_negatives(tmp_path):
+    files = [tmp_path / "a.twrf", tmp_path / "b.twrf"]
+    for path in files:
+        path.write_bytes(b"x")
+    assert convert.worker_count(1, files) == 1
+    assert convert.worker_count(5, files) == 2
+    with pytest.raises(ValueError, match="jobs must be 0"):
+        convert.worker_count(-1, files)
+
+
+def test_physical_memory_is_a_positive_size_or_none():
+    size = convert.physical_memory()
+    assert size is None or size > 0
 
 
 def test_mb_formats_decimal_megabytes():

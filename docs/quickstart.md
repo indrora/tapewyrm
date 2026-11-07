@@ -262,6 +262,17 @@ time: a 9-minute QIC-3020 track converts in about 2.5 minutes.
   `tw convert captures/NAME captures/NAME-pass2 captures/NAME.twtz`. Sources can be
   dump directories or single `track-NN.twrf` files. A sector read on any pass
   fills the gaps of the others, so re-reading only the bad tracks is enough.
+- **More cores.** The decode is one core per capture. `-j N` decodes N
+  captures at once, each in its own process, and `-j 0` picks N from the
+  cores and the RAM: a worker needs about 25 bytes of memory per byte of
+  capture (2.5 GB for a 100 MB track), and the pick leaves a quarter of the
+  RAM for everything else. A whole dump then takes about the time of
+  `tracks / N` captures: a 40-track QIC-3010 dump that takes 22 minutes one
+  capture at a time took 3 minutes 41 seconds with `-j 0` (11 workers) on a
+  14-core laptop. With `--progress`, each capture in flight shows its own
+  stage bars, labelled with its file name, under one bar counting the
+  captures finished. Ctrl-C stops the run; a capture that is not TWRF stops
+  it once the captures in flight have finished.
 
 The log says how it went. From the blank QIC-Extra tape (track 0 only):
 
