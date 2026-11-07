@@ -237,6 +237,8 @@ def correct(seg: Segment) -> SegmentResult:
     * Erasure positions come from the per-sector CRC mask (DESIGN.md §2.3).
     * Codeword length ``N = 32 - excluded`` (the excluded-sector repack).
     * > 3 erasures -> UNCORRECTABLE (partial data kept, no correction attempted).
+    * No erasures -> CLEAN, the data rows returned as read: no column decode
+      (the comment in the body says why, and when it still runs).
     * Otherwise every byte column is solved over GF(256) and the segment rebuilt.
 
     The returned ``data`` is the concatenation of the 29 **data** sectors
@@ -276,8 +278,32 @@ def correct(seg: Segment) -> SegmentResult:
             data=data,
         )
 
-    # Build the N x 1024 received matrix (erased rows are zeroed) and decode columns.
     width = _column_width(seg, participating)
+
+    # No erasures: there is nothing to solve, and the column round trip below
+    # would be an identity -- gather every row, correct nothing, scatter the
+    # same bytes back -- costing 1.9 ms a segment in pure Python (1024 columns
+    # by 32 rows, built twice). On a healthy tape that is nearly every
+    # segment: the 40-track bench dump has 11,742 clean segments of 11,800,
+    # and they were the whole 21-second "correcting segments" pass of
+    # `tw convert`. The data rows concatenated are exactly what the column
+    # path extracts (rows 0..N-4 of every column, row-major), at 7 us.
+    #
+    # The one input the two paths treat differently is a sector whose bytes
+    # are not ``width`` long: the column path zero-fills that row (and writes
+    # the zeros back into the sector), where the concatenation would pass the
+    # odd bytes through. Such a segment keeps taking the column path, so the
+    # output is the same whichever path runs.
+    if erasure_count == 0 and _rows_are_whole(seg, participating, width):
+        log.debug("segment %d: no erasures, N=%d; data rows taken as read", seg.seg, n)
+        return SegmentResult(
+            status=SegmentStatus.CLEAN,
+            corrected_count=0,
+            erasure_count=0,
+            data=_extract_participating_data(seg, participating, n),
+        )
+
+    # Build the N x 1024 received matrix (erased rows are zeroed) and decode columns.
     log.debug(
         "segment %d: RS-decoding %d columns, N=%d (%d excluded), erasures at %r",
         seg.seg,
@@ -324,6 +350,30 @@ def _column_width(seg: Segment, participating: list[int]) -> int:
             return len(sec.data)
     log.debug("no participating sector has data; assuming column width 1024")
     return 1024
+
+
+def _rows_are_whole(seg: Segment, participating: list[int], width: int) -> bool:
+    """True when every participating sector was read and holds exactly ``width`` bytes.
+
+    The no-erasure fast path in :func:`correct` relies on this: with no
+    erasures every participating sector exists with a good CRC, so only the
+    length is in question. The MFM decoder always hands over 1024 bytes, but
+    a fixture or an image need not, and :func:`_gather_columns` treats a row
+    of the wrong length as unreadable (zero-filled), which the fast path
+    would not.
+    """
+    for slot in participating:
+        sec = seg.sectors[slot]
+        if sec is None or len(sec.data) != width:
+            log.debug(
+                "segment %d slot %d holds %s bytes, not %d; taking the column path",
+                seg.seg,
+                slot,
+                None if sec is None else len(sec.data),
+                width,
+            )
+            return False
+    return True
 
 
 def _gather_columns(

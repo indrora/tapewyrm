@@ -1157,6 +1157,8 @@ for each column c of 1024:
 ```
 With ≤3 syndromes and ≤3 unknowns the system is square/over-determined and exact. (For non-erasure CRC-failures, treat them as additional unknowns only within the redundancy budget — see Rev N §6.2 correction table.)
 
+**No erasures, no decode.** A segment whose participating sectors all read with good CRCs has nothing to solve, and `qiclib.rs.correct` returns its data rows as read without building the column matrix. The gather/scatter round trip is an identity on such a segment and cost 1.9 ms each in pure Python; on a healthy tape that was the whole correction pass of `tw convert` (11,742 clean segments of 11,800 on the bench dump: 21 s, now under a second). A sector whose length is not the column width still takes the column path, which zero-fills it as it always did.
+
 **Test vector** (Rev N Fig 6.3, last column): data symbols rows 0–28 = `01 02 03 … 1D` (value = row+1); parity rows 29,30,31 = `5D FF A3`. Unit test: erase any ≤3 of the 32 positions, decode, expect exact restoration. Five more columns in Fig 6.3 give additional vectors; cross-check against ftape `ecc.c`.
 
 ### 13.3 USB transaction wire protocol (Tapewyrm device protocol)

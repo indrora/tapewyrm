@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from itertools import combinations
 
 import pytest
@@ -181,3 +182,78 @@ def _encode_clean(data_syms: list[int], n: int) -> list[int]:
     for k, p in enumerate(parity_pos):
         cw[p] = x[k]
     return cw
+
+
+# ---------------------------------------------------------------------------
+# The no-erasure fast path
+# ---------------------------------------------------------------------------
+
+
+def _random_segment(seed: int, excluded: set[int] | None = None) -> Segment:
+    """A segment of random 1024-byte sectors, every CRC good; parity not real.
+
+    The fast path never looks at the parity, and neither does the column
+    path with no erasures, so random bytes are as good as encoded ones here.
+    """
+    rnd = random.Random(seed)
+    seg = Segment(tpt=0, tps=0, seg=seed, excluded=set(excluded or ()))
+    for slot in range(Segment.SECTORS):
+        if slot in seg.excluded:
+            continue
+        seg.sectors[slot] = RawSector(
+            fsd=0, ftk=0, fsc=slot + 1, data=rnd.randbytes(1024),
+            id_crc_ok=True, data_crc_ok=True, deleted=False,
+        )  # fmt: skip
+    return seg
+
+
+def _count_calls(monkeypatch, name: str) -> list:
+    """Wrap ``rs.<name>`` so a test can see how often correct() reaches it."""
+    calls: list = []
+    original = getattr(rs, name)
+
+    def wrapped(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rs, name, wrapped)
+    return calls
+
+
+@pytest.mark.parametrize("excluded", [set(), {5, 9}])
+def test_clean_segment_skips_the_column_decode(monkeypatch, excluded):
+    """No erasures: the data rows come back as read and no column matrix is built.
+
+    The column round trip is an identity on a clean segment at 1.9 ms each,
+    and on a healthy tape that was the whole correction pass of `tw convert`.
+    The bytes must stay exactly what the column path produces, with excluded
+    slots shortening the codeword too.
+    """
+    gathers = _count_calls(monkeypatch, "_gather_columns")
+    fast = rs.correct(_random_segment(1, excluded))
+    assert fast.status is SegmentStatus.CLEAN
+    assert fast.erasure_count == 0
+    assert gathers == []
+    assert len(fast.data) == (32 - len(excluded) - 3) * 1024
+    # The same segment forced through the column path, for the bytes to match.
+    monkeypatch.setattr(rs, "_rows_are_whole", lambda *args: False)
+    slow = rs.correct(_random_segment(1, excluded))
+    assert len(gathers) == 1
+    assert fast.data == slow.data
+
+
+def test_clean_segment_with_a_short_sector_takes_the_column_path(monkeypatch):
+    """A sector of the wrong length is zero-filled by the column path, as before.
+
+    The fast path would pass its bytes through, so it must step aside for it.
+    """
+    gathers = _count_calls(monkeypatch, "_gather_columns")
+    seg = _random_segment(2)
+    short = seg.sectors[7]
+    assert short is not None
+    short.data = b"\x5a" * 100
+    res = rs.correct(seg)
+    assert res.status is SegmentStatus.CLEAN
+    assert len(gathers) == 1
+    assert len(res.data) == 29 * 1024
+    assert res.data[7 * 1024 : 8 * 1024] == bytes(1024)
