@@ -166,13 +166,16 @@ def identify(
     path: Path,
     *,
     volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
     progress: Progress = NULL_PROGRESS,
 ) -> TapeInfo:
     """Identify a tape from a TWTI image, or a zstd-compressed TWTZ one.
 
     The image is recognised by its magic rather than its suffix, so a renamed
     image still works (``twti.sniff``). Raw captures need the physical
-    decoder: ``tw convert`` them first.
+    decoder: ``tw convert`` them first. ``volume_profile`` is a profile name,
+    a path or ``"guess"``; ``overrides`` are hand-given parameters laid on
+    whichever profile that chooses (:func:`qiclib.volume_profile.override`).
     """
     if path.is_file():
         log.debug("%s: reading magic to check for a TWTI/TWTZ image", path)
@@ -180,7 +183,7 @@ def identify(
         if kind is not None:
             log.debug("%s: %s magic; identifying from the image", path, kind)
             with twti.TapeImage.open(path, progress=progress) as img:
-                return from_image(img, volume_profile=volume_profile)
+                return from_image(img, volume_profile=volume_profile, overrides=overrides)
         log.debug("%s: not a TWTI or TWTZ image; refusing", path)
     else:
         log.debug("%s: not a file; refusing", path)
@@ -191,6 +194,7 @@ def from_sectors(
     sectors: Iterable[RawSector],
     *,
     volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
     drive: dict | None = None,
 ) -> TapeInfo:
     """Identify from recovered sectors: locate the header, correct the volume table.
@@ -261,11 +265,14 @@ def from_sectors(
         vtbl_data,
         notes,
         volume_profile,
+        overrides,
         drive,
     )
 
 
-def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeInfo:
+def from_image(
+    img: twti.TapeImage, *, volume_profile: str = vp.GUESS, overrides: vp.Overrides | None = None
+) -> TapeInfo:
     """Identify from a TWTI image: re-read the header and volume table segments.
 
     The image header already carries the parsed format parameter record, but we
@@ -346,8 +353,37 @@ def from_image(img: twti.TapeImage, *, volume_profile: str = vp.GUESS) -> TapeIn
         vtbl_data,
         notes,
         volume_profile,
+        overrides,
         drive,
     )
+
+
+def _hand_tuned(
+    records: list[bytes],
+    vol: VolumeInfo,
+    chosen: vp.Verdict,
+    overrides: vp.Overrides,
+    notes: list[str],
+) -> vp.Verdict:
+    """``chosen`` read again with ``overrides`` on its profile; the selection's warnings carry over.
+
+    The winner stays the winner. The table was scored to find out who wrote
+    the tape, and the overrides say how to read what they wrote, so the
+    hand-tuned verdict takes the chosen one's place rather than being
+    ranked again: a moved VTBL field changes the score, and re-ranking could
+    hand the tape to a runner-up the operator did not pick. The selection's
+    warnings (``low-confidence``, ``vtbl-ambiguous``) were earned by the
+    profile's own reading and still apply; ``manual`` comes from the
+    overridden profile itself.
+    """
+    log.debug("re-reading the table with %s hand-tuned", chosen.profile.name)
+    verdict = vp.evaluate(records, vol, vp.override(chosen.profile, overrides))
+    verdict.warnings |= chosen.warnings
+    notes.append(
+        f"volume profile {chosen.profile.name} was hand-tuned ({overrides.describe()}); "
+        "the volumes are read as given, which no fingerprint confirms"
+    )
+    return verdict
 
 
 def _assemble(
@@ -361,9 +397,10 @@ def _assemble(
     vtbl_data: bytes | None,
     notes: list[str],
     volume_profile: str,
+    overrides: vp.Overrides | None,
     drive: dict | None,
 ) -> TapeInfo:
-    """The source-independent half: pick a profile, guess the cartridge, gather notes."""
+    """The source-independent half: pick a profile, lay the overrides on it, guess the cartridge."""
     records = volume_mod.vtbl_records(vtbl_data) if vtbl_data is not None else []
     log.debug("volume table: %d records", len(records))
     if vtbl_data is not None:
@@ -402,6 +439,12 @@ def _assemble(
                 f"profile {verdicts[0].profile.name} was forced, but its fingerprint does "
                 f"not match this tape: {failed}"
             )
+    if overrides:
+        if verdicts:
+            verdicts[0] = _hand_tuned(records, vol, verdicts[0], overrides, notes)
+        else:
+            log.debug("no volume table read; the hand-tuned parameters apply to nothing")
+            notes.append("no volume table was read, so the hand-tuned parameters were not applied")
     hint, hint_from = _standard_hint(vol, drive)
     guess = cartridge.guess(vol.tracks, vol.segments_per_track, hint, hint_from)
     return TapeInfo(

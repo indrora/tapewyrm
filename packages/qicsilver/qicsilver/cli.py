@@ -19,24 +19,29 @@ rich console (:mod:`qicsilver.console`); ``-v`` / ``-q`` move the log level.
 
 from __future__ import annotations
 
+import functools
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import rich_click as click
 from click.core import ParameterSource
+from qiclib import fileset as fs
 from qiclib.extract import DEFAULT_PREFIX
+from qiclib.volume_profile import FIELD_NAMES
 from rich.console import Console
 from tapewyrm_archive.progress import Progress
 
 from qicsilver.console import make_console, progress_display, setup_logging
 
 if TYPE_CHECKING:
-    # An annotation only: qicsilver.entries (and the QIC-113 readers behind
+    # Annotations only: qicsilver.entries (and the QIC-113 readers behind
     # it) is imported when a command needs it, as the commands import theirs.
+    from qiclib.volume_profile import Overrides
+
     from qicsilver.entries import VolumeListing
 
 log = logging.getLogger(__name__)
@@ -73,28 +78,138 @@ def cli(ctx: click.Context, show_progress: bool, verbose: int, quiet: int) -> No
 _VOLUME_PROFILE_HELP = "volume-table layout: a profile name or path, or 'guess' to try them all"
 
 
+def _overrides(
+    fileset_parser: str | None,
+    fileset_param: tuple[str, ...],
+    extent_offset_bytes: str | None,
+    extent_frame_size_bytes: str | None,
+    vtbl_field: tuple[str, ...],
+) -> Overrides | None:
+    """The hand-tuning flags as one ``qiclib.volume_profile.Overrides``; None when none was given.
+
+    A value that is wrong on its face (a parser nobody registered, a field
+    outside bytes 57-127, ``NAME=OFFSET`` with no length) is a usage error
+    here, before any image is opened. One only the tape can judge (a
+    parameter the chosen profile's parser does not take) surfaces as the
+    command's VolumeProfileError, exit 1.
+    """
+    from qiclib.volume_profile import Overrides as _Overrides
+    from qiclib.volume_profile import VolumeProfileError
+
+    if not (
+        fileset_parser
+        or fileset_param
+        or extent_offset_bytes
+        or extent_frame_size_bytes
+        or vtbl_field
+    ):
+        return None
+    try:
+        return _Overrides.from_strings(
+            fileset_parser=fileset_parser,
+            fileset_params=fileset_param,
+            extent_offset_bytes=int(extent_offset_bytes) if extent_offset_bytes else None,
+            extent_frame_size_bytes=int(extent_frame_size_bytes)
+            if extent_frame_size_bytes
+            else None,
+            vtbl_fields=vtbl_field,
+        )
+    except VolumeProfileError as exc:
+        log.debug("hand-tuning flags refused: %s", exc)
+        raise click.UsageError(str(exc)) from exc
+
+
+def volume_read_options(f: Callable[..., Any]) -> Callable[..., Any]:
+    """``--volume-profile`` and the hand-tuning flags, delivered as ``volume_profile`` and ``overrides``.
+
+    One decorator, so identify, extract, inspect and tar take the same
+    flags with the same words (cinnabar's cli.py carries a copy, kept
+    identical by hand like console.py). The five override flags are folded
+    into one ``qiclib.volume_profile.Overrides`` (:func:`_overrides`) before
+    the command runs; the command sees ``overrides`` (or None) next to the
+    ``volume_profile`` string, and hands both to qiclib, which lays the
+    overrides on whichever profile reads the tape, forced or guessed
+    (DESIGN.md section 7.8). A hand-tuned read is named ``<profile>+overrides``
+    and carries the ``manual`` warning wherever the profile's name goes.
+    """
+
+    @click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
+    @click.option(
+        "--fileset-parser", metavar="NAME", default=None,
+        help=f"read the volumes with this file-set parser instead of the profile's "
+        f"({', '.join(fs.names())})",
+    )  # fmt: skip
+    @click.option(
+        "--fileset-param", metavar="KEY=VALUE", multiple=True,
+        help="a parameter of that parser (repeatable)",
+    )  # fmt: skip
+    @click.option(
+        "--extent-offset-bytes", type=click.Choice(["4", "8"]), default=None,
+        help="width of the uncompressed-offset field heading each QIC-122 extent",
+    )  # fmt: skip
+    @click.option(
+        "--extent-frame-size-bytes", type=click.Choice(["2", "4"]), default=None,
+        help="width of each compression frame's size field",
+    )  # fmt: skip
+    @click.option(
+        "--vtbl-field", metavar="NAME=OFFSET,LENGTH", multiple=True,
+        help=f"place a VTBL field past byte 56 by hand (repeatable; "
+        f"{', '.join(sorted(FIELD_NAMES))})",
+    )  # fmt: skip
+    @functools.wraps(f)
+    def wrapper(
+        *args: Any,
+        fileset_parser: str | None,
+        fileset_param: tuple[str, ...],
+        extent_offset_bytes: str | None,
+        extent_frame_size_bytes: str | None,
+        vtbl_field: tuple[str, ...],
+        **kwargs: Any,
+    ) -> Any:
+        kwargs["overrides"] = _overrides(
+            fileset_parser, fileset_param, extent_offset_bytes, extent_frame_size_bytes, vtbl_field
+        )
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 @cli.command()
 @click.argument("image", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
-@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
+@volume_read_options
 # Not -v/--verbose: that is the global log-level flag on `qicsilver` itself.
 @click.option("--raw", is_flag=True, help="also dump raw records and profile scoring")
 @click.pass_obj
-def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, raw: bool) -> None:
+def identify(
+    app: AppContext,
+    image: Path,
+    as_json: bool,
+    volume_profile: str,
+    overrides: Overrides | None,
+    raw: bool,
+) -> None:
     """What is on a tape: cartridge, factory stamp, dates, bad sectors, volumes.
 
     IMAGE is a TWTI tape image (or a .twtz). To identify raw captures, `tw convert` them
     first; only the header segment and the volume table at the start of
     track 0 are needed, so a short capture of BOT is enough.
+
+    The volume table is read through the volume profile that fits best
+    (--volume-profile forces one). --fileset-parser, --fileset-param,
+    --extent-offset-bytes, --extent-frame-size-bytes and --vtbl-field
+    override that profile's layers by hand, for a tape no profile fits yet;
+    the report then names the profile as NAME+overrides with the warning
+    `manual`, and `extract` with the same flags writes that reading.
     """
     import json
 
     from qiclib.identify import format_info, identify, to_dict
     from qiclib.volume_profile import VolumeProfileError
 
-    log.debug("identifying %s (volume profile %r)", image, volume_profile)
+    log.debug("identifying %s (volume profile %r, overrides %s)", image, volume_profile, overrides)
     try:
-        info = identify(image, volume_profile=volume_profile)
+        info = identify(image, volume_profile=volume_profile, overrides=overrides)
     except (ValueError, VolumeProfileError) as exc:
         log.debug("identify failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
@@ -125,7 +240,7 @@ def identify(app: AppContext, image: Path, as_json: bool, volume_profile: str, r
     "-o", "--outfile", type=click.Path(dir_okay=False, path_type=Path), default=None,
     help="write the one selected volume to this file instead (not with OUTDIR or --prefix)",
 )  # fmt: skip
-@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
+@volume_read_options
 @click.pass_context
 def extract(
     ctx: click.Context,
@@ -135,6 +250,7 @@ def extract(
     prefix: str,
     outfile: Path | None,
     volume_profile: str,
+    overrides: Overrides | None,
 ) -> None:
     """TWTI tape image -> one TWVL file per backup volume (OUTDIR/vol-NN.twvl).
 
@@ -146,7 +262,9 @@ def extract(
     Reads the volume table through the volume profile `qicsilver identify` would
     pick, decompresses QIC-122 data and lays each volume out by its QIC-113
     offsets, recording the byte ranges that were lost. Then `qicsilver
-    inspect` or `qicsilver tar`.
+    inspect` or `qicsilver tar`. The hand-tuning flags (--fileset-parser,
+    --vtbl-field, ...) are `identify`'s: the TWVL header then names the
+    profile as NAME+overrides, the parser given, and the warning `manual`.
     """
     from qiclib.extract import extract as do_extract
     from qiclib.extract import parse_volume_list
@@ -177,13 +295,14 @@ def extract(
             )
     out_dir = outdir if outdir is not None else Path(".")
     log.debug(
-        "extracting %s to %s (volumes %s, prefix %r, outfile %s, volume profile %r)",
+        "extracting %s to %s (volumes %s, prefix %r, outfile %s, volume profile %r, overrides %s)",
         image,
         out_dir,
         volumes or "all",
         prefix,
         outfile,
         volume_profile,
+        overrides,
     )
     try:
         with app.progress() as prog:
@@ -194,6 +313,7 @@ def extract(
                 prefix=prefix,
                 outfile=outfile,
                 volume_profile=volume_profile,
+                overrides=overrides,
                 progress=prog,
             )
     except (ValueError, VolumeProfileError) as exc:
@@ -204,7 +324,11 @@ def extract(
 
 
 def _open_volume(
-    file: Path, volume_index: int | None, volume_profile: str, progress: Progress
+    file: Path,
+    volume_index: int | None,
+    volume_profile: str,
+    overrides: Overrides | None,
+    progress: Progress,
 ) -> VolumeListing:
     """The backup volume in FILE, listed: a TWVL as it is, or one volume of a TWTI/TWTZ image.
 
@@ -231,11 +355,12 @@ def _open_volume(
 
     kind = sniff(file)
     log.debug(
-        "opening %s (%s; volume %r, profile %r)",
+        "opening %s (%s; volume %r, profile %r, overrides %s)",
         file,
         kind or "unknown format",
         volume_index,
         volume_profile,
+        overrides,
     )
     try:
         if kind == "TWVL":
@@ -246,7 +371,13 @@ def _open_volume(
                 )
             return read_volume(file)
         if kind in ("TWTI", "TWTZ"):
-            vol = load_volume(file, volume_index, volume_profile=volume_profile, progress=progress)
+            vol = load_volume(
+                file,
+                volume_index,
+                volume_profile=volume_profile,
+                overrides=overrides,
+                progress=progress,
+            )
             return list_volume(vol, file)
         if kind == "TWRF":
             log.debug("%s is a raw capture; refusing", file)
@@ -269,7 +400,7 @@ def _open_volume(
     "--volume", "volume_index", metavar="N", type=click.IntRange(min=0), default=None,
     help="which volume of a tape image to list (required when it has more than one)",
 )  # fmt: skip
-@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
+@volume_read_options
 @click.option("--json", "as_json", is_flag=True, help="print machine-readable JSON")
 @click.option("--damaged", is_flag=True, help="list only damaged files")
 @click.pass_obj
@@ -279,6 +410,7 @@ def inspect(
     paths: tuple[str, ...],
     volume_index: int | None,
     volume_profile: str,
+    overrides: Overrides | None,
     as_json: bool,
     damaged: bool,
 ) -> None:
@@ -289,7 +421,8 @@ def inspect(
     the way `extract` reads it, volume table and all, but nothing is
     written: a tape with one volume lists it, a tape with several needs
     --volume N (the number `qicsilver identify` shows next to each volume).
-    --volume-profile is `extract`'s and applies to an image only.
+    --volume-profile and the hand-tuning flags are `extract`'s and apply to
+    an image only (a TWVL already carries its reading in its header).
 
     First a summary: tape name, volume label, backup date, the directory
     format and the parser that read it, file, directory and damaged counts,
@@ -307,7 +440,7 @@ def inspect(
 
     log.debug("inspecting %s (paths %r, damaged only %s)", file, paths, damaged)
     with app.progress() as prog:
-        listing = _open_volume(file, volume_index, volume_profile, prog)
+        listing = _open_volume(file, volume_index, volume_profile, overrides, prog)
     entries = select_entries(listing.entries, paths, damaged)
     if as_json:
         click.echo(json.dumps(to_dict(listing, entries), indent=1))
@@ -328,7 +461,7 @@ def inspect(
     "--volume", "volume_index", metavar="N", type=click.IntRange(min=0), default=None,
     help="which volume of a tape image to tar (required when it has more than one)",
 )  # fmt: skip
-@click.option("--volume-profile", default="guess", show_default=True, help=_VOLUME_PROFILE_HELP)
+@volume_read_options
 @click.option(
     "--report", type=click.Path(dir_okay=False, path_type=Path), default=None,
     help="damage report (default: OUTPUT.damaged.txt)",
@@ -341,6 +474,7 @@ def tar(
     output: Path,
     volume_index: int | None,
     volume_profile: str,
+    overrides: Overrides | None,
     report: Path | None,
     skip_damaged: bool,
 ) -> None:
@@ -349,9 +483,10 @@ def tar(
     VOLUME|IMAGE is a TWVL volume (`qicsilver extract` output) or a TWTI/TWTZ
     tape image, told apart by their magic exactly as `qicsilver inspect`
     tells them apart: an image is read the way `extract` reads it (so
-    --volume-profile applies) and its volume tarred without a .twvl landing
-    on disk; a tape with one volume needs no --volume, a tape with several
-    needs --volume N (the number `qicsilver identify` shows).
+    --volume-profile and the hand-tuning flags apply) and its volume tarred
+    without a .twvl landing on disk; a tape with one volume needs no
+    --volume, a tape with several needs --volume N (the number `qicsilver
+    identify` shows).
 
     Keeps the backup's own paths, modification times and attributes (pax
     header TAPEWYRM.dos_attributes, or TAPEWYRM.qic113_attributes for a
@@ -365,7 +500,7 @@ def tar(
     try:
         # One display for both steps: an image's segment decode, then the write.
         with app.progress() as prog:
-            listing = _open_volume(file, volume_index, volume_profile, prog)
+            listing = _open_volume(file, volume_index, volume_profile, overrides, prog)
             res = write_tar(
                 listing, output, report_path=report, skip_damaged=skip_damaged, progress=prog
             )

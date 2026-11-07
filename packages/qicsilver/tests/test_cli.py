@@ -277,3 +277,47 @@ def test_extract_bad_volume_numbers(tmp_path):
     assert not (tmp_path / "o").exists()
     typo = CliRunner().invoke(cli, ["extract", str(image), "--volumes", "2-a"])
     assert typo.exit_code == 2 and "bad volume range" in typo.output
+
+
+# ---------------------------------------------------------------------------
+# Hand-tuned reads: the override flags on identify and extract
+# ---------------------------------------------------------------------------
+
+
+def test_overrides_are_stamped_into_the_header_and_named_by_identify(tmp_path):
+    """--fileset-parser & co. lay on the chosen profile; TWVL and identify say the read was hand-tuned."""
+    from tapewyrm_archive.twvl import Volume
+
+    image = _multi_volume_image(tmp_path / "m.twti")
+    plain = json.loads(CliRunner().invoke(cli, ["identify", "--json", str(image)]).stdout)
+    flags = ["--fileset-parser", "none", "--vtbl-field", "source_label=102,16"]
+    result = CliRunner().invoke(cli, ["identify", "--json", *flags, str(image)])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)  # the hand-tuning is logged at INFO, on stderr
+    assert doc["volume_profile"] == plain["volume_profile"] + "+overrides"
+    assert doc["fileset_parser"] == "none" and "manual" in doc["warnings"]
+    assert any("hand-tuned" in note for note in doc["notes"])
+    text = CliRunner().invoke(cli, ["identify", *flags, str(image)])
+    assert "+overrides" in text.output and "manual" in text.output
+
+    out = tmp_path / "out"
+    result = CliRunner().invoke(cli, ["extract", str(image), str(out), "--volumes", "0", *flags])
+    assert result.exit_code == 0, result.output
+    hdr = Volume.load(out / "vol-00.twvl").header
+    assert hdr["fileset"]["profile"] == plain["volume_profile"] + "+overrides"
+    assert hdr["fileset"]["parser"] == "none" and hdr["fileset"]["params"] == {}
+    assert "manual" in hdr["warnings"]
+
+
+def test_malformed_override_flags_are_usage_errors(tmp_path):
+    """Wrong on its face: exit 2 before the image opens; wrong for the tape's parser: exit 1."""
+    image = _multi_volume_image(tmp_path / "m.twti")
+    bad_field = CliRunner().invoke(cli, ["identify", "--vtbl-field", "label=1,2", str(image)])
+    assert bad_field.exit_code == 2 and "unknown [vtbl] field" in bad_field.output
+    bad_parser = CliRunner().invoke(cli, ["inspect", "--fileset-parser", "zip", str(image)])
+    assert bad_parser.exit_code == 2 and "no file-set parser named 'zip'" in bad_parser.output
+    tar_out = str(tmp_path / "x.tar")
+    bad_width = CliRunner().invoke(cli, ["tar", "--extent-offset-bytes", "6", str(image), tar_out])
+    assert bad_width.exit_code == 2 and "6" in bad_width.output  # click.Choice refuses it
+    param = CliRunner().invoke(cli, ["identify", "--fileset-param", "depth=3", str(image)])
+    _assert_clean_error(param, "not parameters of")

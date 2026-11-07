@@ -215,6 +215,26 @@ def test_3m_tape_end_to_end():
     assert "QIC-122" in text and "172.1 MB" in text
 
 
+def test_overrides_lay_on_the_chosen_profile_and_keep_its_place():
+    """Guessed or forced, the hand-tuned profile replaces the winner where it stands, warned manual."""
+    from qiclib import volume_profile as vp
+
+    plain = ident.from_sectors(_3m_sectors())
+    info = ident.from_sectors(_3m_sectors(), overrides=vp.Overrides(fileset_parser="none"))
+    assert info.profile == "mtn+overrides" and info.fileset_parser == "none"
+    assert "manual" in info.warnings
+    assert info.volumes == plain.volumes  # the same fields read; only the parser moved
+    assert [v.profile.name for v in info.verdicts[1:]] == [
+        v.profile.name for v in plain.verdicts[1:]
+    ]
+    assert any("hand-tuned" in note for note in info.notes)
+    forced = ident.from_sectors(
+        _3m_sectors(), volume_profile="qic80-rev-n", overrides=vp.Overrides(extent_offset_bytes=4)
+    )
+    assert forced.profile == "qic80-rev-n+overrides"
+    assert forced.verdicts[0].profile.extent_offset_bytes == 4
+
+
 def test_forced_profile_is_used_even_when_it_scores_badly():
     info = ident.from_sectors(_3m_sectors(), volume_profile="qic80-rev-n")
     assert info.profile == "qic80-rev-n" and len(info.verdicts) == 1

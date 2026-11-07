@@ -105,6 +105,33 @@ def test_a_profile_without_a_parser_leaves_the_volume_unparsed(image_path: Path)
     assert [c.label for c in past] == ["vendor"]  # the profile places nothing past byte 56
 
 
+def test_overrides_reach_the_tapes_rows_and_dump(image_path: Path):
+    """--fileset-parser & co.: the reading names the tuned profile, its parser and the manual warning."""
+    from qiclib import volume_profile as vp
+
+    tape = open_path(
+        image_path, volume_profile="qic80-rev-n", overrides=vp.Overrides(fileset_parser="none")
+    )
+    rows = dict(tape.detail)
+    assert rows["volume profile"] == "qic80-rev-n+overrides (spec)"
+    assert rows["file-set parser"] == "none"
+    assert tape.warnings == ("generic", "manual")
+    track = tape.load(0, NULL_PROGRESS)
+    volume = next(s for s in track.segments if dict(s.detail)["holds"] == "TEST BACKUP")
+    (note,) = volume.fields
+    assert note.label == "No file-set parser"  # laid out as given, not as the profile says
+    flags = ["--fileset-parser", "none", "--vtbl-field", "source_label=102,16"]
+    result = CliRunner().invoke(cli, ["--dump", "--segment", "0", *flags, str(image_path)])
+    assert result.exit_code == 0, result.output
+    assert "volume profile: qic80-rev-n+overrides (spec)" in result.output
+    assert "file-set parser: none" in result.output
+    assert "warnings: generic, manual" in result.output
+    bad = CliRunner().invoke(cli, ["--dump", "--vtbl-field", "label=1,2", str(image_path)])
+    assert bad.exit_code == 2 and "unknown [vtbl] field" in bad.output
+    missing = CliRunner().invoke(cli, ["--dump", "--volume-profile", "nope", str(image_path)])
+    assert missing.exit_code == 1 and "no volume profile 'nope'" in missing.output
+
+
 def test_dump_lists_every_lane(image_path: Path):
     track = open_path(image_path).load(0)
     text = dump_track(track, segment=0)
@@ -207,6 +234,26 @@ def test_identification_fires_on_the_header_and_again_for_the_volume_table():
     assert [e.description.strip() for e in ident.layout.entries] == ["TEST BACKUP"]
     assert ident.wanted == set()
     assert not ident.attempt([*v, *h, *t], hdr, final=True)
+
+
+def test_flux_identification_takes_the_volume_read_flags():
+    """A flux tape's identification carries --volume-profile and the overrides into every attempt."""
+    from qiclib import volume_profile as vp
+    from qiclib.testing.builders import segment_raw_sectors
+
+    from cinnabar.load.flux import _Identification
+    from tests.conftest import capture_header, tape_segments
+
+    sectors = [s for seg in tape_segments() for s in segment_raw_sectors(seg)]
+    ident = _Identification("qic80-rev-n", vp.Overrides(fileset_parser="none"))
+    assert ident.attempt(sectors, capture_header(0), final=True)
+    assert ident.layout is not None
+    assert ident.layout.reading.profile == "qic80-rev-n+overrides"
+    assert ident.layout.reading.parser == "none" and "manual" in ident.layout.warnings
+    # A parameter the parser does not take is the flags' fault: warned, not identified.
+    bad = _Identification(overrides=vp.Overrides(fileset_params={"depth": 3}))
+    assert not bad.attempt(sectors, capture_header(0), final=True)
+    assert bad.layout is None
 
 
 def test_flux_capture_of_gcr_records(qic100_capture: Path):

@@ -68,6 +68,7 @@ class VolumeWarning(StrEnum):
     # About the choice between profiles.
     LOW_CONFIDENCE = "low-confidence"  # runner-up within 2 points, or a probe passed with failures
     VTBL_AMBIGUOUS = "vtbl-ambiguous"  # two profiles read the volume table identically
+    MANUAL = "manual"  # the operator overrode a layer (parser, extent width, VTBL field) by hand
     # About what can be done with the volume.
     NO_PARSER = "no-parser"  # identified and extractable to TWVL, but nothing can list it
     SPECIAL_FS = "special-fs"  # resource forks, unix owner/mode, symlinks, devices, NT streams...
@@ -85,6 +86,7 @@ WARNING_MEANINGS: dict[VolumeWarning, str] = {
     VolumeWarning.GENERIC: "a default layout was chosen because nothing positive matched",
     VolumeWarning.LOW_CONFIDENCE: "another reading came within 2 points, or the parser passed with failures",
     VolumeWarning.VTBL_AMBIGUOUS: "two profiles read the volume table identically",
+    VolumeWarning.MANUAL: "the read was hand-tuned: a parser, extent width or VTBL field was given on the command line",
     VolumeWarning.NO_PARSER: "the format is recognised but no parser can list its files",
     VolumeWarning.SPECIAL_FS: "entries carry what a DOS tar cannot: forks, unix ownership, symlinks, devices, streams",
     VolumeWarning.LOSSY_NAMES: "file names went through a lossy encoding",

@@ -38,6 +38,14 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   machine-readable JSON, `--raw` adds the raw records and every profile's
   checks, fingerprint items marked. Only the header and the volume table at
   the start of track 0 are needed, so a short capture of track 0 is enough.
+  For a tape no profile fits yet, the **hand-tuning flags** override the
+  chosen (or forced) profile one layer at a time, before any TOML is
+  written: `--fileset-parser NAME`, `--fileset-param KEY=VALUE`
+  (repeatable), `--extent-offset-bytes 4|8`, `--extent-frame-size-bytes 2|4`
+  and `--vtbl-field NAME=OFFSET,LENGTH` (repeatable; `source_label=102,16`).
+  The report then names the profile as `NAME+overrides` with the warning
+  `manual`; the same flags on `extract`, `inspect` and `tar` read the tape
+  that way (DESIGN.md §7.8).
 - **`extract IMAGE [OUTDIR]`**: one TWVL file (`OUTDIR/vol-NN.twvl`, OUTDIR
   defaulting to `.`, NN the volume's number in the volume table) per backup
   volume. QIC-122 data is decompressed and each volume is laid out by its
@@ -46,17 +54,19 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   `0,2-4`; a number the tape lacks is an error before anything is written),
   `--prefix P` renames the files (`P00.twvl`), `-o FILE` writes the one
   selected volume to FILE (exactly one volume; not with OUTDIR or `--prefix`).
-  Takes `--volume-profile` like `identify`. Once a volume is built, the
-  profile's file-set parser **probes** it (does it read as that software's
-  catalog?); the header records the parser and the probe (TWS-3 section
-  3.4) and the warnings (3.5), and a parser that fails hands over to the
-  next profile that would have built the same bytes.
+  Takes `--volume-profile` and the hand-tuning flags like `identify`. Once a
+  volume is built, the profile's file-set parser **probes** it (does it read
+  as that software's catalog?); the header records the parser and the probe
+  (TWS-3 section 3.4) and the warnings (3.5), and a parser that fails hands
+  over to the next profile that would have built the same bytes. A
+  hand-tuned read is never handed over: the header names `NAME+overrides`,
+  the parser given and `manual`, failed probe and all.
 - **`inspect VOLUME|IMAGE [PATH]...`**: list a volume like `tar tv`, without
   extracting it. The file is a TWVL volume or a TWTI/TWTZ image, told apart
   by magic; an image is read as `extract` reads it, but nothing is written.
   A tape with one volume lists it; a tape with several needs `--volume N`
-  (the number `identify` shows), and `--volume-profile` applies as for
-  `extract`. A summary (tape name, volume label, date, directory format,
+  (the number `identify` shows), and `--volume-profile` and the hand-tuning
+  flags apply as for `extract`. A summary (tape name, volume label, date, directory format,
   file / directory / damaged counts, missing bytes, lost segments), then one
   line per entry: type and mode, size, modification time (UTC), damage
   (`lost N` / `error`, as in tar's damage report) and path. `PATH` globs
@@ -70,8 +80,9 @@ Global flags, the same as `tw`'s: `--progress` (bars on stderr), `-v` (debug),
   directories, with the original names (long Windows 95 names), modification
   times and DOS attributes (pax header `TAPEWYRM.dos_attributes`). The input
   is a TWVL volume or a TWTI/TWTZ image, routed exactly as `inspect` routes
-  it (`--volume N` for a tape with several volumes, `--volume-profile` as for
-  `extract`), so a tape can be tarred without extracting it first. Both QIC-113
+  it (`--volume N` for a tape with several volumes, `--volume-profile` and
+  the hand-tuning flags as for `extract`), so a tape can be tarred without
+  extracting it first. Both QIC-113
   directory formats work: **extended** (Colorado/HP backup software) and
   **Basic-DOS** (e.g. the "MTN" tapes; QIC-113 attribute bits in
   `TAPEWYRM.qic113_attributes`). The volume's warnings go into the tar's

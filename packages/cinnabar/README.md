@@ -33,6 +33,16 @@ the parser's probe of the whole stream, the verdict `extract` stamps into a
 TWVL header. A hand-built stream with no profile behind it is probed with
 every parser, as `qicsilver inspect` probes a bare TWVL.
 
+The volume read takes `qicsilver`'s flags, with the same words:
+`--volume-profile NAME|PATH` forces the profile (default `guess`), and the
+hand-tuning flags `--fileset-parser NAME`, `--fileset-param KEY=VALUE`,
+`--extent-offset-bytes 4|8`, `--extent-frame-size-bytes 2|4` and
+`--vtbl-field NAME=OFFSET,LENGTH` override that profile's layers, so a tape
+no profile fits yet can be laid out by hand and looked at before its TOML
+is written (DESIGN.md §7.8). The rows then name the profile as
+`NAME+overrides`, the Volume fields lane draws the fields where they were
+placed, and the warning `manual` joins the amber line.
+
 Rows are named by the decoder that produced them, like a protocol
 analyzer's. The physical rows each get a lane when they occur in the
 track; the logical rows share three lanes, since a segment holds one
@@ -44,7 +54,7 @@ on it, and a Details panel docks on the right: while nothing is selected
 it shows what the tape's header said (name, format, geometry, volumes),
 which volume profile read the volume table, its score and its parser, and,
 on a line of their own in amber, any warnings on that reading
-(`low-confidence`, `no-parser`, `untested`...); a click on any span or
+(`low-confidence`, `no-parser`, `untested`, `manual`...); a click on any span or
 byte shows its decoded fields and a colour-coded
 hexdump of its bytes, with buttons to export them or the whole segment to a
 file (a segment export offers the 29 data sectors, as an image holds them,
@@ -60,6 +70,7 @@ pans.
 uv run --project packages/cinnabar cinnabar captures/NAME.twtz
 uv run --project packages/cinnabar cinnabar captures/NAME/            # a directory of TWRF captures
 uv run --project packages/cinnabar cinnabar captures/NAME.twtz --dump --track 2 --segment 5
+uv run --project packages/cinnabar cinnabar captures/NAME.twtz --fileset-parser qic113-basic --vtbl-field source_label=102,16
 ```
 
 A flux capture is on a **time** axis (seconds from the start of the pass); an
