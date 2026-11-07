@@ -226,16 +226,21 @@ class VolumeTable:
         return self.profile.extent_frame_size_bytes if self.profile is not None else 2
 
 
-def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeTable:
+def read_volume_table(
+    img: TapeImage, volume_profile: str = vp.GUESS, overrides: vp.Overrides | None = None
+) -> VolumeTable:
     """The image's volume table, read through a volume profile as ``qicsilver identify`` reads it.
 
     ``volume_profile`` is a name, a path, or ``"guess"``. Only bytes 0-56 of a
     VTBL entry are universal: section sizes, the compression flag and the
     extent offset width differ by the software that wrote the tape, and the
     plain Rev N layout misreads them on e.g. MTN tapes -- a size taken from
-    the middle of the label, compression read as off. A table segment that
-    was never recovered is a ``ValueError``; a partly rebuilt one is parsed
-    for what it still holds.
+    the middle of the label, compression read as off. ``overrides`` are
+    hand-given parameters laid on the chosen profile
+    (:func:`qiclib.volume.profile.override`); the table is then that tuned
+    profile's reading, and so is every volume built from it. A table segment
+    that was never recovered is a ``ValueError``; a partly rebuilt one is
+    parsed for what it still holds.
     """
     # The FPR member extraction cannot do without, checked up front so a
     # malformed header is a MalformedFileError naming the member, not a
@@ -263,7 +268,7 @@ def read_volume_table(img: TapeImage, volume_profile: str = vp.GUESS) -> VolumeT
     # path), which only this step of extraction needs.
     from qiclib.identify import from_image
 
-    verdicts = from_image(img, volume_profile=volume_profile).verdicts
+    verdicts = from_image(img, volume_profile=volume_profile, overrides=overrides).verdicts
     if not verdicts:
         log.debug("no VTBL records in segment %d; no profile to apply", vt_seg)
         return VolumeTable(None, [])
@@ -596,7 +601,11 @@ def stamp_fileset(vol: Volume, table: VolumeTable, k: int, source: Path) -> Prob
     passes takes over, with ``low-confidence``. None passing keeps the
     chosen profile's reading, failed probe and all: the TWVL is still worth
     keeping, and the warning travels with it. A probe that passed with a
-    failed check is ``low-confidence`` too.
+    failed check is ``low-confidence`` too. A hand-tuned reading
+    (``manual``, :func:`qiclib.volume.profile.override`) is never handed
+    over: the operator named the parser, and a fallback would undo that
+    choice silently and lose the ``manual`` mark with it; the failed probe
+    is stamped and logged instead.
     """
     hdr = vol.header
     verdict = table.verdict
@@ -609,7 +618,11 @@ def stamp_fileset(vol: Volume, table: VolumeTable, k: int, source: Path) -> Prob
     chosen, probe = verdict, _probe_with(vol, vtbl, verdict, k, source)
     if not probe.passed:
         why = probe.fatal or f"score {probe.score}, {len(probe.failures)} checks failed"
-        for alt in table.alternatives:
+        alternatives = table.alternatives
+        if VolumeWarning.MANUAL in verdict.warnings:
+            log.debug("volume %d: hand-tuned reading; no other profile's parser is tried", k)
+            alternatives = ()
+        for alt in alternatives:
             if not _same_bytes(verdict, alt, k):
                 log.debug(
                     "volume %d: %s would have built different bytes; not tried", k, alt.profile.name
@@ -678,6 +691,7 @@ def extract(
     prefix: str = DEFAULT_PREFIX,
     outfile: Path | None = None,
     volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
     progress: Progress = NULL_PROGRESS,
 ) -> list[Path]:
     """Write the tape image's volumes as TWVL files; returns their paths in order.
@@ -691,7 +705,7 @@ def extract(
 
     The volume table is read through a volume profile, exactly as ``qicsilver
     identify`` reads it (:func:`read_volume_table`, which says why that
-    matters).
+    matters and what ``overrides`` are).
     """
     log.info("extracting volumes from %s...", image_path.name)
     # A TWTZ image is decompressed to a temp file here; its finalizer deletes it
@@ -700,7 +714,7 @@ def extract(
     # The other FPR member extraction needs (first_data_seg is
     # read_volume_table's), checked up front for the same reason.
     tape_name = img.qic80_str("tape_name")
-    table = read_volume_table(img, volume_profile)
+    table = read_volume_table(img, volume_profile, overrides)
     vtbl = table.entries
     if not vtbl:
         log.debug("volume table parsed to no entries; nothing to extract")
@@ -738,6 +752,7 @@ def load_volume(
     volume: int | None = None,
     *,
     volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
     progress: Progress = NULL_PROGRESS,
 ) -> Volume:
     """One volume of the tape image, in memory: what ``extract`` would have saved for it.
@@ -745,7 +760,7 @@ def load_volume(
     ``volume`` is its index in the volume table. ``None`` is allowed only when
     the tape has exactly one volume (:func:`_pick_volume`); several volumes,
     or an index the table lacks, is a ``ValueError`` that says how to pick.
-    ``volume_profile`` and ``progress`` are :func:`extract`'s.
+    ``volume_profile``, ``overrides`` and ``progress`` are :func:`extract`'s.
     """
     log.info(
         "reading volume %s from %s...",
@@ -756,7 +771,7 @@ def load_volume(
     # deletes it as soon as the volume's bytes are in hand.
     with TapeImage.open(image_path, progress=progress) as img:
         tape_name = img.qic80_str("tape_name")
-        table = read_volume_table(img, volume_profile)
+        table = read_volume_table(img, volume_profile, overrides)
         k = _pick_volume(volume, len(table.entries))
         vol = build_volume(
             img,

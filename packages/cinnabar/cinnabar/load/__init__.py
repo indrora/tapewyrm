@@ -20,6 +20,7 @@ import json
 import logging
 from pathlib import Path
 
+from qiclib.volume import profile as vp
 from tapewyrm_archive import inspect as inspect_mod
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 
@@ -61,24 +62,37 @@ def sidecar_captures(capture: Path) -> list[Path]:
     return found
 
 
-def open_path(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
+def open_path(
+    path: Path,
+    progress: Progress = NULL_PROGRESS,
+    *,
+    volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
+) -> Tape:
     """A :class:`Tape` for ``path``: an image, a capture, or a directory of captures.
 
     ``progress`` reports the opening (a TWTZ decompresses here); each
     track's own loading reports through the ``progress`` given to
-    ``Tape.load``.
+    ``Tape.load``. ``volume_profile`` and ``overrides`` are ``qicsilver``'s:
+    the profile the volume table is read through (a name, a path or
+    ``"guess"``) and hand-given parameters laid on it
+    (:func:`qiclib.volume.profile.override`); both reach
+    :mod:`qiclib.identify` in each loader, so the viewer labels the tape
+    exactly as ``qicsilver extract`` with the same flags would read it.
     """
     if path.is_dir():
         from cinnabar.load import flux
 
-        return flux.open_directory(path)
+        return flux.open_directory(path, volume_profile=volume_profile, overrides=overrides)
     kind = inspect_mod.sniff(path)
     if kind in ("TWTI", "TWTZ"):
         from cinnabar.load import image
 
-        return image.open_image(path, progress)
+        return image.open_image(path, progress, volume_profile=volume_profile, overrides=overrides)
     if kind == "TWRF":
         from cinnabar.load import flux
 
-        return flux.open_captures(sidecar_captures(path))
+        return flux.open_captures(
+            sidecar_captures(path), volume_profile=volume_profile, overrides=overrides
+        )
     raise ValueError(f"{path}: not a TWRF capture or a TWTI/TWTZ image")

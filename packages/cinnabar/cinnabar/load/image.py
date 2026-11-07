@@ -19,6 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from qiclib import identify
+from qiclib.volume import profile as vp
 from tapewyrm_archive import twti
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twti import SegmentState, TapeImage
@@ -48,7 +49,14 @@ _OVERVIEW = {
 }
 
 
-def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
+def open_image(
+    path: Path,
+    progress: Progress = NULL_PROGRESS,
+    *,
+    volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
+) -> Tape:
+    """The image as a :class:`Tape`; ``volume_profile`` and ``overrides`` are :func:`cinnabar.load.open_path`'s."""
     img = TapeImage.open(path, progress=progress)
     geometry = img.header.get("geometry", {})
     tracks = int(geometry.get("tracks", 0))
@@ -56,7 +64,7 @@ def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
     if tracks <= 0 or spt <= 0:
         # No geometry: show everything as one track (TWS-2 section 9.2 rule 5).
         tracks, spt = 1, len(img.entries)
-    info = identify.from_image(img)
+    info = identify.from_image(img, volume_profile=volume_profile, overrides=overrides)
     present = [
         n
         for n, e in enumerate(img.entries)
@@ -132,4 +140,4 @@ def open_image(path: Path, progress: Progress = NULL_PROGRESS) -> Tape:
             return _load(track)
 
     numbers = list(range(tracks)) + sorted(labels)
-    return Tape(str(path), kind, numbers, load, detail, labels)
+    return Tape(str(path), kind, numbers, load, detail, labels, layout.warnings)

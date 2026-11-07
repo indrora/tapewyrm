@@ -530,6 +530,11 @@ class Track:
     # A capture's background decoder (cinnabar.load.flux.FluxTrack): segments
     # land one by one. None once everything is here, and always for an image.
     decoder: Any = None
+    # Caveats on how the track was read, by their fixed names: a volume
+    # track's parser probe raises them (``low-confidence``,
+    # ``directory-damaged``...). The details panel shows them in warning
+    # colour; see VolumeReading for where the names come from.
+    warnings: tuple[str, ...] = ()
 
     @property
     def start(self) -> float:
@@ -594,6 +599,9 @@ class Tape:
     # named after the volume. A loader may add numbers after opening (a flux
     # tape's volumes appear once its header and volume table have decoded).
     labels: dict[int, str] = field(default_factory=dict)
+    # Caveats on how the tape's volume table was read (VolumeReading.warnings),
+    # shown in warning colour wherever the tape's rows are.
+    warnings: tuple[str, ...] = ()
 
     def label(self, number: int) -> str:
         if number in self.labels:
@@ -605,3 +613,66 @@ class Tape:
 
 PASS_BASE = 1000  # a capture whose header names no usable track
 VOLUME_BASE = 2000  # VOLUME_BASE + k: the decompressed stream of volume k
+
+
+# ---------------------------------------------------------------------------
+# How the volume table was read
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VolumeReading:
+    """Which volume profile read the volume table, how sure it is, and what parses the volumes.
+
+    A volume profile (``qiclib.volume.profile``, DESIGN.md 7.8) answers three
+    questions about a tape, one per layer of a read: how the VTBL bytes past
+    56 are laid out, how wide the QIC-122 extent fields are, and which
+    file-set parser lists the volume's bytes. The loaders fill this record
+    from the verdict the profile guess chose, the same one ``qicsilver
+    extract`` reads the tape with, and the annotators and widgets read it
+    as plain names and numbers, so the volume lanes are laid out by the
+    parser the profile names and the details panel can show a
+    ``low-confidence`` or ``no-parser`` read for what it is. The UI never
+    sees a qiclib object; what travels here is what the TWVL header carries
+    (TWS-3 sections 3.4, 3.5).
+
+    ``profile`` and ``status`` name the profile and how exercised it is
+    (``spec``, ``bench``, ``untested``); ``score`` is its plausibility
+    total and ``eliminated`` says its fingerprint gate failed (every
+    profile's did, and this one scored best anyway: ``qiclib.identify``
+    then reads the tape with it and says it may be wrong); ``warnings``
+    are the caveats by their fixed names (``qiclib.volume.verdict.VolumeWarning``
+    values); ``parser`` is the file-set parser (``qic113-basic``,
+    ``qic113-extended``, or ``none`` for a format that is recognised but
+    cannot be listed; empty when no table was read); ``fields`` are what
+    the profile placed in the VTBL record past byte 56, ``(name, offset,
+    length)`` with its ``[vtbl]`` field names and ``"match"`` for the
+    bytes its fingerprint compared, which is what the volume fields lane
+    draws there; the two extent widths are the ``[extent]`` section.
+    """
+
+    profile: str
+    parser: str
+    status: str = ""
+    score: int = 0
+    eliminated: bool = False
+    warnings: tuple[str, ...] = ()
+    fields: tuple[tuple[str, int, int], ...] = ()
+    extent_offset_bytes: int = 8
+    extent_frame_size_bytes: int = 2
+
+    @property
+    def fingerprint(self) -> str:
+        """``held`` or ``failed``: did the record carry what the profile's software writes?"""
+        return "failed" if self.eliminated else "held"
+
+    @property
+    def rows(self) -> tuple[tuple[str, str], ...]:
+        """Detail rows for a hover popup or the details panel: profile, score, parser, warnings."""
+        profile = f"{self.profile} ({self.status})" if self.status else self.profile
+        return (
+            ("volume profile", profile),
+            ("profile score", f"{self.score} (fingerprint {self.fingerprint})"),
+            ("file-set parser", self.parser or "(none)"),
+            ("warnings", ", ".join(self.warnings) or "none"),
+        )

@@ -130,6 +130,9 @@ class DetailsPanel(QWidget):
     While nothing is selected it shows the tape's and the track's rows
     (``set_overview``): for a flux capture that is where the header's
     geometry and the volumes appear once the tape has been identified.
+    The caveats on how the volumes were read (``Tape.warnings``,
+    ``Track.warnings``: ``low-confidence``, ``no-parser``...) get a line of
+    their own in warning colour, so a doubtful read looks doubtful.
     """
 
     def __init__(self) -> None:
@@ -180,9 +183,17 @@ class DetailsPanel(QWidget):
         geometry, volumes), so the window calls this on every refresh; the
         text on screen only changes while nothing is selected.
         """
-        parts = [f"<b>{html.escape(Path(tape.source).name)}</b>", _rows(tape.detail)]
+        parts = [
+            f"<b>{html.escape(Path(tape.source).name)}</b>",
+            _rows(tape.detail),
+            _warnings(tape.warnings),
+        ]
         if track is not None:
-            parts += [f"<b>{html.escape(track.label)}</b>", _rows(track.detail)]
+            parts += [
+                f"<b>{html.escape(track.label)}</b>",
+                _rows(track.detail),
+                _warnings(track.warnings),
+            ]
         parts.append(f"<span style='color:#666'>{HINT}</span>")
         self._overview = f"<div style='font-family:{palette.UI}'>{''.join(parts)}</div>"
         if self.span is None and self.segment is None:
@@ -270,6 +281,22 @@ def write_pieces(path: Path, pieces: Sequence[BytePiece]) -> int:
         buf[p.offset - base : p.offset - base + len(p.data)] = p.data
     path.write_bytes(bytes(buf))
     return len(buf)
+
+
+def _warnings(names: Sequence[str]) -> str:
+    """The caveats on a read, in the theme's amber (the lanes' "corrected"); nothing when none.
+
+    They are among the rows as text already ("warnings: low-confidence");
+    this is the line a glance catches, so a low-confidence or no-parser
+    read is never taken for a sure one (DESIGN.md 7.8). The names are
+    ``qiclib.volume.verdict.VolumeWarning`` values, carried here as strings.
+    """
+    if not names:
+        return ""
+    return (
+        f"<div style='color:{palette.theme().amber}'><b>&#9888; warnings:</b> "
+        f"{html.escape(', '.join(names))}</div>"
+    )
 
 
 def _rows(detail: Sequence[tuple[str, str]]) -> str:

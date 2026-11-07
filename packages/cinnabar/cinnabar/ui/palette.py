@@ -225,6 +225,7 @@ _ROLES: dict[str, str] = {
     "vtbl-end": "grey",
     "vtbl-field": "green",
     "vendor": "grey_light",
+    "no-parser": "amber",
     "sig": "red",
     "dir-section": "teal",
     "data-section": "primary",

@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -659,3 +659,16 @@ def screenshot(
     for _ in range(5):
         app.processEvents()
     main.grab().save(str(out))
+    # The window has done its job: take it down now, in Qt's order (children,
+    # scene and items under their window, the window under the application),
+    # instead of leaving it shown for interpreter exit, where the garbage
+    # collector destroys the Python wrappers in whatever order it likes and
+    # PySide6 segfaults about one run in four (the test suite renders nine of
+    # these; 2026-11-07, "QObject: shared QObject was deleted directly", exit
+    # 139 after every test had passed). deleteLater() posted outside an event
+    # loop is only honoured by an explicit flush of the DeferredDelete events,
+    # not by processEvents() (QCoreApplication::sendPostedEvents).
+    main._pool.waitForDone()
+    main.close()
+    main.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)

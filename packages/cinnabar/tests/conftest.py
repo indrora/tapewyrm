@@ -2,7 +2,9 @@
 
 The image is three segments of a QIC-80 tape built with
 ``qiclib.testing.builders``: the header segment (format parameter record),
-a volume-table segment and one Basic-DOS volume segment. The QIC-80
+a volume-table segment and one Basic-DOS volume segment; a second image
+holds an Extended-OS volume instead, whose record carries the QIC-113
+signature the ``qic113-rev-g`` profile fingerprints. The QIC-80
 capture is the same three segments as MFM flux (``mfm_cells`` encodes
 bytes the way the tape would, A1 syncs with their missing clock), with an
 INDEX pulse before each; the QIC-100 capture is two frames of GCR records
@@ -13,6 +15,7 @@ loaders see exactly what ``tw dump`` would have written.
 from __future__ import annotations
 
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,14 +23,20 @@ from qiclib import header as header_mod
 from qiclib import qic100
 from qiclib.build import build_image
 from qiclib.testing.builders import (
+    ExtItem,
     build_data_entry,
     build_dir_entry,
+    build_ext_volume,
     build_header_segment,
     build_volume_table_segment,
     build_vtbl_entry,
     make_segment_from_sectors,
+    make_short_date,
     segment_raw_sectors,
 )
+from qiclib.volume import profile as vp
+from qiclib.volume import qic113ext as q
+from qiclib.volume.table import VtblEntry
 from tapewyrm.codec import mfm
 from tapewyrm_archive import twrf
 from tapewyrm_archive.types import CaptureHeader, Direction, MarkerKind, TapeFormat
@@ -55,6 +64,49 @@ def basic_volume_stream() -> bytes:
     return table + data
 
 
+#: 1998-12-23 05:13:20 UTC: the extended backup's date, and every file's mtime in it.
+EXT_MTIME = 914_390_000
+BACKUP_DATE = make_short_date(1998, 12, 23, 5, 13, 20)
+
+#: The Extended-OS backup of the extended synthetic tape: a root, a directory, two files.
+EXT_ITEMS = [
+    ExtItem("C:", q.T_ROOT | q.T_DIR | q.T_LAST_IN_DIR),
+    ExtItem("DOCS", q.T_DIR, mtime=EXT_MTIME),
+    ExtItem("HELLO.TXT", 0, b"hello tape\n", EXT_MTIME, attrs=0x01),
+    ExtItem("NOTES.TXT", q.T_LAST_IN_DIR | q.T_LAST_IN_SET, b"note\n", EXT_MTIME),
+]
+
+
+def extended_volume_stream(seg: int = 3) -> tuple[bytes, bytes]:
+    """(volume bytes, VTBL record) of an Extended-OS volume in segment ``seg``: data, then directory.
+
+    The record is what Colorado/HP CMS backup and Windows 95 Backup write
+    on a QIC-80 cartridge: the vendor-specific bit, the QIC-113 signature
+    and revision at bytes 58-61, and the section sizes at Rev N's offsets,
+    which is the ``qic113-rev-g`` profile's fingerprint (no ``CMS`` at 62).
+    """
+    data_section, directory = build_ext_volume(EXT_ITEMS)
+    record = bytearray(
+        build_vtbl_entry(
+            start_seg=seg,
+            end_seg=seg,
+            description="EXT BACKUP",
+            flags=0x01,
+            date=BACKUP_DATE,
+            dir_section_size=len(directory),
+        )
+    )
+    record[58:60] = (113).to_bytes(2, "little")
+    record[60:62] = (7).to_bytes(2, "little")
+    struct.pack_into("<Q", record, 96, len(data_section))
+    return data_section + directory, bytes(record)
+
+
+def extended_entry(record: bytes) -> VtblEntry:
+    """The record as the ``qic113-rev-g`` profile decodes it (section sizes and all)."""
+    return vp.decode_entry(record, vp.load("qic113-rev-g"))
+
+
 def tape_segments():
     """(header, vtbl, volume) segments of the synthetic tape, as qiclib Segments."""
     header = build_header_segment(0)
@@ -68,14 +120,34 @@ def tape_segments():
     return header, vtbl, volume
 
 
-@pytest.fixture(scope="session")
-def image_path(tmp_path_factory) -> Path:
-    header, vtbl, volume = tape_segments()
-    sectors = [s for seg in (header, vtbl, volume) for s in segment_raw_sectors(seg)]
-    out = tmp_path_factory.mktemp("image") / "synthetic.twti"
+def extended_tape_segments():
+    """(header, vtbl, volume) segments of a tape holding one Extended-OS volume."""
+    header = build_header_segment(0)
+    vol_info, _bsm = header_mod.parse_header(header)
+    vtbl_at = vol_info.first_data_seg or 1
+    stream, record = extended_volume_stream(vtbl_at + 1)
+    vtbl = build_volume_table_segment(vtbl_at, [record])
+    chunks = [stream[i : i + 1024] for i in range(0, len(stream), 1024)]
+    volume = make_segment_from_sectors(0, vtbl_at + 1, vtbl_at + 1, chunks)
+    return header, vtbl, volume
+
+
+def _image(segments, out: Path) -> Path:
+    sectors = [s for seg in segments for s in segment_raw_sectors(seg)]
     hdr = capture_header(0)
     build_image([sectors], out, sources=[{"file": "synthetic", "twrf": twrf.header_to_dict(hdr)}])
     return out
+
+
+@pytest.fixture(scope="session")
+def image_path(tmp_path_factory) -> Path:
+    return _image(tape_segments(), tmp_path_factory.mktemp("image") / "synthetic.twti")
+
+
+@pytest.fixture(scope="session")
+def extended_image_path(tmp_path_factory) -> Path:
+    """The same tape with an Extended-OS volume: the ``qic113-rev-g`` profile's tape."""
+    return _image(extended_tape_segments(), tmp_path_factory.mktemp("image") / "extended.twti")
 
 
 # ---------------------------------------------------------------------------
@@ -183,3 +255,42 @@ def qic100_capture(tmp_path_factory) -> Path:
         cells += bytes([0, 1, 0, 1]) * 100
     intervals = cells_to_intervals(cells, ticks)
     return write_capture(tmp_path_factory.mktemp("gcr") / "track-00.twrf", 0, [], lead_in=intervals)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def qt_teardown():
+    """Take down every Qt widget the tests left behind while Python is still whole.
+
+    The Qt tests make hidden ``LaneStack``s and ``DetailsPanel``s and never
+    delete them (the two that show a stack do, with the same incantation;
+    ``cinnabar.ui.app.screenshot`` takes its own window down). A widget that
+    reaches interpreter exit alive is destroyed during module teardown, in
+    whatever order the garbage collector picks for its wrapper, its scene's
+    and its items', and PySide6 then segfaults on about one run in four
+    (2026-11-07: exit 139 after "58 passed", with Qt's "QObject: shared
+    QObject was deleted directly"), which made ``just host`` fail with every
+    check green. Closing and deleting the top-level widgets here, then
+    flushing the deferred deletes (``processEvents`` alone does not honour a
+    ``deleteLater`` posted outside an event loop), destroys them in Qt's
+    order before the interpreter starts taking modules apart; twelve runs in
+    a row were clean afterwards. Qt is looked up in ``sys.modules`` rather
+    than imported, so a run of the non-Qt tests stays Qt-free. The list can
+    hold a wrapper whose C++ widget is already gone (shiboken hands back a
+    stale wrapper for an address a new widget reuses); touching one raises
+    RuntimeError, so those are skipped.
+    """
+    yield
+    qtwidgets = sys.modules.get("PySide6.QtWidgets")
+    app = qtwidgets.QApplication.instance() if qtwidgets is not None else None
+    if app is None:
+        return
+    import shiboken6
+    from PySide6.QtCore import QEvent
+
+    for widget in app.topLevelWidgets():
+        if not shiboken6.isValid(widget):
+            continue
+        widget.close()
+        widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()

@@ -283,7 +283,11 @@ check. A reader MAY show it and MUST NOT need it.
 
 `warnings` lists, by name, every caveat the volume's read carries: the
 profile's own (`untested`, `single-tape`, `generic`), the selection's
-(`low-confidence`, `vtbl-ambiguous`) and the parser's (`no-parser`,
+(`low-confidence`, `vtbl-ambiguous`), the operator's (`manual`: a parser,
+a parser parameter, an extent width or a VTBL field placement was given
+by hand on the writer's command line, so the `fileset` object records a
+choice rather than a finding, and its `profile` then carries the suffix
+`+overrides`) and the parser's (`no-parser`,
 `special-fs`, `lossy-names`, `spans-cartridges`, `compression-unknown`,
 `directory-damaged`, `directory-reconstructed`). The names are a closed
 set, defined with their meanings by `qiclib.volume.verdict.VolumeWarning`; a
@@ -787,6 +791,7 @@ bytes missing.
 |---------------:|------------|---------|
 | 1              | 2026-10-03 | First specified version. Preamble `TWVL`, u16 version, u32 header length; JSON header with `vtbl`, section sizes, `directory_offset`, `holes`, `lost_segments`, `source_image`, `drive`; uncompressed volume bytes in on-tape order. Same date, before release: added `volume_size`, which is required, and readers MUST reject a header without it; readers MUST reject truncated files (Section 6.2); `source_image` records only the directory name and file name. |
 | 1              | 2026-11-07 | Added `fileset` (Section 3.4) and `warnings` (Section 3.5): the file-set parser the writer probed the volume with, that probe's verdict, and the caveats of the read, as a closed set of names; writer rule 11, reader rule 12. No version change (Section 7). |
+| 1              | 2026-11-07 | Added the warning `manual` (Section 3.5): the read was hand-tuned on the writer's command line, and the `fileset` object's `profile` then ends in `+overrides`. No version change. |
 
 ## Author's Address
 

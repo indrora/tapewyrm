@@ -94,6 +94,19 @@ raises ``generic`` because it only ever wins by default. Static
 ``warnings`` are the profile author's own (``special-fs``, say). All of
 them travel with the verdict into ``identify --json`` and the TWVL header.
 
+**Hand-tuning.** A new tape on the bench rarely fits a shipped profile in
+every layer at once, and writing a TOML before the first look is the wrong
+order of work. :class:`Overrides` carries parameters given by hand, one
+per layer (a parser and its parameters, the two extent widths, VTBL field
+placements), and :func:`override` lays them on whichever profile reads the
+tape, forced or guessed: the result is a new profile named
+``<name>+overrides`` that raises the ``manual`` warning, so the TWVL
+header, ``identify --json`` and the viewer all say the read was tuned by a
+person, not found by a fingerprint. ``qicsilver`` and ``cinnabar`` expose
+it as ``--fileset-parser``, ``--fileset-param``, ``--extent-offset-bytes``,
+``--extent-frame-size-bytes`` and ``--vtbl-field``, next to
+``--volume-profile``. The TOML is still the way to keep what worked.
+
 Scope: ``qicsilver identify``, ``extract``, ``inspect`` and ``tar`` all read
 volume tables through this (:mod:`qiclib.identify`, :mod:`qiclib.extract`).
 The fixed Rev N / QIC-113 reading in :mod:`qiclib.volume.table` remains the
@@ -105,7 +118,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -276,6 +289,92 @@ def _byte_pairs(path: Path, section: str, key: str, items: Any, limit: int | Non
     return tuple(out)
 
 
+# The checks below take ``where`` (the TOML's path, or the name of the profile
+# being hand-tuned) so a TOML and a command-line override are refused with the
+# same words, in the TOML's vocabulary: "[vtbl] source_label = [40, 16] is
+# outside bytes 57-127" is also what the user would have to fix in a file.
+
+
+def _parser(where: str, name: str) -> fs.FileSetParser:
+    """The registered parser ``name``, or a :class:`VolumeProfileError` naming the known ones."""
+    try:
+        return fs.get(name)
+    except ValueError as exc:
+        log.debug("volume profile %s: [fileset] parser %r unknown; raising", where, name)
+        raise VolumeProfileError(f"{where}: [fileset] {exc}") from exc
+
+
+def _parser_params(where: str, name: str, given: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Parser ``name`` with ``given`` over its defaults; a key the parser lacks is refused."""
+    parser = _parser(where, name)
+    params = dict(parser.params)
+    unknown = sorted(set(given) - set(parser.params))
+    if unknown:
+        log.debug(
+            "volume profile %s: [fileset] keys %s not parameters of %s; raising",
+            where,
+            unknown,
+            name,
+        )
+        accepted = ", ".join(sorted(parser.params)) or "none"
+        raise VolumeProfileError(
+            f"{where}: [fileset] key(s) {', '.join(unknown)} are not parameters of "
+            f"the {name} parser (accepted: {accepted})"
+        )
+    params.update(given)
+    return name, params
+
+
+def _field_spec(where: str, key: str, value: Any) -> FieldSpec:
+    """``[offset, length]`` for VTBL field ``key``, which must lie in bytes 57-127.
+
+    Bytes 0-56 are fixed by Rev N for everyone; profiles only place what
+    comes after.
+    """
+    if key not in FIELD_NAMES:
+        log.debug("volume profile %s: [vtbl] key %r not a known field; raising", where, key)
+        raise VolumeProfileError(
+            f"{where}: unknown [vtbl] field {key!r} (known: {', '.join(sorted(FIELD_NAMES))})"
+        )
+    try:
+        offset, length = (int(v) for v in value)
+    except (TypeError, ValueError) as exc:
+        log.debug(
+            "volume profile %s: [vtbl] %s = %r is not [offset, length]; raising", where, key, value
+        )
+        raise VolumeProfileError(
+            f"{where}: [vtbl] {key} = {value!r} is not [offset, length]"
+        ) from exc
+    if not (57 <= offset and offset + length <= 128 and length > 0):
+        log.debug(
+            "volume profile %s: [vtbl] %s offset %s length %s outside 57-127; raising",
+            where,
+            key,
+            offset,
+            length,
+        )
+        raise VolumeProfileError(f"{where}: [vtbl] {key} = {value} is outside bytes 57-127")
+    return FieldSpec(offset, length)
+
+
+def _offset_width(where: str, value: Any) -> int:
+    """``[extent] offset_bytes``: 4 or 8 (:func:`qiclib.volume.qic122.decode_extent`)."""
+    if value not in (4, 8):
+        log.debug("volume profile %s: [extent] offset_bytes %r not 4 or 8; raising", where, value)
+        raise VolumeProfileError(f"{where}: [extent] offset_bytes = {value!r} must be 4 or 8")
+    return int(value)
+
+
+def _frame_width(where: str, value: Any) -> int:
+    """``[extent] frame_size_bytes``: 2 or 4."""
+    if value not in (2, 4):
+        log.debug(
+            "volume profile %s: [extent] frame_size_bytes %r not 2 or 4; raising", where, value
+        )
+        raise VolumeProfileError(f"{where}: [extent] frame_size_bytes = {value!r} must be 2 or 4")
+    return int(value)
+
+
 def _fileset(path: Path, data: dict) -> tuple[str, dict[str, Any]]:
     """The ``[fileset]`` section: a registered parser and its parameters, defaults filled in."""
     section = data.get("fileset")
@@ -286,27 +385,7 @@ def _fileset(path: Path, data: dict) -> tuple[str, dict[str, Any]]:
         log.debug("volume profile %s: [fileset] %r has no parser key; raising", path, section)
         raise VolumeProfileError(f"{path}: [fileset] needs a parser key (one of {fs.names()})")
     name = str(section["parser"])
-    try:
-        parser = fs.get(name)
-    except ValueError as exc:
-        log.debug("volume profile %s: [fileset] parser %r unknown; raising", path, name)
-        raise VolumeProfileError(f"{path}: [fileset] {exc}") from exc
-    params = dict(parser.params)
-    unknown = sorted(set(section) - {"parser"} - set(parser.params))
-    if unknown:
-        log.debug(
-            "volume profile %s: [fileset] keys %s not parameters of %s; raising",
-            path,
-            unknown,
-            name,
-        )
-        accepted = ", ".join(sorted(parser.params)) or "none"
-        raise VolumeProfileError(
-            f"{path}: [fileset] key(s) {', '.join(unknown)} are not parameters of "
-            f"the {name} parser (accepted: {accepted})"
-        )
-    params.update({k: v for k, v in section.items() if k != "parser"})
-    return name, params
+    return _parser_params(str(path), name, {k: v for k, v in section.items() if k != "parser"})
 
 
 def _from_dict(data: dict, path: Path) -> VolumeProfile:
@@ -331,47 +410,16 @@ def _from_dict(data: dict, path: Path) -> VolumeProfile:
     if unknown:
         log.debug("volume profile %s: [match] keys %s not known; raising", path, unknown)
         raise VolumeProfileError(f"{path}: unknown [match] key(s) {', '.join(unknown)}")
-    fields: dict[str, FieldSpec] = {}
-    for key, value in data.get("vtbl", {}).items():
-        if key not in FIELD_NAMES:
-            log.debug("volume profile %s: [vtbl] key %r not a known field; raising", path, key)
-            raise VolumeProfileError(
-                f"{path}: unknown [vtbl] field {key!r} (known: {', '.join(sorted(FIELD_NAMES))})"
-            )
-        offset, length = value
-        if not (57 <= offset and offset + length <= 128 and length > 0):
-            # Bytes 0-56 are fixed by Rev N for everyone; profiles only place
-            # what comes after.
-            log.debug(
-                "volume profile %s: [vtbl] %s offset %s length %s outside 57-127; raising",
-                path,
-                key,
-                offset,
-                length,
-            )
-            raise VolumeProfileError(f"{path}: [vtbl] {key} = {value} is outside bytes 57-127")
-        fields[key] = FieldSpec(int(offset), int(length))
+    fields = {
+        key: _field_spec(str(path), key, value) for key, value in data.get("vtbl", {}).items()
+    }
     extent = data.get("extent", {})
     unknown = sorted(set(extent) - {"offset_bytes", "frame_size_bytes"})
     if unknown:
         log.debug("volume profile %s: [extent] keys %s not known; raising", path, unknown)
         raise VolumeProfileError(f"{path}: unknown [extent] key(s) {', '.join(unknown)}")
-    offset_bytes = extent.get("offset_bytes", 8)
-    if offset_bytes not in (4, 8):
-        log.debug(
-            "volume profile %s: [extent] offset_bytes %r not 4 or 8; raising", path, offset_bytes
-        )
-        raise VolumeProfileError(f"{path}: [extent] offset_bytes = {offset_bytes!r} must be 4 or 8")
-    frame_size_bytes = extent.get("frame_size_bytes", 2)
-    if frame_size_bytes not in (2, 4):
-        log.debug(
-            "volume profile %s: [extent] frame_size_bytes %r not 2 or 4; raising",
-            path,
-            frame_size_bytes,
-        )
-        raise VolumeProfileError(
-            f"{path}: [extent] frame_size_bytes = {frame_size_bytes!r} must be 2 or 4"
-        )
+    offset_bytes = _offset_width(str(path), extent.get("offset_bytes", 8))
+    frame_size_bytes = _frame_width(str(path), extent.get("frame_size_bytes", 2))
     parser, params = _fileset(path, data)
     return VolumeProfile(
         name=str(data["name"]),
@@ -387,8 +435,8 @@ def _from_dict(data: dict, path: Path) -> VolumeProfile:
         ),
         fields=fields,
         path=str(path),
-        extent_offset_bytes=int(offset_bytes),
-        extent_frame_size_bytes=int(frame_size_bytes),
+        extent_offset_bytes=offset_bytes,
+        extent_frame_size_bytes=frame_size_bytes,
         fileset_parser=parser,
         fileset_params=params,
     )
@@ -403,6 +451,209 @@ def builtin_names() -> list[str]:
 
 def load_builtin() -> list[VolumeProfile]:
     return [load(name) for name in builtin_names()]
+
+
+# ---------------------------------------------------------------------------
+# Hand-tuned overrides: a profile's layers replaced from the command line
+# ---------------------------------------------------------------------------
+
+#: Appended to the name of a profile that was hand-tuned (``cms-qic113+overrides``).
+OVERRIDES_SUFFIX = "+overrides"
+
+
+@dataclass(frozen=True)
+class Overrides:
+    """Parameters of a volume read given by hand, to lay on whichever profile reads the tape.
+
+    The bench case: a new tape whose table a shipped profile reads well
+    enough, but whose volumes want a different parser, a 4-byte extent
+    offset or a label four bytes to the left, and no TOML written yet.
+    ``qicsilver`` and ``cinnabar`` take one flag per layer
+    (``--fileset-parser``, ``--fileset-param``, ``--extent-offset-bytes``,
+    ``--extent-frame-size-bytes``, ``--vtbl-field``); :meth:`from_strings`
+    turns their strings into this record and :func:`override` applies it.
+    A member left ``None`` or empty keeps the profile's own value.
+
+    ``fileset_params`` values may be the command line's strings or typed
+    values; :func:`override` coerces a string to the type of the parser's
+    default for that key. ``vtbl_fields`` are whole placements, each
+    replacing the profile's placement of that field (or adding one).
+    """
+
+    fileset_parser: str | None = None
+    fileset_params: Mapping[str, Any] = field(default_factory=dict)
+    extent_offset_bytes: int | None = None
+    extent_frame_size_bytes: int | None = None
+    vtbl_fields: Mapping[str, FieldSpec] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        """True when anything is overridden."""
+        return bool(
+            self.fileset_parser
+            or self.fileset_params
+            or self.extent_offset_bytes is not None
+            or self.extent_frame_size_bytes is not None
+            or self.vtbl_fields
+        )
+
+    def describe(self) -> str:
+        """One line naming what is overridden, in the TOML's words, for notes and logs."""
+        parts: list[str] = []
+        if self.fileset_parser:
+            parts.append(f"parser {self.fileset_parser}")
+        parts += [f"{key}={value}" for key, value in self.fileset_params.items()]
+        if self.extent_offset_bytes is not None:
+            parts.append(f"extent offset_bytes {self.extent_offset_bytes}")
+        if self.extent_frame_size_bytes is not None:
+            parts.append(f"extent frame_size_bytes {self.extent_frame_size_bytes}")
+        parts += [
+            f"vtbl {name} = [{spec.offset}, {spec.length}]"
+            for name, spec in self.vtbl_fields.items()
+        ]
+        return "; ".join(parts) or "nothing"
+
+    @classmethod
+    def from_strings(
+        cls,
+        *,
+        fileset_parser: str | None = None,
+        fileset_params: Iterable[str] = (),
+        extent_offset_bytes: int | None = None,
+        extent_frame_size_bytes: int | None = None,
+        vtbl_fields: Iterable[str] = (),
+    ) -> Overrides:
+        """The command line's values, checked: ``KEY=VALUE`` parameters, ``NAME=OFFSET,LENGTH`` fields.
+
+        Everything that can be judged without a tape is judged here and
+        raises :class:`VolumeProfileError`, so a CLI can refuse a typo
+        before it opens an image: the parser is registered, the widths are
+        the ones :mod:`qiclib.volume.qic122` decodes, the field names are
+        :data:`FIELD_NAMES` and each placement lies in bytes 57-127 (the
+        TOML loader's rules, by the same functions). Whether a parameter
+        belongs to the parser is :func:`override`'s to check, since with no
+        ``fileset_parser`` the parser is the profile's.
+        """
+        where = "override"
+        if fileset_parser is not None:
+            _parser(where, fileset_parser)
+        params: dict[str, Any] = {}
+        for item in fileset_params:
+            key, sep, value = item.partition("=")
+            if not sep or not key:
+                log.debug("override: fileset parameter %r has no KEY=VALUE shape; raising", item)
+                raise VolumeProfileError(f"{where}: [fileset] parameter {item!r} is not KEY=VALUE")
+            params[key] = value
+        fields: dict[str, FieldSpec] = {}
+        for item in vtbl_fields:
+            name, sep, rest = item.partition("=")
+            offset, comma, length = rest.partition(",")
+            if not (
+                sep and name and comma and offset.strip().isdigit() and length.strip().isdigit()
+            ):
+                log.debug("override: vtbl field %r has no NAME=OFFSET,LENGTH shape; raising", item)
+                raise VolumeProfileError(
+                    f"{where}: [vtbl] field {item!r} is not NAME=OFFSET,LENGTH"
+                )
+            fields[name] = _field_spec(where, name, [int(offset), int(length)])
+        return cls(
+            fileset_parser=fileset_parser,
+            fileset_params=params,
+            extent_offset_bytes=(
+                _offset_width(where, extent_offset_bytes)
+                if extent_offset_bytes is not None
+                else None
+            ),
+            extent_frame_size_bytes=(
+                _frame_width(where, extent_frame_size_bytes)
+                if extent_frame_size_bytes is not None
+                else None
+            ),
+            vtbl_fields=fields,
+        )
+
+
+def _coerce(where: str, key: str, value: Any, default: Any) -> Any:
+    """A command-line string as the type of the parser's default for ``key`` (bool, int, float, str).
+
+    Anything that is not a string, or whose default is a string or absent,
+    passes through; the parser sees what a TOML would have given it.
+    """
+    if not isinstance(value, str) or default is None or isinstance(default, str):
+        return value
+    if isinstance(default, bool):  # before int: bool is an int
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+        log.debug("override %s: %s=%r is not a boolean; raising", where, key, value)
+        raise VolumeProfileError(
+            f"{where}: [fileset] {key}={value!r} is not a boolean (true/false)"
+        )
+    if isinstance(default, int | float):
+        kind = "an integer" if isinstance(default, int) else "a number"
+        try:
+            return type(default)(value)
+        except ValueError as exc:
+            log.debug("override %s: %s=%r is not %s; raising", where, key, value, kind)
+            raise VolumeProfileError(f"{where}: [fileset] {key}={value!r} is not {kind}") from exc
+    return value
+
+
+def override(profile: VolumeProfile, overrides: Overrides | None) -> VolumeProfile:
+    """``profile`` with ``overrides`` laid on it: a new profile named ``<name>+overrides``, warning ``manual``.
+
+    Pure: ``profile`` is untouched (``dataclasses.replace`` on the frozen
+    record), and ``None`` or empty overrides give ``profile`` itself back.
+    The ``[match]`` fingerprint, ``status`` and ``tapes`` stay the
+    profile's: the overrides say how to *read* what the software wrote,
+    not who wrote it, so the gate and its scoring stand and only the
+    decoded fields, the extent widths and the parser move. A parameter is
+    checked against the parser that will read the volume (the override's,
+    else the profile's); a parser change drops the profile's parameters,
+    which belonged to the old one, and starts from the new parser's
+    defaults. The result's :attr:`VolumeProfile.static_warnings` carry
+    :attr:`~qiclib.volume.verdict.VolumeWarning.MANUAL`, which is how the TWVL
+    header and ``identify --json`` say a person, not a fingerprint, chose
+    this reading; ``qiclib.extract`` also leaves such a reading alone
+    when its parser fails its probe, instead of trying another profile's.
+    """
+    if not overrides:
+        log.debug("volume profile %s: nothing overridden; as it is", profile.name)
+        return profile
+    # Tuning an already tuned profile keeps one suffix.
+    where = (
+        profile.name if profile.name.endswith(OVERRIDES_SUFFIX) else profile.name + OVERRIDES_SUFFIX
+    )
+    parser_name = overrides.fileset_parser or profile.fileset_parser
+    defaults = _parser(where, parser_name).params
+    given = {k: _coerce(where, k, v, defaults.get(k)) for k, v in overrides.fileset_params.items()}
+    carried = dict(profile.fileset_params) if parser_name == profile.fileset_parser else {}
+    parser_name, params = _parser_params(where, parser_name, {**carried, **given})
+    fields = dict(profile.fields)
+    for name, spec in overrides.vtbl_fields.items():
+        fields[name] = _field_spec(where, name, [spec.offset, spec.length])
+    offset_bytes = (
+        _offset_width(where, overrides.extent_offset_bytes)
+        if overrides.extent_offset_bytes is not None
+        else profile.extent_offset_bytes
+    )
+    frame_size_bytes = (
+        _frame_width(where, overrides.extent_frame_size_bytes)
+        if overrides.extent_frame_size_bytes is not None
+        else profile.extent_frame_size_bytes
+    )
+    log.info("volume profile %s hand-tuned: %s", profile.name, overrides.describe())
+    return replace(
+        profile,
+        name=where,
+        warnings=profile.warnings | {VolumeWarning.MANUAL},
+        fields=fields,
+        extent_offset_bytes=offset_bytes,
+        extent_frame_size_bytes=frame_size_bytes,
+        fileset_parser=parser_name,
+        fileset_params=params,
+    )
 
 
 # ---------------------------------------------------------------------------

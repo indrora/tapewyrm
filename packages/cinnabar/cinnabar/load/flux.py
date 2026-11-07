@@ -44,6 +44,7 @@ from qiclib import geometry as geometry_mod
 from qiclib import header as header_mod
 from qiclib import identify
 from qiclib.types import RawSector
+from qiclib.volume import profile as vp
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress
 from tapewyrm_archive.twrf import header_to_dict, parse_body, read_header
 from tapewyrm_archive.types import CaptureHeader
@@ -132,9 +133,17 @@ class _Identification:
     replaced once it does. This used to wait for six segments and then stop
     at the first success, which left the volumes to the luck of the landing
     order.
+
+    ``volume_profile`` and ``overrides`` are :func:`cinnabar.load.open_path`'s,
+    handed to every attempt: the profile the table is read through and the
+    hand-given parameters laid on it.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, volume_profile: str = vp.GUESS, overrides: vp.Overrides | None = None
+    ) -> None:
+        self.volume_profile = volume_profile
+        self.overrides = overrides
         self.layout: Layout | None = None
         self.wanted: set[int] = set()  # segments whose landing should redo the identification
         # Every segment's assembled data, by absolute segment: filled by the
@@ -168,9 +177,20 @@ class _Identification:
                 return False  # the same sectors give the same answer
             self._tried_with = len(sectors)
             try:
-                info = identify.from_sectors(sectors, drive=header_to_dict(header))
+                info = identify.from_sectors(
+                    sectors,
+                    drive=header_to_dict(header),
+                    volume_profile=self.volume_profile,
+                    overrides=self.overrides,
+                )
             except ValueError as exc:
                 log.debug("identification: %s", exc)
+                return False
+            except vp.VolumeProfileError as exc:
+                # Not the tape but the flags: a parameter the chosen profile's
+                # parser does not take, say. Nothing will identify until they
+                # change, so this is said out loud, once per attempt.
+                log.warning("identification: %s", exc)
                 return False
             self.ftk_per_side = info.vol.max_ftk + 1 if info.vol.max_ftk else self.ftk_per_side
             # Re-place every sector seen so far under the header's geometry
@@ -497,9 +517,20 @@ class FluxTrack:
         )
 
 
-def open_captures(paths: Sequence[Path]) -> Tape:
+def open_captures(
+    paths: Sequence[Path],
+    *,
+    volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
+) -> Tape:
+    """The captures as one :class:`Tape`; ``volume_profile`` and ``overrides`` are :func:`cinnabar.load.open_path`'s."""
     if not paths:
         raise ValueError("no TWRF captures to open")
+    if volume_profile != vp.GUESS:
+        # A forced profile that does not exist should fail here, as an
+        # image's does, not as a warning from a decode thread later.
+        log.debug("checking forced volume profile %r before the decode starts", volume_profile)
+        vp.load(volume_profile)
     headers = {p: read_header(p)[0] for p in paths}
     by_track: dict[int, Path] = {}
     for i, p in enumerate(paths):
@@ -508,7 +539,7 @@ def open_captures(paths: Sequence[Path]) -> Tape:
     numbers = sorted(by_track)
     first = headers[by_track[numbers[0]]]
     source = str(paths[0].parent if len(paths) > 1 else paths[0])
-    ident = _Identification()
+    ident = _Identification(volume_profile, overrides)
     open_tracks: dict[int, FluxTrack] = {}
     labels: dict[int, str] = {}
 
@@ -523,6 +554,7 @@ def open_captures(paths: Sequence[Path]) -> Tape:
         # window re-reads them on its next refresh (they change again when a
         # later landing completes the identification).
         tape.detail = (*tape_detail, *layout.summary())
+        tape.warnings = layout.warnings
 
     ident.on_identified.append(identified)
 
@@ -550,5 +582,11 @@ def open_captures(paths: Sequence[Path]) -> Tape:
     return tape
 
 
-def open_directory(path: Path) -> Tape:
-    return open_captures(sorted(p for p in path.iterdir() if p.suffix == ".twrf"))
+def open_directory(
+    path: Path, *, volume_profile: str = vp.GUESS, overrides: vp.Overrides | None = None
+) -> Tape:
+    return open_captures(
+        sorted(p for p in path.iterdir() if p.suffix == ".twrf"),
+        volume_profile=volume_profile,
+        overrides=overrides,
+    )

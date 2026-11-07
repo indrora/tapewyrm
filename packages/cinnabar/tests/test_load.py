@@ -35,6 +35,103 @@ def test_image_tracks_segments_and_holds(image_path: Path):
     assert missing and missing[0].records[0].style == "slot-missing"
 
 
+def test_image_rows_carry_the_profiles_verdict(image_path: Path):
+    """The tape's rows say which profile read the table, its parser and its warnings, as identify does."""
+    tape = open_path(image_path)
+    rows = dict(tape.detail)
+    assert rows["volume profile"] == "qic80-rev-n (spec)"
+    assert rows["profile score"].endswith("(fingerprint held)")
+    assert rows["file-set parser"] == "qic113-basic"
+    assert rows["warnings"] == "generic" and tape.warnings == ("generic",)
+    track = tape.load(0, NULL_PROGRESS)
+    vtbl = next(s for s in track.segments if dict(s.detail)["holds"] == "Volume Table")
+    entry = vtbl.fields[0].children[0]
+    assert dict(entry.detail)["file-set parser"] == "qic113-basic"
+    assert "extended OS" not in dict(entry.detail)
+    # Past byte 56 the fields are the profile's: Rev N's offsets, under the profile's names.
+    labels = [c.label for c in entry.children if c.start >= vtbl.start + 57]
+    assert labels == ["seq", "dir size", "data size", "label", "cmp", "os"]
+
+
+def test_extended_image_is_laid_out_by_the_extended_parser(extended_image_path: Path):
+    """A QIC-113 record picks qic113-rev-g, whose parser draws Data then Directory: no is_extended_os."""
+    tape = open_path(extended_image_path)
+    rows = dict(tape.detail)
+    assert rows["volume profile"] == "qic113-rev-g (spec)"
+    assert rows["file-set parser"] == "qic113-extended"
+    assert tape.warnings == ()
+    track = tape.load(0, NULL_PROGRESS)
+    volume = next(s for s in track.segments if dict(s.detail)["holds"] == "EXT BACKUP")
+    assert [s.label for s in volume.fields] == ["Data Section", "Directory Section"]
+    names = [s.label for s in level(volume.fields, 1)]
+    assert "HELLO.TXT" in names and "DOCS" in names
+    vtbl = next(s for s in track.segments if dict(s.detail)["holds"] == "Volume Table")
+    entry = vtbl.fields[0].children[0]
+    match = next(c for c in entry.children if c.label == "match")
+    assert match.style == "sig" and dict(match.detail)["value"] == "71 00"
+    result = CliRunner().invoke(cli, ["--dump", "--segment", "0", str(extended_image_path)])
+    assert result.exit_code == 0, result.output
+    assert "file-set parser: qic113-extended" in result.output
+
+
+def test_a_profile_without_a_parser_leaves_the_volume_unparsed(image_path: Path):
+    """Parser ``none``: the volume's lane says so and the rows carry the warnings, instead of a guess."""
+    from qiclib import identify
+    from qiclib.volume import profile as vp
+    from tapewyrm_archive.twti import TapeImage
+
+    from cinnabar.load.volumes import Layout
+    from cinnabar.model import ByteMap
+
+    img = TapeImage.open(image_path)
+    info = identify.from_image(img)
+    mystery = vp.VolumeProfile(name="mystery", status="untested", vendor_bit=False)
+    info.verdicts = [vp.evaluate(info.vtbl_records, info.vol, mystery)]
+    layout = Layout(info, img.segment)
+    assert layout.reading.parser == "none"
+    assert layout.warnings == ("generic", "untested")
+    rows = dict(layout.summary())
+    assert rows["file-set parser"] == "none" and rows["warnings"] == "generic, untested"
+    seg = layout.volumes[0].entry.start_seg
+    bmap = ByteMap.identity(0.0, SEGMENT_BYTES)
+    (note,) = layout.fields(seg, img.segment(seg), bmap)
+    assert note.label == "No file-set parser" and note.style == "no-parser"
+    assert info.vtbl_seg is not None
+    (table,) = layout.fields(info.vtbl_seg, img.segment(info.vtbl_seg), bmap)
+    entry_rows = dict(table.children[0].detail)
+    assert entry_rows["volume profile"] == "mystery (untested)"
+    assert entry_rows["file-set parser"] == "none"
+    past = [c for c in table.children[0].children if c.start > 56]
+    assert [c.label for c in past] == ["vendor"]  # the profile places nothing past byte 56
+
+
+def test_overrides_reach_the_tapes_rows_and_dump(image_path: Path):
+    """--fileset-parser & co.: the reading names the tuned profile, its parser and the manual warning."""
+    from qiclib.volume import profile as vp
+
+    tape = open_path(
+        image_path, volume_profile="qic80-rev-n", overrides=vp.Overrides(fileset_parser="none")
+    )
+    rows = dict(tape.detail)
+    assert rows["volume profile"] == "qic80-rev-n+overrides (spec)"
+    assert rows["file-set parser"] == "none"
+    assert tape.warnings == ("generic", "manual")
+    track = tape.load(0, NULL_PROGRESS)
+    volume = next(s for s in track.segments if dict(s.detail)["holds"] == "TEST BACKUP")
+    (note,) = volume.fields
+    assert note.label == "No file-set parser"  # laid out as given, not as the profile says
+    flags = ["--fileset-parser", "none", "--vtbl-field", "source_label=102,16"]
+    result = CliRunner().invoke(cli, ["--dump", "--segment", "0", *flags, str(image_path)])
+    assert result.exit_code == 0, result.output
+    assert "volume profile: qic80-rev-n+overrides (spec)" in result.output
+    assert "file-set parser: none" in result.output
+    assert "warnings: generic, manual" in result.output
+    bad = CliRunner().invoke(cli, ["--dump", "--vtbl-field", "label=1,2", str(image_path)])
+    assert bad.exit_code == 2 and "unknown [vtbl] field" in bad.output
+    missing = CliRunner().invoke(cli, ["--dump", "--volume-profile", "nope", str(image_path)])
+    assert missing.exit_code == 1 and "no volume profile 'nope'" in missing.output
+
+
 def test_dump_lists_every_lane(image_path: Path):
     track = open_path(image_path).load(0)
     text = dump_track(track, segment=0)
@@ -137,6 +234,26 @@ def test_identification_fires_on_the_header_and_again_for_the_volume_table():
     assert [e.description.strip() for e in ident.layout.entries] == ["TEST BACKUP"]
     assert ident.wanted == set()
     assert not ident.attempt([*v, *h, *t], hdr, final=True)
+
+
+def test_flux_identification_takes_the_volume_read_flags():
+    """A flux tape's identification carries --volume-profile and the overrides into every attempt."""
+    from qiclib.testing.builders import segment_raw_sectors
+    from qiclib.volume import profile as vp
+
+    from cinnabar.load.flux import _Identification
+    from tests.conftest import capture_header, tape_segments
+
+    sectors = [s for seg in tape_segments() for s in segment_raw_sectors(seg)]
+    ident = _Identification("qic80-rev-n", vp.Overrides(fileset_parser="none"))
+    assert ident.attempt(sectors, capture_header(0), final=True)
+    assert ident.layout is not None
+    assert ident.layout.reading.profile == "qic80-rev-n+overrides"
+    assert ident.layout.reading.parser == "none" and "manual" in ident.layout.warnings
+    # A parameter the parser does not take is the flags' fault: warned, not identified.
+    bad = _Identification(overrides=vp.Overrides(fileset_params={"depth": 3}))
+    assert not bad.attempt(sectors, capture_header(0), final=True)
+    assert bad.layout is None
 
 
 def test_flux_capture_of_gcr_records(qic100_capture: Path):
@@ -254,6 +371,11 @@ def test_compressed_volume_decompresses_into_files(tmp_path: Path):
     data = next(c for c in hello.children if c.label == "data")
     pieces = [p for seg in track.segments for p in seg.bytes_between(data.start, data.end)]
     assert b"".join(p.data for p in pieces) == b"hello tape\n"
+    # The stream was laid out by the profile's parser, and probed with it as extract would.
+    rows = dict(track.detail)
+    assert rows["volume profile"] == "qic80-rev-n (spec)"
+    assert rows["file-set parser"] == "qic113-basic"
+    assert rows["probe"].startswith("passed: score "), rows["probe"]
     text = dump_track(track, segment=1)
     assert "Volume: Source segment" in text
     result = CliRunner().invoke(

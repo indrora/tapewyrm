@@ -212,6 +212,11 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
 - Synthetic tape structures come from `qiclib.testing.builders`; extend the
   builders rather than hand-rolling bytes in a test.
 - Each test has a docstring or a name that says what behaviour it pins down.
+- A Qt test (cinnabar) runs offscreen and never leaves a *shown* widget
+  behind: close it, `deleteLater()` it and flush the deferred deletes. Hidden
+  leftovers are swept by the session-scoped `qt_teardown` fixture in
+  `packages/cinnabar/tests/conftest.py`; without that sweep PySide6 segfaults
+  at interpreter exit about one run in four, with every test green.
 
 ### 2.7 Profiles, parsers and verdicts
 

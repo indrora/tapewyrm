@@ -78,6 +78,14 @@ def test_overview_shows_tape_and_track_rows_until_something_is_clicked():
     assert "28 tracks x 100 segments" in panel.title.text() and HINT in panel.title.text()
     panel.clear()
     assert "28 tracks x 100 segments" in panel.title.text()
+    # The reading's caveats get a line of their own, in warning colour, under the rows.
+    assert "warnings:" not in panel.title.text()
+    tape.warnings = ("low-confidence", "no-parser")
+    track.warnings = ("directory-damaged",)
+    panel.set_overview(tape, track)
+    text = panel.title.text()
+    assert "warnings:</b> low-confidence, no-parser" in text
+    assert "warnings:</b> directory-damaged" in text
 
 
 def test_segment_export_keeps_or_drops_the_parity_pieces():

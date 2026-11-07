@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -369,3 +370,118 @@ def test_novastor_is_a_volume_only_profile_with_wide_extents():
     head[0x74 : 0x74 + 12] = b"<<NoVaStOr>>"
     assert [c.ok for c in vp.volume_gate(profile, bytes(head))] == [True]
     assert [c.ok for c in vp.volume_gate(profile, b"\x01\x00\x00\x00FSET" + bytes(0x80))] == [False]
+
+
+# ---------------------------------------------------------------------------
+# Hand-tuned overrides
+# ---------------------------------------------------------------------------
+
+
+def test_override_lays_on_the_profile_and_marks_the_read_manual():
+    """Each layer moves on its own; the fingerprint and status stay the profile's; the name says so."""
+    base = vp.load("cms-qic113")
+    ov = vp.Overrides.from_strings(
+        fileset_parser="qic113-basic",
+        extent_offset_bytes=4,
+        extent_frame_size_bytes=4,
+        vtbl_fields=["source_label=102,16"],
+    )
+    tuned = vp.override(base, ov)
+    assert tuned.name == "cms-qic113+overrides" and base.name == "cms-qic113"
+    assert tuned.fileset_parser == "qic113-basic" and tuned.fileset_params == {}
+    assert (tuned.extent_offset_bytes, tuned.extent_frame_size_bytes) == (4, 4)
+    assert tuned.fields["source_label"] == vp.FieldSpec(102, 16)
+    assert tuned.fields["data_section_size"] == base.fields["data_section_size"]
+    assert (tuned.vtbl_bytes, tuned.status, tuned.tapes) == (
+        base.vtbl_bytes,
+        base.status,
+        base.tapes,
+    )
+    assert VolumeWarning.MANUAL in tuned.static_warnings
+    assert VolumeWarning.MANUAL not in base.static_warnings
+    assert ov.describe() == (
+        "parser qic113-basic; extent offset_bytes 4; extent frame_size_bytes 4; "
+        "vtbl source_label = [102, 16]"
+    )
+
+
+def test_override_with_nothing_is_the_profile_itself():
+    base = vp.load("mtn")
+    assert vp.override(base, None) is base
+    assert vp.override(base, vp.Overrides()) is base
+    assert not vp.Overrides.from_strings() and vp.Overrides().describe() == "nothing"
+
+
+def test_overridden_profile_reads_the_table_with_the_moved_field():
+    """The jc tape under cms-qic113 with the label four bytes left: the gate holds, the field moves."""
+    vol, records = _jc()
+    tuned = vp.override(
+        vp.load("cms-qic113"), vp.Overrides(vtbl_fields={"source_label": vp.FieldSpec(102, 16)})
+    )
+    verdict = vp.evaluate(records, vol, tuned, now=NOW)
+    assert not verdict.eliminated and VolumeWarning.MANUAL in verdict.warnings
+    moved = JC_VTBL[102:118].split(b"\x00", 1)[0].decode("latin-1").rstrip(" ")
+    assert verdict.entries[0].source_label == moved
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"fileset_parser": "zip"}, "no file-set parser named 'zip'"),
+        ({"fileset_params": ["bogus"]}, "not KEY=VALUE"),
+        ({"vtbl_fields": ["label=102,16"]}, "unknown [vtbl] field 'label'"),
+        ({"vtbl_fields": ["source_label=40,16"]}, "outside bytes 57-127"),
+        ({"vtbl_fields": ["source_label=120,16"]}, "outside bytes 57-127"),
+        ({"vtbl_fields": ["source_label=102"]}, "not NAME=OFFSET,LENGTH"),
+        ({"vtbl_fields": ["source_label=a,b"]}, "not NAME=OFFSET,LENGTH"),
+        ({"extent_offset_bytes": 6}, "must be 4 or 8"),
+        ({"extent_frame_size_bytes": 3}, "must be 2 or 4"),
+    ],
+)
+def test_malformed_overrides(kwargs, message):
+    """The TOML loader's rules, in its words, before any tape is opened."""
+    with pytest.raises(vp.VolumeProfileError, match=re.escape(message)):
+        vp.Overrides.from_strings(**kwargs)
+
+
+def test_override_parameters_belong_to_the_parser_that_will_read():
+    """Checked against the override's parser when given, else the profile's; a direct record too."""
+    cms = vp.load("cms-qic113")
+    with pytest.raises(vp.VolumeProfileError, match="not parameters of the qic113-extended parser"):
+        vp.override(cms, vp.Overrides.from_strings(fileset_params=["depth=3"]))
+    with pytest.raises(vp.VolumeProfileError, match="not parameters of the none parser"):
+        vp.override(
+            cms, vp.Overrides.from_strings(fileset_parser="none", fileset_params=["depth=3"])
+        )
+    with pytest.raises(vp.VolumeProfileError, match="outside bytes 57-127"):
+        vp.override(cms, vp.Overrides(vtbl_fields={"os_type": vp.FieldSpec(127, 2)}))
+    with pytest.raises(vp.VolumeProfileError, match="must be 4 or 8"):
+        vp.override(cms, vp.Overrides(extent_offset_bytes=5))
+
+
+def test_override_parameters_take_the_parsers_types(monkeypatch):
+    """A command-line string becomes what the parser's default is: int, bool or text."""
+    from qiclib.volume.fileset import base
+
+    class Knobs(fs.FileSetParser):
+        name = "knobs"
+        params = {"depth": 2, "strict": False, "label": "x"}
+
+    monkeypatch.setitem(base._REGISTRY, "knobs", Knobs())
+    ov = vp.Overrides.from_strings(fileset_parser="knobs", fileset_params=["depth=5", "strict=yes"])
+    tuned = vp.override(vp.load("vendor-unknown"), ov)
+    assert tuned.fileset_params == {"depth": 5, "strict": True, "label": "x"}
+    # The profile's own parameters carry while the parser stays; the suffix does not stack.
+    again = vp.override(tuned, vp.Overrides.from_strings(fileset_params=["label=hi"]))
+    assert again.fileset_params == {"depth": 5, "strict": True, "label": "hi"}
+    assert again.name == "vendor-unknown+overrides"
+    with pytest.raises(vp.VolumeProfileError, match="not an integer"):
+        vp.override(
+            vp.load("vendor-unknown"),
+            vp.Overrides.from_strings(fileset_parser="knobs", fileset_params=["depth=deep"]),
+        )
+    with pytest.raises(vp.VolumeProfileError, match="not a boolean"):
+        vp.override(
+            vp.load("vendor-unknown"),
+            vp.Overrides.from_strings(fileset_parser="knobs", fileset_params=["strict=maybe"]),
+        )
