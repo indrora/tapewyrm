@@ -17,7 +17,7 @@ tw dump --> TWRF (TWS-1) --> tw convert --> TWTI/TWTZ (TWS-2) --> qicsilver extr
 ```
 
 The reference implementations are in
-[`packages/tapewyrm-archive`](../../packages/tapewyrm-archive/README.md):
+[`tapewyrm-archive`](../dev/tapewyrm-archive.md):
 `tapewyrm_archive.twrf`, `tapewyrm_archive.twti` and `tapewyrm_archive.twvl`.
 
 ## Conventions
@@ -32,5 +32,5 @@ BCP 14 ([RFC 2119](https://www.rfc-editor.org/rfc/rfc2119),
 [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174)) when, and only when, they
 appear in all capitals. Integers are little-endian unless a specification says
 otherwise. QIC terms (segment, track, sector, volume table) mean what the QIC
-standards in [`docs/qic-standards/`](../qic-standards/) say they mean, and each
+standards in [`docs/qic-standards/`](../formats/standards.md) say they mean, and each
 specification cites the standard and section it relies on.

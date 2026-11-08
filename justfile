@@ -76,3 +76,11 @@ qicsilver *args:
     uv run --project packages/qicsilver qicsilver {{args}}
 tapewyrm *args:
     uv run --project packages/tapewyrm-cli tw {{args}}
+
+# docs site (MkDocs + mkdocs-shadcn, pinned; STYLE.md section 4). Live preview on :8000
+docs:
+    uvx --from mkdocs==1.6.1 --with mkdocs-shadcn==0.12.2 --with pygments mkdocs serve
+
+# build the docs site into site/, failing on broken links or pages missing from nav
+docs-build:
+    uvx --from mkdocs==1.6.1 --with mkdocs-shadcn==0.12.2 --with pygments mkdocs build --strict

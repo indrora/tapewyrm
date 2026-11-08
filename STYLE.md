@@ -31,7 +31,7 @@ This project reimplements old, poorly-documented formats (QIC-40/80/3010/3020,
 QIC-113, QIC-117, QIC-122) and talks to real, quirky hardware. Every non-obvious
 number, offset, bit or timing in the code **cites where it came from**:
 
-- a section of `docs/DESIGN.md` (`DESIGN.md §7.3`), or
+- a section of `agents/DESIGN.md` (`DESIGN.md §7.3`), or
 - a QIC standard in `docs/qic-standards/` (`QIC-80-MC Rev N §7.1`,
   `QIC-117 Rev J error 19`), or
 - a bench observation (`the bench Colorado tape (code 5) ...`).
@@ -282,7 +282,86 @@ The firmware is a graft onto Greaseweazle. Code inside GW-derived files follows
 
 ---
 
-## 4. Commits
+## 4. Documentation (`docs/`, `agents/`)
+
+### 4.1 Where things go
+
+| Path | Audience | Published |
+|---|---|---|
+| `README.md` | Someone who just cloned the repo: clone, install, flash, `tw drive status`, then links. Keep it short. | No |
+| `docs/guide/` | Task walkthroughs: install, flash, wire, read a tape, troubleshoot. | Yes |
+| `docs/tw/`, `docs/qicsilver/`, `docs/cinnabar/` | Reference for each tool: one page per command or feature. | Yes |
+| `docs/hardware/` | The Greaseweazle, the drives we have tested and their quirks, cartridges. | Yes |
+| `docs/formats/` | The QIC standards, summarised as far as Tapewyrm uses them, plus the vendor structures (volume tables, directory layouts). | Yes |
+| `docs/dev/` | Working on the code: one page per package, the firmware, the protocol. | Yes |
+| `docs/spec/` | The normative TWS file-format specifications (TWRF, TWTI, TWVL). | Yes |
+| `agents/` | The design record (`DESIGN.md`) and notes for coding assistants. | No |
+| `packages/*/README.md`, `firmware/README.md` | Stubs: one paragraph, how to run the tests, links into `docs/dev/`. | No |
+
+One fact lives in one place. Link to it; don't copy it.
+
+The site is MkDocs with the `mkdocs-shadcn` theme. `mkdocs.yml` at the repo
+root holds the `nav`, and every page must appear in it. `just docs` serves the
+site locally and `just docs-build` builds it with `--strict`, which fails on
+broken links.
+
+### 4.2 Voice
+
+Write like a vendor reference manual (MSDN, the AWS docs): plain, exact,
+second person, present tense.
+
+- Lead with what the page is for, in one or two sentences. No preamble.
+- Talk to the reader: "Run `tw dump`", not "The user should run `tw dump`".
+- One idea per paragraph. Short sentences. Active voice.
+- Say what happens, then why it matters, then what to do about it.
+- No hype, no jokes, no "simply", "just" or "easy".
+- Put uncertainty where it belongs: "Untested." "Observed on one drive."
+  Don't guess, and don't hedge things you know.
+- Sentence-case headings. Use procedure headings that start with a verb
+  ("Dump a tape") and reference headings that name the thing ("Drive profiles").
+
+### 4.3 Page shapes
+
+**Command reference** (`docs/tw/dump.md` and similar):
+
+1. One-line summary.
+2. `## Synopsis`: a fenced `text` block with the usage line.
+3. `## Description`: what it does and when to use it.
+4. `## Options`: a table (`Option | Default | Description`).
+5. `## Examples`: fenced `sh` blocks, each with one sentence saying what it does.
+6. `## Exit status` / `## Output`, when it matters.
+7. `## See also`.
+
+**Procedure** (`docs/guide/*`): prerequisites, then numbered steps. Each step
+has one action, the command, and what you should see. End with "Next steps".
+
+**Format** (`docs/formats/*`): purpose, then layout tables
+(`Offset | Size | Field | Description`, offsets in decimal with hex in
+parentheses where the standard uses hex), then Tapewyrm notes: which module
+implements it, and what we do differently from the standard or have only seen
+on the bench. Cite the standard and its section (`QIC-80-MC Rev N §7.1`) and
+link the PDF in `docs/qic-standards/`.
+
+**Hardware** (`docs/hardware/drives/*`): identification (vendor/model IDs as
+reported), the drive profile to use, supported formats and rates, then a
+`## Quirks` list. Each quirk says what you observe, what causes it if we know,
+and what to do.
+
+### 4.4 Markdown
+
+- Code, commands, flags, file names and field names go in backticks.
+- Fenced blocks always name a language (`sh`, `text`, `toml`, `python`, `c`).
+- Use admonitions (`!!! note`, `!!! warning`, `!!! danger`) for things the
+  reader must not miss. A warning is something that can lose data or damage
+  hardware. Don't stack more than two on one screen.
+- Links are relative (`../tw/dump.md`), never absolute site URLs.
+- Never put recovered file contents or directory listings from real tapes in
+  the docs. Header and volume-table metadata are fine.
+- New Markdown files use CRLF line endings like everything else (§1.1).
+
+---
+
+## 5. Commits
 
 Format:
 

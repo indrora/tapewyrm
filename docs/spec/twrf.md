@@ -785,7 +785,7 @@ offset 0 identifies the format.
   [twvl.md](twvl.md).
 
 [DESIGN]
-: Tapewyrm, `docs/DESIGN.md`, Sections 5.4, 7.1 and 7.2.
+: Tapewyrm, `agents/DESIGN.md`, Sections 5.4, 7.1 and 7.2.
 
 ## Appendix A. Example
 

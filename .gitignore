@@ -42,3 +42,6 @@ Thumbs.db
 *.raw
 *.damaged.txt
 dump.jsonl
+
+# MkDocs output
+/site/
