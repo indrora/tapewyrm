@@ -215,6 +215,14 @@ tw --profile colorado --progress dump captures/NAME
   `dump.jsonl` says how many passes each track took and why the others were
   thrown away. Flaky reads are the norm on old drives, so a retry or two is
   cheap insurance.
+- **`--keep-all`** keeps those other passes instead of deleting them: every
+  pass of a track becomes `track-NN.P.twrf` (P is the pass number), and
+  `dump.jsonl` still names the best one. A pass that loses as a whole can
+  still hold a sector the winner lost, and `tw convert` uses every capture in
+  the directory. **`--passes N`** goes further and reads every track N times
+  whatever happens, keeping them all (`--retries` then adds more only if none
+  of the N was clean). On a dying tape, `--passes 2 --retries 2` is the
+  "never throw a read away" setting.
 - **How long.** A pass takes as long as the tape takes to run end to end at the
   drive's speed: a couple of minutes per track for a short QIC-80 cartridge, and
   about 9 minutes for a track of a 1,000 ft QIC-3020 cartridge, plus winding.
@@ -262,6 +270,23 @@ time: a 9-minute QIC-3020 track converts in about 2.5 minutes.
   `tw convert captures/NAME captures/NAME-pass2 captures/NAME.twtz`. Sources can be
   dump directories or single `track-NN.twrf` files. A sector read on any pass
   fills the gaps of the others, so re-reading only the bad tracks is enough.
+- **Many reads of one track** (`tw dump --keep-all` / `--passes`, or several
+  dumps). By default every CRC-good sector of every read is used. Where every
+  read got a sector wrong, `convert` still tries: with 3 or more reads it takes
+  the most common byte at each position and keeps the result if its CRC
+  checks, and a segment that still will not correct is solved one
+  Reed-Solomon column at a time from the bytes its reads agree on, kept only
+  if every column passes the code's spare parity. `--no-vote` turns both off.
+  `--best segment` or `--best track` instead takes each segment or track
+  whole from its best read (`--rank crc` counts CRC-clean sectors; `--rank rs`
+  first asks whether the segment corrects and its spare parity agrees).
+- **Reading the log.** It goes track by track: which files read each track
+  (before decoding), then for each track what its segments came out as and
+  what each read held and contributed, with a line for every segment that
+  needed a merge, a vote or a rescue, or failed. A segment whose spare parity
+  disagrees is a WARNING (a sector that passed its CRC is wrong), except one
+  made of a single repeated byte: that is space never written since the tape
+  was formatted, counted as "unwritten (format fill)".
 - **More cores.** The decode is one core per capture. `-j N` decodes N
   captures at once, each in its own process, and `-j 0` picks N from the
   cores and the RAM: a worker needs about 25 bytes of memory per byte of

@@ -1,4 +1,4 @@
-"""tw dump --retries and --no-clobber: re-reading a failed track, resuming a dump.
+"""tw dump --retries, --passes, --keep-all and --no-clobber: re-reading, keeping, resuming.
 
 The policy (``read_track``) runs over scripted passes that write a marker into
 their file, so a test can see which capture survived. The wiring
@@ -31,7 +31,9 @@ from tapewyrm.tape.dump import (
     RejectedPass,
     TrackResult,
     dump_tracks,
+    highest_pass_on_disk,
     pass_failure,
+    pass_path,
     pass_rank,
     previous_results,
     read_track,
@@ -368,6 +370,118 @@ def test_dump_tracks_carries_on_with_a_few_missed_segments_once_the_retries_are_
     results = dump_tracks(FakeDrive(link), tmp_path, [0], retries=1)
     assert [(r.attempts, r.missing_est, r.index_pulses) for r in results] == [(2, 1, 24)]
     assert len(link.captures) == 2
+
+
+# ---------------------------------------------------------------------------
+# --passes and --keep-all: every pass stays, as track-NN.P.twrf
+# ---------------------------------------------------------------------------
+
+
+def test_passes_reads_the_track_n_times_and_keeps_every_file(path):
+    """Three clean passes: all three stay; the first is the pick (a clean one yields
+    only to a pass that ranks higher), the others are listed but not deleted."""
+    script = Script(GOOD, GOOD, GOOD)
+    res, _ = read_track(script, 0, path, passes=3)
+    assert (res.attempts, res.kept) == (3, 1)
+    assert res.path == str(pass_path(path.parent, 0, 1))
+    assert [r.attempt for r in res.rejected] == [2, 3]
+    assert res.rejected[0].reason.startswith("clean, but ranked no higher than attempt 1")
+    assert _leftovers(path) == ["track-00.1.twrf", "track-00.2.twrf", "track-00.3.twrf"]
+    assert [(dest.name, attempt) for dest, attempt in script.calls] == [
+        ("track-00.1.twrf", 1),
+        ("track-00.2.twrf", 2),
+        ("track-00.3.twrf", 3),
+    ]
+
+
+def test_a_later_pass_that_ranks_higher_takes_the_pick_from_a_clean_one(path):
+    script = Script(replace(GOOD, index_pulses=206), GOOD)
+    res, _ = read_track(script, 0, path, passes=2)
+    assert (res.attempts, res.kept) == (2, 2)
+    assert res.rejected == [
+        RejectedPass(1, "clean, but attempt 2 ranked higher (207 segments found vs 206)")
+    ]
+    assert _leftovers(path) == ["track-00.1.twrf", "track-00.2.twrf"]
+
+
+def test_passes_is_a_floor_and_retries_add_more_until_one_is_clean(path):
+    failed = replace(GOOD, end_reason="WATCHDOG")
+    script = Script(failed, failed, GOOD)
+    res, _ = read_track(script, 0, path, passes=2, retries=3)
+    assert (res.attempts, res.kept, len(script.calls)) == (3, 3, 3)
+    assert _leftovers(path) == ["track-00.1.twrf", "track-00.2.twrf", "track-00.3.twrf"]
+
+
+def test_keep_all_stops_at_the_first_clean_pass_but_still_numbers_it(path):
+    """The naming follows the flag, not how many passes it took."""
+    res, _ = read_track(Script(GOOD), 0, path, retries=2, keep_all=True)
+    assert (res.attempts, res.kept) == (1, 1)
+    assert _leftovers(path) == ["track-00.1.twrf"]
+
+
+def test_keep_all_keeps_the_losers_and_a_raised_pass_partial(path):
+    script = Script(LinkError("cable"), replace(GOOD, missing_est=2), GOOD)
+    res, _ = read_track(script, 0, path, retries=2, keep_all=True)
+    assert (res.attempts, res.kept) == (3, 3)
+    assert [r.attempt for r in res.rejected] == [1, 2]
+    assert _leftovers(path) == ["track-00.1.twrf", "track-00.2.twrf", "track-00.3.twrf"]
+    assert pass_path(path.parent, 0, 1).read_bytes() == b"attempt-1"
+
+
+def test_keep_all_never_overwrites_a_numbered_pass_already_on_disk(path):
+    """A run that died mid-track left pass 2 with no dump.jsonl line: number after it."""
+    pass_path(path.parent, 0, 2).write_bytes(b"orphan")
+    assert highest_pass_on_disk(path.parent, 0) == 2
+    assert highest_pass_on_disk(path.parent, 1) == 0
+    res, _ = read_track(Script(GOOD), 0, path, keep_all=True)
+    assert (res.attempts, res.kept) == (3, 3)
+    assert pass_path(path.parent, 0, 2).read_bytes() == b"orphan"
+    assert _leftovers(path) == ["track-00.2.twrf", "track-00.3.twrf"]
+
+
+def test_zero_passes_are_refused(path):
+    with pytest.raises(ValueError, match="passes must be 1 or more"):
+        read_track(Script(GOOD), 0, path, passes=0)
+
+
+def test_an_earlier_runs_passes_count_toward_the_floor(path):
+    """One clean pass on record and --passes 3: two more, numbered 2 and 3."""
+    first = pass_path(path.parent, 0, 1)
+    first.write_bytes(b"earlier")
+    earlier = replace(GOOD, path=str(first))
+    script = Script(GOOD, GOOD)
+    res, _ = read_track(script, 0, path, passes=3, existing=earlier)
+    assert [attempt for _, attempt in script.calls] == [2, 3]
+    assert (res.attempts, res.kept, res.path) == (3, 1, str(first))
+    assert first.read_bytes() == b"earlier"
+
+
+def test_dump_tracks_passes_writes_numbered_captures_and_names_the_pick(tmp_path, identity):
+    link = FakeLink([_stream([PERIOD] * 8)] * 2)
+    results = dump_tracks(FakeDrive(link), tmp_path, [0], passes=2)
+    assert [(r.attempts, r.kept) for r in results] == [(2, 1)]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "dump.jsonl",
+        "track-00.1.twrf",
+        "track-00.2.twrf",
+    ]
+    # Each file says by itself which pass it is.
+    assert [read_header(pass_path(tmp_path, 0, k))[0].pass_id for k in (1, 2)] == [1, 2]
+    (line,) = _sidecar(tmp_path)
+    assert line["path"] == str(pass_path(tmp_path, 0, 1))
+    # --no-clobber finds the numbered pick, and skips the track once it has its passes.
+    assert previous_results(tmp_path)[0].kept == 1
+    again = FakeLink([])
+    assert dump_tracks(FakeDrive(again), tmp_path, [0], passes=2, no_clobber=True)[0].kept == 1
+    assert again.captures == []
+
+
+def test_dump_tracks_no_clobber_reads_a_clean_track_again_short_of_its_passes(tmp_path, identity):
+    dump_tracks(FakeDrive(FakeLink([_stream([PERIOD] * 8)])), tmp_path, [0], keep_all=True)
+    link = FakeLink([_stream([PERIOD] * 8)])
+    (res,) = dump_tracks(FakeDrive(link), tmp_path, [0], passes=2, no_clobber=True)
+    assert [c["pass_id"] for c in link.captures] == [2]
+    assert (res.attempts, res.kept) == (2, 1)
 
 
 # ---------------------------------------------------------------------------

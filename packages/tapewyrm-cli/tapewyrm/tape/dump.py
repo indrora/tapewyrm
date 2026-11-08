@@ -49,6 +49,20 @@ the same measures (:func:`pass_rank`); ``dump.jsonl`` accounts for every pass.
 Only once the retries are spent do the stop rules judge the kept pass, exactly
 as they judge a single pass without retries.
 
+Throwing the other passes away is the wrong call when a tape is dying: a pass
+that ranks lower as a whole can still hold the one sector the winner lost, and
+``tw convert`` merges sectors across every capture it is given. ``--keep-all``
+keeps every pass, each in its own ``track-NN.P.twrf`` (P its ``pass_id``,
+:func:`pass_path`); nothing is captured to a scratch file or deleted, and the
+"kept" pass becomes bookkeeping only: the one ``dump.jsonl`` describes and the
+stop rules judge. ``--passes N`` reads every track at least N times whatever
+the outcome (and implies ``--keep-all``: there is no point reading a track
+three times to delete two of them); ``--retries R`` then allows up to R more
+if none of the N was clean. The naming follows the flag, not the number of
+passes it took, so a ``--keep-all`` track read clean first time is still
+``track-NN.1.twrf``. A ``--keep-all`` dump never overwrites a numbered file:
+its passes are numbered after the highest one already in the directory.
+
 A dump that stopped, or a drive that went dark half-way, leaves a directory
 with some tracks done. ``--no-clobber`` resumes it: a track whose latest
 ``dump.jsonl`` line is clean and whose file is whole is skipped
@@ -62,6 +76,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Iterable
 from contextlib import suppress
@@ -123,6 +138,44 @@ SIDECAR = "dump.jsonl"
 def track_path(out_dir: Path, track: int) -> Path:
     """Where ``track``'s capture lives in ``out_dir``: ``track-NN.twrf``."""
     return out_dir / f"track-{track:02d}{CAPTURE_SUFFIX}"
+
+
+def pass_path(out_dir: Path, track: int, attempt: int) -> Path:
+    """Where pass ``attempt`` of ``track`` lives under ``--keep-all``: ``track-NN.P.twrf``.
+
+    Still ``track-*.twrf``, so ``tw convert`` and cinnabar pick every pass up
+    with the captures of the other tracks (TWS-1 8.1 rule 7 allows the extra
+    part: it names the track, the pass is just one more thing it says).
+    """
+    return out_dir / f"track-{track:02d}.{attempt}{CAPTURE_SUFFIX}"
+
+
+def highest_pass_on_disk(out_dir: Path, track: int) -> int:
+    """The highest P among ``out_dir``'s ``track-NN.P.twrf`` files for ``track``, or 0.
+
+    What keeps a ``--keep-all`` dump from overwriting a pass an earlier run
+    made: a run that died mid-track never wrote that track's ``dump.jsonl``
+    line, so the sidecar alone cannot say which numbers are taken.
+    """
+    pattern = re.compile(rf"track-{track:02d}\.(\d+){re.escape(CAPTURE_SUFFIX)}")
+    if not out_dir.is_dir():
+        log.debug("%s does not exist yet; no numbered passes of track %d", out_dir, track)
+        return 0
+    numbers = [int(m[1]) for p in out_dir.iterdir() if (m := pattern.fullmatch(p.name))]
+    log.debug("track %d: numbered passes already in %s: %s", track, out_dir, sorted(numbers))
+    return max(numbers, default=0)
+
+
+def recorded_file(out_dir: Path, res: TrackResult) -> Path:
+    """The file a ``dump.jsonl`` line describes, looked up in ``out_dir``.
+
+    By the name the line recorded (``track-NN.twrf``, or ``track-NN.P.twrf``
+    under ``--keep-all``), never the full path: a dump directory moved or
+    resumed from another working directory must still find its files. A line
+    with no name falls back to ``track-NN.twrf``.
+    """
+    name = Path(res.path).name
+    return out_dir / name if name else track_path(out_dir, res.track)
 
 
 class DumpStopped(Exception):
@@ -567,47 +620,77 @@ def read_track(
     path: Path,
     *,
     retries: int = 0,
+    passes: int = 1,
+    keep_all: bool = False,
     best_index: int = 0,
     existing: TrackResult | None = None,
 ) -> tuple[TrackResult, int]:
-    """Read one track with up to ``retries`` re-reads: (kept result, its flux status).
+    """Read one track: at least ``passes`` passes, up to ``retries`` more until one is clean.
 
-    ``capture_pass(dest, attempt)`` makes one pass into ``dest`` and returns
-    its measurements (:func:`_capture_pass` over a drive; the tests script
-    it). The track is read again until the kept pass is clean
-    (:func:`pass_failure`) or the attempts are spent; the stop rules are not
-    applied here but by the caller, to what was kept.
+    Returns (kept result, its flux status). ``capture_pass(dest, attempt)``
+    makes one pass into ``dest`` and returns its measurements
+    (:func:`_capture_pass` over a drive; the tests script it). The track is
+    read ``passes`` times whatever the outcome, then again until the kept pass
+    is clean (:func:`pass_failure`) or the ``retries`` are spent; the stop
+    rules are not applied here but by the caller, to what was kept.
 
-    Which file stays at ``path``: the last pass's, unless an earlier one was
-    better by :func:`pass_rank`, so a tie goes to the latest. In practice
-    that is the clean pass, or the last of the failed ones. The two differ
-    when a later pass is clean but found fewer segments than an earlier pass
-    that skipped some inside; then the earlier file, which holds more of the
-    track, is kept, and the loop goes on hoping for a pass that is both. A
-    re-read is captured beside the kept file (``RETRY_SUFFIX``) and moved into
-    place only if it wins, so the kept file is never overwritten by a worse
-    one; the result's ``path`` is ``path`` whichever file it was captured
-    into, and it carries ``attempts``, ``kept`` and, for every other pass,
-    why that one was deleted.
+    Which pass is kept is the same rule with or without ``keep_all``: the
+    best by :func:`pass_rank`, where a failed kept pass gives way to a later
+    one that ranks at least as high (so between failed passes a tie goes to
+    the latest), and a clean one only to a later one that ranks higher (more
+    segments found, or with --check more sectors good). In practice that is
+    the clean pass, or the last of the failed ones. The two differ when a
+    later pass is clean but found fewer segments than an earlier pass that
+    skipped some inside; then the earlier one, which holds more of the track,
+    is kept, and the loop goes on hoping for a pass that is both.
+
+    What happens to the other passes' files is what ``keep_all`` changes:
+
+    - Without it (``passes`` must then be 1), ``path`` holds the kept pass and
+      nothing else survives. A re-read is captured beside the kept file
+      (``RETRY_SUFFIX``) and moved into place only if it wins, so the kept
+      file is never overwritten by a worse one.
+    - With it, every pass is captured straight into its own
+      :func:`pass_path` and stays there, the losers and the partial files of
+      passes that raised included (TWS-1 8.1 rule 8: keep a truncated
+      capture); ``tw convert`` decides later which reads to use. Numbering
+      starts after the highest ``track-NN.P.twrf`` already on disk
+      (:func:`highest_pass_on_disk`), so no earlier read is overwritten.
+      ``passes`` > 1 turns it on: reading a track N times to keep one is the
+      very loss --passes exists to avoid.
+
+    The result's ``path`` is the kept pass's file, and it carries
+    ``attempts`` (the last pass number), ``kept`` and, for every other pass,
+    why that one lost: deleted, or under ``keep_all`` merely not the pick.
 
     A pass that raised ``LinkError`` or ``DriveError`` has nothing to measure:
-    it is rejected with the error as its reason. Its partial file is kept only
-    while no pass has been measured at all, so a track that never read still
-    leaves what it got (and a later raised pass replaces it: ties go to the
-    latest). Errors that mean the board is gone (``LINK_FATAL``) are not
-    retried. If every pass raised, the last error is raised again.
+    it is rejected with the error as its reason. Without ``keep_all`` its
+    partial file is kept only while no pass has been measured at all, so a
+    track that never read still leaves what it got (and a later raised pass
+    replaces it: ties go to the latest). Errors that mean the board is gone
+    (``LINK_FATAL``) are not retried. If every pass raised, the last error is
+    raised again.
 
-    ``existing`` is a pass already at ``path`` from an earlier run, with the
-    measurements its ``dump.jsonl`` line recorded (``--no-clobber``). It
-    competes like any pass, its flux status taken as clean (the sidecar does
-    not record it, and an overflow shows as ``end_reason`` OVERFLOW anyway),
-    and the new passes are numbered after its ``attempts``, so attempt
-    numbers stay unique for the track and the new line accounts for every
-    pass ever made on it in this directory.
+    ``existing`` is a pass already in ``path``'s directory from an earlier
+    run, with the measurements its ``dump.jsonl`` line recorded
+    (``--no-clobber``), at the file that line names (:func:`recorded_file`).
+    It competes like any pass, its flux status taken as clean (the sidecar
+    does not record it, and an overflow shows as ``end_reason`` OVERFLOW
+    anyway), its passes count toward ``passes``, and the new passes are
+    numbered after its ``attempts``, so attempt numbers stay unique for the
+    track and the new line accounts for every pass ever made on it in this
+    directory. Under ``keep_all`` its file is left where and as it is, even
+    when that is the unnumbered ``track-NN.twrf`` of a run without the flag;
+    a dump never renames a capture.
     """
     if retries < 0:
         log.debug("retries=%d is negative; refusing", retries)
         raise ValueError(f"retries must be 0 or more, not {retries}")
+    if passes < 1:
+        log.debug("passes=%d is below 1; refusing", passes)
+        raise ValueError(f"passes must be 1 or more, not {passes}")
+    keep_all = keep_all or passes > 1
+    out_dir = path.parent
     scratch = path.with_name(path.name + RETRY_SUFFIX)
     if scratch.exists():
         log.debug("track %d: deleting stale %s from an earlier run", track, scratch)
@@ -615,26 +698,56 @@ def read_track(
     kept: TrackResult | None = None
     kept_ack = 0
     kept_failure: str | None = None
-    occupied = False  # something sits at `path`: the kept file, or a raised pass's partial
+    # Without keep_all: something sits at `path` (the kept file, or a raised
+    # pass's partial), so the next pass goes to the scratch file instead.
+    occupied = False
     rejected: list[RejectedPass] = []
     first = 1
     if existing is not None:
-        kept = replace(existing, path=str(path))
+        kept = replace(existing, path=str(recorded_file(out_dir, existing)))
         kept_failure = pass_failure(kept, kept_ack, best_index)
-        occupied = True
+        occupied = Path(kept.path) == path
         rejected = list(existing.rejected)
         first = existing.attempts + 1
         log.info(
             f"track {track:2d}: an earlier run left attempt {existing.kept} of "
-            f"{existing.attempts} at {path} ({kept_failure or 'clean'}); a new pass "
+            f"{existing.attempts} at {kept.path} ({kept_failure or 'clean'}); a new pass "
             "replaces it only if better"
         )
+    if keep_all:
+        on_disk = highest_pass_on_disk(out_dir, track)
+        if on_disk >= first:
+            log.warning(
+                f"track {track:2d}: {pass_path(out_dir, track, on_disk).name} is already in "
+                f"{out_dir}; numbering the new passes from {on_disk + 1} so no earlier read "
+                "is overwritten"
+            )
+            first = on_disk + 1
+    # The floor counts the passes the track has already had in this
+    # directory's accounting (an --no-clobber resume), but every call makes
+    # at least one: a track read again is read again because it was not
+    # good enough.
+    floor = first + max(1, passes - (existing.attempts if existing is not None else 0)) - 1
+    last = floor + retries
+    log.debug(
+        "track %d: passes %d..%d whatever happens, up to %d until one is clean (keep_all=%s)",
+        track,
+        first,
+        floor,
+        last,
+        keep_all,
+    )
     last_exc: Exception | None = None
     attempt = first - 1
-    for attempt in range(first, first + retries + 1):
-        dest = scratch if occupied else path
-        if attempt > first:
-            log.info(f"track {track:2d}: re-reading, attempt {attempt} of {first + retries}")
+    for attempt in range(first, last + 1):
+        if keep_all:
+            dest = pass_path(out_dir, track, attempt)
+        else:
+            dest = scratch if occupied else path
+        if attempt > floor:
+            log.info(f"track {track:2d}: re-reading, attempt {attempt} of {last}")
+        elif floor > first:
+            log.info(f"track {track:2d}: pass {attempt} of {floor} (--passes)")
         try:
             res, flux_ack = capture_pass(dest, attempt)
         except LINK_FATAL:
@@ -645,7 +758,14 @@ def read_track(
             log.warning(f"track {track:2d}: attempt {attempt} failed: {why}")
             rejected.append(RejectedPass(attempt, why))
             last_exc = exc
-            if kept is None and dest.exists():
+            if keep_all:
+                log.debug(
+                    "track %d attempt %d: keeping whatever reached %s (--keep-all)",
+                    track,
+                    attempt,
+                    dest,
+                )
+            elif kept is None and dest.exists():
                 log.debug(
                     "track %d attempt %d: nothing measured yet; its partial file stays as %s",
                     track,
@@ -660,36 +780,53 @@ def read_track(
                 dest.unlink(missing_ok=True)
             continue
         failure = pass_failure(res, flux_ack, best_index)
-        if kept is not None and pass_rank(res, flux_ack) < pass_rank(kept, kept_ack):
+        rank = pass_rank(res, flux_ack)
+        # A failed kept pass yields to a tie (the latest of equals wins), a
+        # clean one only to a pass that ranks strictly higher. Without
+        # keep_all the second case never arises: a clean pass ends the loop.
+        wins = kept is None or (
+            rank >= pass_rank(kept, kept_ack)
+            if kept_failure is not None
+            else rank > pass_rank(kept, kept_ack)
+        )
+        if not wins:
+            assert kept is not None
+            # "No higher" for a tie: only a clean kept pass beats an equal one,
+            # and only under keep_all's floor does a pass get to tie with it.
+            relation = "below" if rank < pass_rank(kept, kept_ack) else "no higher than"
             why = (f"{failure}; " if failure else "clean, but ") + (
-                f"ranked below attempt {kept.kept} ({res.index_pulses} segments found, "
+                f"ranked {relation} attempt {kept.kept} ({res.index_pulses} segments found, "
                 f"{res.missing_est} missed, vs {kept.index_pulses} and {kept.missing_est})"
             )
             log.info(f"track {track:2d}: attempt {attempt} {why}; keeping attempt {kept.kept}")
             rejected.append(RejectedPass(attempt, why))
-            dest.unlink()
+            if not keep_all:
+                dest.unlink()
         else:
             if kept is not None:
-                # The kept pass was failed (a clean one ends the loop), and this
-                # one ranks at least as high: it takes over, the old one goes.
-                assert kept_failure is not None
-                log.info(
-                    f"track {track:2d}: attempt {attempt} replaces attempt {kept.kept} "
-                    f"({kept_failure})"
+                # This one ranks at least as high as a failed kept pass, or
+                # higher than a clean one: it takes over. Without keep_all the
+                # old file goes (overwritten below); with it, it stays.
+                lost = kept_failure or (
+                    f"clean, but attempt {attempt} ranked higher ({res.index_pulses} segments "
+                    f"found vs {kept.index_pulses})"
                 )
-                rejected.append(RejectedPass(kept.kept, kept_failure))
-            if dest != path:
+                log.info(
+                    f"track {track:2d}: attempt {attempt} replaces attempt {kept.kept} ({lost})"
+                )
+                rejected.append(RejectedPass(kept.kept, lost))
+            if not keep_all and dest != path:
                 log.debug(
                     "track %d attempt %d: moving %s into place as %s", track, attempt, dest, path
                 )
                 os.replace(dest, path)
-            kept = replace(res, path=str(path), kept=attempt)
+            kept = replace(res, path=str(dest if keep_all else path), kept=attempt)
             kept_ack, kept_failure = flux_ack, failure
             occupied = True
             if failure is not None:
                 log.warning(f"track {track:2d}: attempt {attempt} failed: {failure}")
-        if kept_failure is None:
-            log.debug("track %d: attempt %d is clean; done", track, attempt)
+        if kept_failure is None and attempt >= floor:
+            log.debug("track %d: attempt %d is clean and the floor is met; done", track, attempt)
             break
     if kept is None:
         assert last_exc is not None  # the loop ran at least once, and every pass raised
@@ -708,7 +845,8 @@ def previous_results(out_dir: Path) -> dict[int, TrackResult]:
     What ``--no-clobber`` consults. The latest line for a track is the one
     that counts: a directory dumped twice holds both runs' lines, and a
     re-read's line supersedes the earlier one. A line counts only if the
-    track's file (:func:`track_path`) is there and holds at least the
+    file it names (:func:`recorded_file`: ``track-NN.twrf``, or the kept
+    ``track-NN.P.twrf`` of a ``--keep-all`` run) is there and holds at least the
     recorded flux bytes, so a capture cut short by a crash, or deleted by
     hand, is read again rather than trusted. Members this version does not
     know are ignored, lines from before ``--retries`` read as one pass, and
@@ -733,7 +871,7 @@ def previous_results(out_dir: Path) -> dict[int, TrackResult]:
             continue
         found[res.track] = res
     for track, res in list(found.items()):
-        path = track_path(out_dir, track)
+        path = recorded_file(out_dir, res)
         if not path.is_file() or path.stat().st_size < res.bytes:
             log.debug(
                 "track %d: %s lists it but %s is missing or short; not trusting the line",
@@ -759,6 +897,8 @@ def dump_tracks(
     progress: Progress = NULL_PROGRESS,
     check: bool = False,
     retries: int = 0,
+    passes: int = 1,
+    keep_all: bool = False,
     no_clobber: bool = False,
 ) -> list[TrackResult]:
     """Capture each track in order; raise :class:`DumpStopped` on trouble.
@@ -768,10 +908,14 @@ def dump_tracks(
     also decodes every pass (~17 s each) and stops on a low CRC-clean
     fraction; see the module docstring. ``retries`` re-reads a track whose
     pass failed up to that many more times (:func:`read_track`) before the
-    stop rules judge the pass that was kept. ``no_clobber`` resumes an earlier
-    dump of ``out_dir``: a track whose last recorded pass is clean and whose
-    file is whole is skipped (and returned as it was), and one that is not is
-    read again with that pass seeded into keep-best (:func:`previous_results`).
+    stop rules judge the pass that was kept. ``passes`` reads every track at
+    least that many times, and ``keep_all`` (implied by ``passes`` > 1) keeps
+    every pass as ``track-NN.P.twrf`` instead of deleting the losers
+    (:func:`read_track`). ``no_clobber`` resumes an earlier dump of
+    ``out_dir``: a track whose last recorded pass is clean, whose file is
+    whole and which has had at least ``passes`` passes is skipped (and
+    returned as it was), and any other is read again with that pass seeded
+    into keep-best (:func:`previous_results`).
     """
     log.debug("creating output directory %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -790,7 +934,11 @@ def dump_tracks(
             # dump judges its new passes against the whole tape it knows.
             best_index = max((r.index_pulses for r in [*results, *previous.values()]), default=0)
             earlier = previous.get(track)
-            if earlier is not None and pass_failure(earlier, 0, best_index) is None:
+            if (
+                earlier is not None
+                and pass_failure(earlier, 0, best_index) is None
+                and earlier.attempts >= passes
+            ):
                 log.info(
                     f"track {track:2d}: already dumped clean ({earlier.index_pulses} segments "
                     f"by INDEX, attempt {earlier.kept} of {earlier.attempts}); skipping"
@@ -805,6 +953,8 @@ def dump_tracks(
                 track,
                 path,
                 retries=retries,
+                passes=passes,
+                keep_all=keep_all,
                 best_index=best_index,
                 existing=earlier,
             )

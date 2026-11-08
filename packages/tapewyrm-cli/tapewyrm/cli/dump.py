@@ -56,6 +56,27 @@ def _parse_tracks(spec: str) -> list[int]:
     ),
 )
 @click.option(
+    "--passes",
+    metavar="N",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help=(
+        "read every track at least N times whatever the outcome and keep them all as "
+        "track-NN.P.twrf (implies --keep-all); --retries then adds up to its count more "
+        "if none of the N was clean"
+    ),
+)
+@click.option(
+    "--keep-all",
+    is_flag=True,
+    help=(
+        "keep every pass instead of deleting the ones that lost, each as track-NN.P.twrf "
+        "(P = its pass_id), so `tw convert` can use every read; dump.jsonl still names the "
+        "best one, and that is the one the stop rules judge"
+    ),
+)
+@click.option(
     "--no-clobber",
     is_flag=True,
     help=(
@@ -71,6 +92,8 @@ def dump(
     tracks: str | None,
     check: bool,
     retries: int,
+    passes: int,
+    keep_all: bool,
     no_clobber: bool,
 ) -> None:
     """Capture whole tracks to TWRF files in OUTDIR, one Logical Forward pass each.
@@ -85,7 +108,10 @@ def dump(
     tape looks unhealthy. --check also decodes and checks sector CRCs.
     --retries N re-reads a track whose pass failed those checks (or skipped
     any segment, or raised) up to N more times first, keeping the best pass;
-    dump.jsonl records every attempt. --no-clobber resumes a dump that
+    dump.jsonl records every attempt. Normally the losing passes are
+    deleted; --keep-all keeps every one as track-NN.P.twrf, and --passes N
+    reads every track N times and keeps them all, for `tw convert --best`
+    to choose from. --no-clobber resumes a dump that
     stopped: tracks already dumped clean into OUTDIR are skipped, and a
     track dumped with a failed pass is read again, its earlier capture
     kept unless the new pass is better.
@@ -96,11 +122,13 @@ def dump(
     # Parse TRACKS before touching the drive so a typo fails fast.
     track_list = _parse_tracks(tracks) if tracks is not None else None
     log.debug(
-        "dumping tracks %s to %s (check=%s, retries=%d, no_clobber=%s)",
+        "dumping tracks %s to %s (check=%s, retries=%d, passes=%d, keep_all=%s, no_clobber=%s)",
         track_list or "all",
         outdir,
         check,
         retries,
+        passes,
+        keep_all,
         no_clobber,
     )
     with _drive_session(app) as d, app.progress() as prog:
@@ -112,6 +140,8 @@ def dump(
                 progress=prog,
                 check=check,
                 retries=retries,
+                passes=passes,
+                keep_all=keep_all,
                 no_clobber=no_clobber,
             )
         except DumpStopped as exc:
@@ -126,4 +156,9 @@ def dump(
     re_read = sum(1 for r in results if r.attempts > 1)
     if re_read:
         line += f", {re_read} re-read"
+    if keep_all or passes > 1:
+        # Every pass is a file now, the losers too. Not a count: `attempts`
+        # is the last pass number, which skips numbers already on disk and
+        # counts an earlier run's passes, so it is not what this run made.
+        line += ", every pass kept as track-NN.P.twrf"
     click.echo(f"{line} -> {outdir}")

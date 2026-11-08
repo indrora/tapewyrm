@@ -45,7 +45,9 @@ decoder packs the present non-excluded sectors down, decodes, then unpacks.
 
 from __future__ import annotations
 
+import functools
 import logging
+from enum import StrEnum
 
 from qiclib.types import Segment, SegmentResult, SegmentStatus
 
@@ -447,3 +449,146 @@ def _extract_participating_data(seg: Segment, participating: list[int], n: int) 
             )
             out.extend(bytes(_column_width(seg, participating)))
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# The spare-parity check (what the erasure solve leaves unspent)
+# ---------------------------------------------------------------------------
+#
+# The code has 3 parity rows, so 3 syndrome equations. ``correct_codeword``
+# solves e erasures from the first e of them and never looks at the other
+# 3 - e: with fewer than 3 erasures the codeword is over-determined, and the
+# left-over equations say whether the rows taken as good agree with each
+# other. That is the only check this layer has on a sector whose CRC passed:
+# CRC-16 misses about 1 burst in 65,536, and a sector the decoder trusted
+# wrongly makes the solve scatter garbage into the erased rows. ``correct``
+# does not run the check (it would cost a pass over every clean segment);
+# :func:`verify` does, and is cheap enough to run on all of them.
+#
+# Speed: a column at a time in Python is ~100 GF operations x 1024 columns
+# per segment (tens of ms). But the syndromes are linear in whole rows:
+# S_j = XOR_i row_i * alpha^(r_j * i), and multiplying a 1024-byte row by a
+# constant is one ``bytes.translate`` through a 256-byte table, XOR of rows
+# one big-int XOR. A clean segment's check is 96 of each: ~100 us.
+
+
+class Parity(StrEnum):
+    """What the spare parity of a segment says (:func:`verify`)."""
+
+    #: Fewer than 3 erasures, and the unspent syndromes are zero: the rows
+    #: taken as good, and the rows solved from them, are one codeword.
+    CONSISTENT = "consistent"
+    #: Exactly 3 erasures: every parity equation went into the solve, so
+    #: there is nothing left to check the result against.
+    UNVERIFIED = "unverified"
+    #: Fewer than 3 erasures, and an unspent syndrome is not zero: some row
+    #: taken as good (a CRC-good sector) is wrong.
+    INCONSISTENT = "inconsistent"
+    #: More than 3 erasures: nothing to solve, nothing to check.
+    UNCORRECTABLE = "uncorrectable"
+    #: No sector of the segment was read.
+    MISSING = "missing"
+
+
+@functools.cache
+def _mul_table(k: int) -> bytes:
+    """``x -> x * k`` over GF(256) for every byte ``x``, as a ``bytes.translate`` table."""
+    return bytes(gmul(x, k) for x in range(256))
+
+
+def _scaled(row: bytes, k: int) -> int:
+    """``row`` with every byte multiplied by ``k``, as a big-endian int ready to XOR."""
+    return int.from_bytes(row.translate(_mul_table(k)), "big")
+
+
+def row_syndromes(rows: list[bytes]) -> list[int]:
+    """The 3 syndromes of every column at once: :func:`syndromes`, a row at a time.
+
+    ``rows[i]`` is codeword position ``i`` (equal widths, erased rows zeroed).
+    Each result is one big-endian int whose byte ``c`` is column ``c``'s
+    syndrome, so a column is a codeword exactly when its byte is zero in
+    all three.
+    """
+    out: list[int] = []
+    for rlog in ROOT_LOG:
+        acc = 0
+        for i, row in enumerate(rows):
+            acc ^= _scaled(row, EXP[(rlog * i) % 255])
+        out.append(acc)
+    return out
+
+
+def verify(seg: Segment) -> Parity:
+    """Check ``seg`` against the parity its erasure solve did not use; never mutates it.
+
+    The rows are the participating slots (BSM exclusions repacked out, as
+    :func:`correct` does), an erased one zeroed. With no erasures the three
+    syndromes must all be zero. With e = 1 or 2 the erased rows are solved
+    from the first e syndromes as whole rows (the inverse of the e x e
+    erasure matrix applied to the syndrome rows, which is the column solve
+    of :func:`correct_codeword` done for all 1024 columns at once), and the
+    other 3 - e syndromes must equal what those solved rows contribute.
+    """
+    participating = _participating(seg)
+    if all(seg.sectors[i] is None for i in range(Segment.SECTORS)):
+        log.debug("verify segment %d: no sectors; MISSING", seg.seg)
+        return Parity.MISSING
+    erased = erasure_positions(seg)
+    m = len(erased)
+    if m > REDUNDANCY:
+        log.debug("verify segment %d: %d erasures; UNCORRECTABLE", seg.seg, m)
+        return Parity.UNCORRECTABLE
+    if m == REDUNDANCY:
+        log.debug("verify segment %d: 3 erasures, no spare parity; UNVERIFIED", seg.seg)
+        return Parity.UNVERIFIED
+    width = _column_width(seg, participating)
+    gone = set(erased)
+    rows: list[bytes] = []
+    for pos, slot in enumerate(participating):
+        sec = seg.sectors[slot]
+        if pos in gone or sec is None:
+            rows.append(bytes(width))
+        else:
+            # A row of the wrong length is zero-filled to width, as
+            # _gather_columns reads it.
+            rows.append(sec.data.ljust(width, b"\x00")[:width])
+    synd = row_syndromes(rows)
+    if m:
+        # S_j = sum_k M[j][k] X_k over the first m equations; X = M^-1 S.
+        matrix = [[EXP[(ROOT_LOG[j] * erased[k]) % 255] for k in range(m)] for j in range(m)]
+        try:
+            inverse_cols = [
+                _solve_linear(matrix, [int(j == u) for j in range(m)]) for u in range(m)
+            ]
+        except ValueError:
+            log.debug("verify segment %d: erasure matrix singular; UNVERIFIED", seg.seg)
+            return Parity.UNVERIFIED
+        solved = []
+        for k in range(m):
+            acc = 0
+            for u in range(m):
+                acc ^= _scaled(synd[u].to_bytes(width, "big"), inverse_cols[u][k])
+            solved.append(acc.to_bytes(width, "big"))
+        # What the solved rows add to each unspent syndrome; the received
+        # word's syndrome must be exactly that for the whole to be a codeword.
+        spare = []
+        for j in range(m, REDUNDANCY):
+            expected = 0
+            for k in range(m):
+                expected ^= _scaled(solved[k], EXP[(ROOT_LOG[j] * erased[k]) % 255])
+            spare.append(synd[j] ^ expected)
+    else:
+        spare = synd
+    if any(spare):
+        bad_columns = sum(1 for c in range(width) if any((s >> (8 * c)) & 0xFF for s in spare))
+        log.debug(
+            "verify segment %d: %d erasures, spare parity disagrees in %d of %d columns; "
+            "INCONSISTENT",
+            seg.seg,
+            m,
+            bad_columns,
+            width,
+        )
+        return Parity.INCONSISTENT
+    log.debug("verify segment %d: %d erasures, spare parity agrees; CONSISTENT", seg.seg, m)
+    return Parity.CONSISTENT

@@ -226,7 +226,7 @@ def test_decode_capture_opens_each_stage_once_and_reaches_its_total(tmp_path, ta
     path = tmp_path / "track-00.twrf"
     RawFluxCapture(header=HDR, flux=blob).save(path)
     progress = RecordingProgress()
-    with caplog.at_level(logging.INFO, logger="tapewyrm.image.convert"):
+    with caplog.at_level(logging.DEBUG, logger="tapewyrm.image.convert"):
         found, meta = convert.decode_capture(path, progress=progress)
 
     assert [s.data for s in found] == [s.data for s in sectors]
@@ -240,12 +240,21 @@ def test_decode_capture_opens_each_stage_once_and_reaches_its_total(tmp_path, ta
     for bar in progress.tasks:
         assert bar.closed and bar.total and bar.position == bar.total, bar
 
-    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
-    assert all(line.startswith("track-00.twrf: ") for line in lines)
-    assert "track 0 forward, QIC-80 on 307.5 ft 550 Oe (XL), 500 kbps" in lines[0]
-    assert "transitions" in lines[1]
-    assert "bitcells" in lines[2] and f"{2 * len(sectors)} sync marks" in lines[2]
-    assert f"{len(sectors)} sectors: {len(sectors)} CRC-clean, 0 data-CRC bad" in lines[3]
+    # Every stage line is led by the track, then the file; only the sector
+    # tally is INFO (the stages are DEBUG unless the stream fails to verify).
+    stages = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == convert.__name__ and r.getMessage().startswith("track  0 track-00.twrf: ")
+    ]
+    assert "track 0 forward, QIC-80 on 307.5 ft 550 Oe (XL), 500 kbps" in stages[0]
+    assert any("transitions" in line for line in stages)
+    assert any("bitcells" in line and f"{2 * len(sectors)} sync marks" in line for line in stages)
+    tally = f"{len(sectors)} sectors: {len(sectors)} CRC-clean, 0 data-CRC bad"
+    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    # This fixture's stream has no END marker, so its parse line is INFO too.
+    assert tally in info[-1] and all(line in stages for line in info)
+    assert not any("bitcells" in line for line in info)
 
 
 def test_convert_runs_one_outer_bar_per_capture_then_builds(tmp_path, tape_flux, caplog):
@@ -272,7 +281,7 @@ def test_convert_runs_one_outer_bar_per_capture_then_builds(tmp_path, tape_flux,
     assert img.entries[0].state is SegmentState.CLEAN
 
     text = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
-    assert f"merge: 2 passes, {2 * len(sectors)} sectors -> {len(sectors)} unique" in text
+    assert f"merge: 2 reads, {2 * len(sectors)} sectors -> {len(sectors)} unique" in text
     assert "geometry: 2 tracks x 4 segs/track = 8 segments" in text
     assert "cartridge: " in text
     assert "segments: 3 clean, 0 corrected, 0 uncorrectable, 5 missing, 0 bad (map)" in text
@@ -335,7 +344,7 @@ def test_two_workers_build_the_same_image_as_one(tmp_path, tape_flux, caplog):
     text = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
     assert "decoding 2 captures, 2 at a time" in text
     for n in (0, 1):  # relayed from the workers
-        assert f"track-0{n}.twrf: {len(sectors)} sectors: {len(sectors)} CRC-clean" in text
+        assert f"track  0 track-0{n}.twrf: {len(sectors)} sectors: {len(sectors)} CRC-clean" in text
     assert "converted 2 capture(s) in " in text
 
 

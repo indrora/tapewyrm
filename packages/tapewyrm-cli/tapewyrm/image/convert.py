@@ -27,12 +27,14 @@ import time
 from collections import deque
 from collections.abc import Iterable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from itertools import groupby
 from logging.handlers import QueueHandler
 from multiprocessing.queues import Queue
 from pathlib import Path
 from typing import Any
 
 from qiclib.build import build_image
+from qiclib.merge import Best, Rank
 from qiclib.types import RawSector
 from tapewyrm_archive import qic117
 from tapewyrm_archive.progress import NULL_PROGRESS, Progress, ProgressRelay, QueueProgress
@@ -71,7 +73,8 @@ def capture_files(sources: Iterable[Path]) -> list[Path]:
     """Expand dump directories into their track captures.
 
     A directory contributes its ``track-*.twrf`` files, the names ``tw dump``
-    writes (TWS-1 8.1 rule 7). A file named on the command line is taken
+    writes (TWS-1 8.1 rule 7): ``track-NN.twrf``, and every
+    ``track-NN.P.twrf`` pass a ``--keep-all`` dump kept. A file named on the command line is taken
     whatever its name; :func:`decode_capture` then accepts it only if it
     starts with the TWRF magic, so the name never decides the format.
     """
@@ -99,15 +102,20 @@ def decode_capture(
     ``progress`` gets one bar per long pass (parse, PLL, framing, scan).
     """
     started = time.perf_counter()
-    name = path.name
     log.debug("reading capture %s", path)
     # read_header checks the magic and every header member before the (slow)
     # read of the flux, and raises a ValueError naming the file for anything
     # that is not a well-formed TWRF capture, whatever the file is called.
     hdr, flux_at = read_header(path)
+    # Every line is led by the track first and the file second: tw convert's
+    # log is read a track at a time (qiclib.mergelog), and with --keep-all
+    # one track has many files, whose pass_ids need not even be distinct (a
+    # --retries run's track-05.twrf and a later --keep-all's track-05.5.twrf
+    # can both be pass 5), so the file name is what tells two reads apart.
+    name = read_label(hdr, path)
     blob = path.read_bytes()
     flux, rate, meta = blob[flux_at:], hdr.rate_kbps, header_to_dict(hdr)
-    log.info("%s: %s, %d kbps, %s of flux", name, describe_header(hdr), rate, _mb(len(flux)))
+    log.debug("%s: %s, %d kbps, %s of flux", name, describe_header(hdr), rate, _mb(len(flux)))
     log.debug("%s: parsing %d bytes of flux stream", name, len(flux))
     ps = gwstream.parse(flux, progress=progress)
     del blob, flux  # the parsed intervals are all later stages need
@@ -119,7 +127,10 @@ def decode_capture(
     else:
         log.debug("%s: parse disagrees with END marker %r", name, ps.end)
         checked = "MISMATCHES the END marker"
-    log.info(
+    # Per stage at DEBUG; a stream that does not verify is worth saying at
+    # INFO, since what was lost in it is lost from every later stage too.
+    log.log(
+        logging.DEBUG if ps.verified else logging.INFO,
         "%s: %.1f s of tape, %s transitions, %s",
         name,
         ps.duration_s,
@@ -134,7 +145,7 @@ def decode_capture(
     n_cells = len(cells)
     decoded, sync_runs = mfm.frame_bitcells(cells, progress=progress)
     del cells
-    log.info("%s: %s bitcells, %s sync marks", name, f"{n_cells:,}", f"{sync_runs:,}")
+    log.debug("%s: %s bitcells, %s sync marks", name, f"{n_cells:,}", f"{sync_runs:,}")
 
     scan = mfm.ScanStats()
     sectors = list(mfm.recover_sectors_from_bytes(decoded, progress=progress, stats=scan))
@@ -157,20 +168,70 @@ def decode_capture(
     }
 
 
+def read_label(hdr: CaptureHeader, path: Path) -> str:
+    """How the log names one read: ``track  5 track-05.3.twrf`` (track first)."""
+    return f"track {hdr.track:2d} {path.name}"
+
+
+def _ranges(numbers: list[int]) -> str:
+    """``[0, 1, 2, 4, 8, 9]`` -> ``"0-2, 4, 8-9"``.
+
+    The stdlib idiom for runs: number minus its position is constant along a
+    run of consecutive numbers, so ``groupby`` on it splits the runs.
+    """
+    parts: list[str] = []
+    for _, run in groupby(enumerate(sorted(numbers)), key=lambda pair: pair[1] - pair[0]):
+        values = [value for _, value in run]
+        parts.append(str(values[0]) if len(values) == 1 else f"{values[0]}-{values[-1]}")
+    return ", ".join(parts)
+
+
+def roll_call(files: Sequence[Path]) -> None:
+    """Log, before the decode, which tracks the captures read and how many times.
+
+    The headers are all a reader needs (:func:`read_header` stops before the
+    flux), so this costs nothing next to the decode, and it fails on a file
+    that is not TWRF before any worker starts. Tracks read once go on one
+    line; a track read more than once gets its own, naming every file, which
+    is the list the per-track merge log (qiclib.mergelog) reports against.
+    """
+    headers = [(path, read_header(path)[0]) for path in files]
+    first = headers[0][1]
+    log.info("tape: %s, %d kbps", describe_tape(first), first.rate_kbps)
+    by_track: dict[int, list[tuple[Path, CaptureHeader]]] = {}
+    for path, hdr in headers:
+        by_track.setdefault(hdr.track, []).append((path, hdr))
+    once = [t for t, reads in by_track.items() if len(reads) == 1]
+    if once:
+        log.info("read once: track%s %s", "s" if len(once) > 1 else "", _ranges(once))
+    for track in sorted(t for t, reads in by_track.items() if len(reads) > 1):
+        reads = by_track[track]
+        log.info(
+            "track %2d: %d reads: %s",
+            track,
+            len(reads),
+            ", ".join(f"{path.name} (pass {hdr.pass_id})" for path, hdr in reads),
+        )
+
+
 def describe_header(hdr: CaptureHeader) -> str:
-    """One phrase for a TWRF header: track, direction, format and tape type.
+    """One phrase for a TWRF header: track, direction, format and tape type."""
+    return f"track {hdr.track} {hdr.direction.value}, {describe_tape(hdr)}"
+
+
+def describe_tape(hdr: CaptureHeader) -> str:
+    """The tape a capture says it read: format, tape type and width.
 
     The format comes from the drive's Report Tape Status byte when the capture
     recorded one (it also names the tape type and width); otherwise from the
     header's own ``tape_format``, which the dump filled in from the same report
     or its default.
     """
-    where = f"track {hdr.track} {hdr.direction.value}"
     if hdr.tape_status is None:
         log.debug("track %d: no tape status byte recorded; using header format", hdr.track)
-        return f"{where}, {_format_name(hdr.tape_format)}"
+        return _format_name(hdr.tape_format)
     status = qic117.TapeStatus.decode(hdr.tape_status)
-    text = f"{where}, {_format_name(status.format)}"
+    text = _format_name(status.format)
     tape_type = qic117.TAPE_TYPES.get(status.tape_type)
     if tape_type is None:
         log.debug("tape type code %d is not in TAPE_TYPES", status.tape_type)
@@ -368,13 +429,30 @@ def decode_captures(
 
 
 def convert(
-    sources: Iterable[Path], out: Path, *, progress: Progress = NULL_PROGRESS, jobs: int = 1
+    sources: Iterable[Path],
+    out: Path,
+    *,
+    progress: Progress = NULL_PROGRESS,
+    jobs: int = 1,
+    best: Best = Best.SECTOR,
+    rank: Rank = Rank.CRC,
+    vote: bool = True,
 ) -> TapeImage:
     """Build a TWTI image from one or more dumps (passes are merged).
 
     ``jobs`` captures decode at once, each in its own process, when it is more
     than one (0 lets :func:`worker_count` pick); the passes still merge in
     source order, so the image is the same whatever the count.
+
+    ``best`` is the grain at which several reads of the same track compete
+    (:func:`qiclib.merge.select`): by sector (the default) every CRC-good
+    sector of every capture is used; by segment or by track only the best
+    read of each, ranked by ``rank``. Every capture is decoded either way: a
+    read cannot be ranked before it is decoded. ``vote`` rebuilds sectors and
+    segments no single read got right from several (:mod:`qiclib.vote`).
+    A dump made with ``tw dump
+    --keep-all`` or ``--passes`` holds several ``track-NN.P.twrf`` per track,
+    and its directory brings all of them here.
 
     Progress, serial: one "capture k/N <name>" bar per capture (total N,
     positioned at k-1 while that capture decodes, so it reads as a single
@@ -391,6 +469,7 @@ def convert(
         raise ValueError(f"no track-*.twrf captures found in {named}")
     count = len(files)
     log.info("converting %d capture(s) into %s", count, out.name)
+    roll_call(files)
     workers = worker_count(jobs, files)
     passes: list[list[RawSector]] = []
     source_meta: list[dict] = []
@@ -413,7 +492,14 @@ def convert(
     from tapewyrm.buildinfo import host_build
 
     img = build_image(
-        passes, out, sources=source_meta, tw_commit=host_build().commit, progress=progress
+        passes,
+        out,
+        sources=source_meta,
+        tw_commit=host_build().commit,
+        best=best,
+        rank=rank,
+        vote=vote,
+        progress=progress,
     )
     log.info("converted %d capture(s) in %.1f s total", count, time.perf_counter() - started)
     return img

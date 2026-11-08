@@ -15,8 +15,10 @@ otherwise **stdlib-only**: no rich or click ([STYLE.md](../../STYLE.md) §2).
 |---|---|
 | `qiclib.types` | `RawSector`, `Segment`, `SegmentResult`, `FileEntry`, ... |
 | `qiclib.geometry` | Serpentine track geometry and the sector-ID coordinate algebra. |
-| `qiclib.place`, `qiclib.merge` | Sectors placed into segments by their own address; several passes merged. |
-| `qiclib.rs`, `qiclib.segment` | QIC-80 Reed-Solomon erasure decoding, per-segment correction. |
+| `qiclib.place`, `qiclib.merge` | Sectors placed into segments by their own address; several passes merged (`union`), or the best read of each track or segment chosen first (`select`). |
+| `qiclib.vote` | Best out of N: a sector no read got right rebuilt by byte-wise majority (CRC-checked), a segment that will not correct rebuilt RS column by column (parity-checked). |
+| `qiclib.mergelog` | `tw convert`'s per-track and per-segment account of the merge. |
+| `qiclib.rs`, `qiclib.segment` | QIC-80 Reed-Solomon erasure decoding, per-segment correction, and `rs.verify`: the spare-parity check that catches a CRC-good sector that is wrong. |
 | `qiclib.header` | Header segment: format parameter record and bad-sector map (QIC-80-MC Rev N §7), `locate_header`, `apply_bsm`. |
 | `qiclib.cartridge` + `profiles/cartridge/*.toml` | Which cartridge a header's geometry implies (QIC-40/80/3010/3020 lengths and widths, e.g. `qic-extra` = Verbatim MC3020EX QIC-Extra). |
 | `qiclib.volume` | One backup program's volume, read in three layers (DESIGN.md §7.8) by the submodules below. Nothing is re-exported from the package itself; import the submodule. |

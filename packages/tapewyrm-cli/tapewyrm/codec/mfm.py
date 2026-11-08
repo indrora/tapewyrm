@@ -328,6 +328,7 @@ def recover_sectors_from_bytes(
                     deleted=deleted,
                     id_at=id_at,
                     data_at=mark_at,
+                    data_crc=stored,
                 )
                 pending = None
                 pos = field_start + SECTOR_SIZE + CRC_LEN

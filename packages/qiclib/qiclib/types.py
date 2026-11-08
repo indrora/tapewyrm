@@ -41,6 +41,11 @@ class RawSector:
     # data field with no ID). Placement never needs them; cinnabar does.
     id_at: int | None = None
     data_at: int | None = None
+    # The data field's CRC as it was read off the tape (2 bytes, big-endian),
+    # whether or not it matched: what a byte-wise vote across several reads of
+    # the sector checks its result against (qiclib.vote). Set by
+    # tapewyrm.codec.mfm; None where the sector did not come from flux.
+    data_crc: int | None = None
 
     SIZE = 1024
 

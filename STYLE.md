@@ -61,7 +61,7 @@ Do not narrate what the code obviously does.
 ### 1.5 Prefer the standard library and existing helpers
 
 Reuse what the codebase already has (`qiclib.header`, `qiclib.volume.table`, `qiclib.place`,
-`qiclib.segment`, `tapewyrm_archive.twrf`, `tape.dump.drive_identity`, ...) before
+`qiclib.rs.verify`, `qiclib.vote`, `qiclib.segment`, `tapewyrm_archive.twrf`, `tape.dump.drive_identity`, ...) before
 writing a new helper. When two call sites do the same multi-step dance, factor
 it into one function both call.
 

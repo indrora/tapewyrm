@@ -206,7 +206,7 @@ since readers read version 2 alone (Section 9).
 | `sample_clock_hz`     | integer          | REQUIRED | 1 | Sample clock of the capturing device, Hz (72000000 on a Greaseweazle v4.1). |
 | `track`               | integer (signed) | REQUIRED | 1 | TPT of the pass, 0-based. `-1` means unknown (a probe capture that did not seek). |
 | `direction`           | string           | REQUIRED | 1 | `"forward"` or `"reverse"`: the serpentine direction of `track` (even forward, odd reverse). For a non-track probe, the direction of tape motion. |
-| `pass_id`             | integer          | REQUIRED | 1 | Writer-assigned pass number, u16 range. Distinguishes repeated passes over one track. `tw dump` writes the attempt number: `1`, or more when `--retries` re-read the track. |
+| `pass_id`             | integer          | REQUIRED | 1 | Writer-assigned pass number, u16 range. Distinguishes repeated passes over one track. `tw dump` writes the attempt number: `1`, or more when `--retries` or `--passes` read the track again. |
 | `utc`                 | string           | REQUIRED | 1 | Capture start time, ISO 8601 / [RFC3339] date-time with offset, e.g. `"2026-01-02T03:04:05+00:00"`. MAY be `""` if unknown. |
 | `tape_format`         | integer          | REQUIRED | 1 | Recording format code: 0 unknown, 1 QIC-40, 2 QIC-80, 3 QIC-3020, 4 QIC-3010. These are the Report Tape Status bits 0-3 values [QIC-117]. |
 | `segments_per_track`  | integer          | REQUIRED | 1 | Segments per track if known, else `0`. |
@@ -619,7 +619,10 @@ missing END only lowers confidence in the tail.
 7. A writer SHOULD name a Logical Forward track capture
    `track-NN.twrf`, where `NN` is the track number in decimal, zero-padded
    to at least two digits, and SHOULD place the captures of one tape in
-   one directory.
+   one directory. A writer that keeps more than one pass of a track
+   SHOULD name each `track-NN.P.twrf`, where `P` is its `pass_id` in
+   decimal, and SHOULD NOT reuse a `P` already present in the directory.
+   Both forms match `track-*.twrf`.
 8. A writer SHOULD keep a truncated capture rather than delete it.
 
 ### 8.2. Reader Requirements
@@ -853,7 +856,7 @@ once holds lines from every run.
 | Member         | JSON type       | Meaning |
 |----------------|-----------------|---------|
 | `track`        | integer         | Track number of the pass |
-| `path`         | string          | Path of the TWRF file as the writer named it |
+| `path`         | string          | Path of the kept TWRF file as the writer named it (`track-NN.twrf`, or `track-NN.P.twrf` with `--keep-all`) |
 | `bytes`        | integer         | Flux body length in bytes (excluding preamble and header) |
 | `seconds`      | number          | Wall-clock duration of the pass, s, 1 decimal |
 | `end_reason`   | string          | END reason name (Section 6.5), or `"none"` if no END |
@@ -868,7 +871,7 @@ once holds lines from every run.
 | `segments`     | integer or null | With `--check`: distinct segments seen in sector IDs |
 | `attempts`     | integer         | Passes made for this track (`--retries`); 1 without |
 | `kept`         | integer         | Which of those passes this line and the kept file describe |
-| `rejected`     | array           | The other passes, each `{"attempt": n, "reason": "..."}`: why that one was deleted |
+| `rejected`     | array           | The other passes, each `{"attempt": n, "reason": "..."}`: why that one was deleted (with `--keep-all`: why it was not picked; its file remains) |
 
 `tw dump` stops after a pass whose `end_reason` is not `EOT`, that does
 not verify, whose `index_pulses` falls below 0.9 x the best earlier pass,
@@ -884,12 +887,23 @@ verified, clean flux status, then more `index_pulses`, then fewer
 `missing_est`, then (with `--check`) more `good`. The other passes' files
 are deleted and listed in `rejected`; only the kept pass is judged by the
 stop rules. The kept file's header carries the attempt number as `pass_id`.
+
+With `--keep-all`, no pass is deleted: every pass is written to its own
+`track-NN.P.twrf` (Section 8.1 rule 7), numbered after the highest `P`
+already in the directory, partial captures of passes that raised
+included. `kept` and `path` then name the pass the rule above picked,
+`rejected` lists the others with why each was not picked, and their files
+remain. A failed pick gives way to a later pass that ranks at least as
+high, a clean one only to a later pass that ranks higher. `--passes N`
+implies `--keep-all` and reads each track at least N times whatever the
+outcome; `--retries` then allows more only while no pass is clean.
 These members are appended to the line, so a reader that knows only the
 older ones finds them where they were.
 
 `tw dump --no-clobber` reads the sidecar back: a track whose latest line is
-clean, and whose `track-NN.twrf` is present and at least `bytes` long, is
-skipped; any other listed track is read again, its earlier pass competing
+clean, whose file (by the name in `path`, looked up in the capture
+directory) is present and at least `bytes` long, and which has had at least
+`--passes` passes, is skipped; any other listed track is read again, its earlier pass competing
 with the new ones under the rule above and numbered before them.
 
 ## Appendix C. Change Log
