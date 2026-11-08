@@ -1,4 +1,4 @@
-# Development
+# Codebase overview
 
 This section is for working on Tapewyrm itself: the five Python packages, the
 Greaseweazle firmware graft and the device protocol that joins them. To use the
@@ -23,7 +23,7 @@ the voice of these pages. Coding assistants are told to read it too.
 | `tools/` | `package.py` (release bundle), `ihex.py` (pure-Python HEX merge), `clean.py` (removes build output). See [Building and testing](building.md). |
 | `docs/` | This site (MkDocs). `docs/spec/` holds the normative TWS file-format specifications; `docs/qic-standards/` holds the standards PDFs. |
 | `agents/` | The design record (`DESIGN.md`) and notes for coding assistants. Not published. Parts of `DESIGN.md` are out of date; where it and the code disagree, the code is right. |
-| `.github/workflows/` | CI: `packages.yml`, `contract.yml`, `firmware.yml`, `package.yml`. |
+| `.github/workflows/` | CI: `packages.yml`, `contract.yml`, `firmware.yml`, `package.yml`, and `docs.yml`, which builds this site and deploys it to GitHub Pages. |
 | `justfile` | Task recipes. See [Building and testing](building.md#just-recipes). |
 | `mkdocs.yml` | Site configuration and `nav`. Every page must appear in `nav`. |
 | `captures/` | Your own tape captures and images. Ignored by git, and so are `*.twrf`, `*.twti` and `*.twtz` anywhere in the tree. |

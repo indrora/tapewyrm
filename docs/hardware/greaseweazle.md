@@ -1,4 +1,4 @@
-# Greaseweazle v4.1
+# Interface (Greaseweazle v4.1)
 
 This page describes the Greaseweazle v4.1 as Tapewyrm uses it: the
 microcontroller, the 34-pin lines that carry QIC-117, the limits of the USB

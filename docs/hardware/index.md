@@ -1,4 +1,4 @@
-# Hardware
+# Hardware overview
 
 This section describes the hardware Tapewyrm talks to: the Greaseweazle v4.1
 board, the floppy-interface tape drives, and the cartridges they read. Use it

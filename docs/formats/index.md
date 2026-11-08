@@ -1,4 +1,4 @@
-# Formats
+# QIC standards
 
 This section summarises the QIC standards as far as Tapewyrm uses them, and
 the vendor structures that real backup software wrote on top of them. Each

@@ -50,10 +50,16 @@ validation:
     unrecognized_links: warn
 
 nav:
+  # Two levels show everywhere: the top bar (sections) and each section's
+  # direct PAGES. mkdocs-shadcn 0.12.2's mobile menu (bottom_sidebar.html)
+  # renders only a section's direct pages and drops nested groups; that is
+  # intentional here. Keep each section's page list short, and put deeper pages
+  # in the groups after them: the desktop sidebar shows those groups, the
+  # mobile menu doesn't, and each landing page links down to them.
   - Home:
       - Tapewyrm: index.md
-      - Getting started:
-          - Start here: guide/index.md
+      - Getting started: guide/index.md
+      - Guide steps:
           - Install the tools: guide/install.md
           - Flash the Greaseweazle: guide/flash-greaseweazle.md
           - Wire up a drive: guide/wiring.md
@@ -61,8 +67,11 @@ nav:
           - Troubleshooting: guide/troubleshooting.md
           - Keep captures private: guide/privacy.md
   - Software:
-      - tw:
-          - tw overview: tw/index.md
+      - Software overview: software.md
+      - tw: tw/index.md
+      - qicsilver: qicsilver/index.md
+      - cinnabar: cinnabar/index.md
+      - tw reference:
           - tw info: tw/info.md
           - tw drive: tw/drive.md
           - tw dump: tw/dump.md
@@ -71,32 +80,32 @@ nav:
           - tw flash and tw dfu: tw/flash.md
           - Drive profiles: tw/profiles.md
           - Configuration and logging: tw/config.md
-      - qicsilver:
-          - qicsilver overview: qicsilver/index.md
+      - qicsilver reference:
           - qicsilver identify: qicsilver/identify.md
           - qicsilver extract: qicsilver/extract.md
           - qicsilver inspect: qicsilver/inspect.md
           - qicsilver tar: qicsilver/tar.md
           - Cartridge and volume profiles: qicsilver/profiles.md
           - Manual read overrides: qicsilver/overrides.md
-      - cinnabar:
-          - cinnabar overview: cinnabar/index.md
+      - cinnabar reference:
           - Lanes: cinnabar/lanes.md
           - Passes and merged reads: cinnabar/passes.md
           - Themes and settings: cinnabar/settings.md
   - Hardware:
-      - hardware/index.md
-      - Greaseweazle v4.1: hardware/greaseweazle.md
+      - Hardware overview: hardware/index.md
+      - Interface (Greaseweazle v4.1): hardware/greaseweazle.md
+      - Tested drives: hardware/drives/index.md
+      - Cartridges: hardware/cartridges.md
       - Drives:
-          - Supported drives: hardware/drives/index.md
           - Colorado Jumbo 350: hardware/drives/colorado-350.md
           - Colorado 1400: hardware/drives/colorado-1400.md
           - TEAC FT-3010: hardware/drives/teac-ft3010.md
           - Conner and Iomega: hardware/drives/untested.md
-      - Cartridges: hardware/cartridges.md
-  - Development:
-      - Formats:
-          - Formats overview: formats/index.md
+  - Formats:
+      - QIC standards: formats/index.md
+      - Vendor extensions: formats/vendor/index.md
+      - TWS specifications: spec/README.md
+      - Standards:
           - QIC-117 command interface: formats/qic-117.md
           - QIC-80-MC recording format: formats/qic-80-mc.md
           - QIC-3010 and QIC-3020: formats/qic-3010-3020.md
@@ -105,24 +114,25 @@ nav:
           - Volume table: formats/volume-table.md
           - QIC-113 file sets: formats/qic-113.md
           - QIC-122 compression: formats/qic-122.md
-          - Vendor formats:
-              - About vendor formats: formats/vendor/index.md
-              - Colorado (CMS) backup: formats/vendor/cms.md
-              - MTN backup: formats/vendor/mtn.md
           - QIC standards library: formats/standards.md
-      - Codebase:
-          - Codebase overview: dev/index.md
-          - Building and testing: dev/building.md
-          - tapewyrm-cli: dev/tapewyrm-cli.md
+      - Vendor formats:
+          - Colorado (CMS) backup: formats/vendor/cms.md
+          - MTN backup: formats/vendor/mtn.md
+      - TWS documents:
+          - TWS-1 TWRF: spec/twrf.md
+          - TWS-2 TWTI/TWTZ: spec/twti.md
+          - TWS-3 TWVL: spec/twvl.md
+  - Development:
+      - Codebase overview: dev/index.md
+      - Building and testing: dev/building.md
+      - Host software: dev/host-software.md
+      - Firmware: dev/firmware.md
+      - Packages:
+          - tapewyrm-cli (tw): dev/tapewyrm-cli.md
           - tapewyrm-archive: dev/tapewyrm-archive.md
           - qiclib: dev/qiclib.md
           - qicsilver: dev/qicsilver.md
           - cinnabar: dev/cinnabar.md
-          - Firmware: dev/firmware.md
-          - Device protocol: dev/protocol.md
           - Writing a volume profile: dev/volume-profiles.md
-      - Specifications:
-          - Specifications overview: spec/README.md
-          - TWS-1 TWRF: spec/twrf.md
-          - TWS-2 TWTI/TWTZ: spec/twti.md
-          - TWS-3 TWVL: spec/twvl.md
+      - Firmware internals:
+          - Device protocol: dev/protocol.md

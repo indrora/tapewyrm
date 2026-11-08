@@ -1,4 +1,4 @@
-# Vendor formats
+# Vendor extensions
 
 The QIC standards fix the recording, the header and the first 57 bytes of a
 volume table entry. Everything after that, and often the volume contents

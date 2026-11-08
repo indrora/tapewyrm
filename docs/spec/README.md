@@ -1,4 +1,4 @@
-# Tapewyrm Specifications (TWS)
+# TWS specifications
 
 The TWS series defines the files Tapewyrm writes. Each one stands alone: with
 it, you can read or write the format without reading Tapewyrm's code. Where a
