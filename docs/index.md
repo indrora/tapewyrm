@@ -43,7 +43,7 @@ hardware. Every later step runs offline, on any machine.
 
 | If you want to | Read |
 |---|---|
-| Set up the tools and read your first tape | [Guide](guide/index.md) |
+| Set up the tools and read your first tape | [Getting started](guide/index.md) |
 | Look up a `tw` command or option | [tw reference](tw/index.md) |
 | Get files out of a tape image | [qicsilver reference](qicsilver/index.md) |
 | Look at what is on the tape, track by track | [cinnabar](cinnabar/index.md) |

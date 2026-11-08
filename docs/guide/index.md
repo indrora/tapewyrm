@@ -1,4 +1,4 @@
-# Guide
+# Getting started
 
 These pages take you from a QIC-117 floppy-tape drive on the bench to a tar
 file of the backup on the tape. They assume a Greaseweazle v4.1 and a drive

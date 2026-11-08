@@ -73,7 +73,7 @@ The full documentation is in [`docs/`](docs/index.md) and builds as a site with
 
 | | |
 |---|---|
-| [Guide](docs/guide/index.md) | Install, flash, wire up a drive, read a tape, troubleshoot. |
+| [Getting started](docs/guide/index.md) | Install, flash, wire up a drive, read a tape, troubleshoot. |
 | [tw](docs/tw/index.md), [qicsilver](docs/qicsilver/index.md), [cinnabar](docs/cinnabar/index.md) | Command reference for each tool. |
 | [Hardware](docs/hardware/index.md) | The Greaseweazle, tested drives and their quirks, cartridges. |
 | [Formats](docs/formats/index.md) | The QIC standards as Tapewyrm uses them, and vendor backup formats. |
