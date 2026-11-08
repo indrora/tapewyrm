@@ -26,8 +26,22 @@ jobs:
         working-directory: packages/${{ matrix.package }}
     steps:
       - uses: actions/checkout@v4
+      # uv's cache, saved to the GitHub Actions cache. setup-uv caches by
+      # default, but its defaults don't fit this matrix:
+      # - The default key hashes every **/uv.lock, so all five legs share one
+      #   key: the first leg to finish saves its (small) cache and the rest
+      #   "hit" it, never saving their own -- cinnabar re-downloaded ~300 MB
+      #   of PySide6 every run. cache-suffix + a per-package lockfile give
+      #   each leg its own key, invalidated when that package's lock changes.
+      # - prune-cache (default true) runs `uv cache prune --ci`, which drops
+      #   every wheel downloaded from PyPI before saving; keep them instead.
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-suffix: ${{ matrix.package }}
+          cache-dependency-glob: packages/${{ matrix.package }}/uv.lock
+          prune-cache: false
       - name: Sync
         run: uv sync --extra dev
       # PySide6's QtGui links libEGL / libGL / libxkbcommon at import time,
