@@ -1,0 +1,59 @@
+name: docs
+
+# Builds the MkDocs site in docs/ (mkdocs-shadcn theme; STYLE.md section 4) and
+# deploys it to GitHub Pages. The build runs --strict, so a broken link or a page
+# missing from mkdocs.yml's nav fails CI on pull requests too; only pushes to
+# main deploy. Versions match the justfile's docs-build recipe -- keep them in
+# step.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push supersedes a queued one, but never
+# cancel a deployment that is already running.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # mkdocs-shadcn's git mixin reads page history for dates; a shallow
+          # clone would give every page the same date.
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build site (strict)
+        run: >-
+          uvx --from mkdocs==1.6.1 --with mkdocs-shadcn==0.12.2 --with pygments
+          mkdocs build --strict
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

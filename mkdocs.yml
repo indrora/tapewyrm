@@ -4,6 +4,7 @@
 # STYLE.md section 4.
 site_name: Tapewyrm
 site_description: Recover QIC-40, QIC-80, QIC-3010 and QIC-3020 floppy tapes with a Greaseweazle v4.1.
+site_url: https://indrora.github.io/tapewyrm/
 docs_dir: docs
 site_dir: site
 strict: true
