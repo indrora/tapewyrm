@@ -69,9 +69,15 @@ reads share get the file name added). Opening any one capture of a dump
 opens all of them. Captures whose header names no track (probe captures,
 track -1) are the passes of one **Unknown track**. `--pass P` opens pass
 P of the `--track` (or `--pass best`, the default).
+Only one capture track decodes at a time: switching tracks or passes pauses
+the one you leave, and it picks up where it stopped when you come back.
+Picking another track or pass mid-load cancels that load. **Stop** (Esc)
+cancels the load in flight and pauses decoding the track on screen; the
+button then turns into **Resume**. Closing the window stops everything
+before it goes.
 Keys: Left / Right segment, PageUp / PageDown track, Home / End, Cmd/Ctrl +
-and - zoom, 0 fit segment, Shift+0 fit track; the wheel zooms, dragging
-pans.
+and - zoom, 0 fit segment, Shift+0 fit track, Esc stop; the wheel zooms,
+dragging pans.
 
 ```sh
 # from the repository root

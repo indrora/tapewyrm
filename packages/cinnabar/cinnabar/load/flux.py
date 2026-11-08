@@ -284,10 +284,6 @@ class FluxTrack:
 
         self.sectors_by_segment: dict[int, list[RawSector]] = {}
         self._listeners: list[Callable[[int], None]] = []
-        with progress.task(f"queueing {len(self.windows)} segments", total=None):
-            self.decoder = TrackDecoder(
-                intervals, self.sample_hz, self.physical, bitcell_s, self.windows
-            )
         self._annotate_lock = threading.Lock()  # see _reannotate
         self._base_detail = (
             ("file", path.name),
@@ -311,9 +307,21 @@ class FluxTrack:
             self,
             pass_index=pass_index,
         )
-        self.decoder.on_result(self._landed)
-        with progress.task("starting decode workers", total=None):
-            self.decoder.submit_all(0)
+        # The decoder last: from here on this object holds shared memory, and
+        # a load cancelled (cinnabar.ui.progress.Cancelled, raised from the
+        # next progress report) or failed before the track is handed out
+        # would leave nobody to close it. So close it here and re-raise.
+        with progress.task(f"queueing {len(self.windows)} segments", total=None):
+            self.decoder = TrackDecoder(
+                intervals, self.sample_hz, self.physical, bitcell_s, self.windows
+            )
+        try:
+            self.decoder.on_result(self._landed)
+            with progress.task("starting decode workers", total=None):
+                self.decoder.submit_all(0)
+        except BaseException:
+            self.decoder.close()
+            raise
 
     # -- the Track.decoder protocol ------------------------------------------
 
@@ -325,6 +333,16 @@ class FluxTrack:
 
     def pending(self) -> int:
         return self.decoder.pending()
+
+    def pause(self) -> None:
+        self.decoder.pause()
+
+    def resume(self, focus: int = 0) -> None:
+        self.decoder.resume(focus)
+
+    @property
+    def paused(self) -> bool:
+        return self.decoder.paused
 
     def wait(self) -> None:
         self.decoder.wait()
@@ -625,7 +643,18 @@ def open_captures(
                 f"{tape.label(number)} has {len(reads)} read(s); there is no pass index {pass_index}"
             )
         key = (number, pass_index)
-        if key not in open_tracks:
+        # One flux track decodes at a time. The decode pool is shared and
+        # first come, first served, so a track left decoding would hold the
+        # new one's segments up behind its own. Pause the others before the
+        # new one queues; a paused track resumes when it is loaded again.
+        # A volume does not decode on the pool, so loading one (the branch
+        # above) leaves the track that feeds it running.
+        for other_key, other in open_tracks.items():
+            if other_key != key:
+                other.pause()
+        if key in open_tracks:
+            open_tracks[key].resume()
+        else:
             if len(open_tracks) >= 2:  # a track's intervals are big; keep two
                 oldest = next(iter(open_tracks))
                 open_tracks.pop(oldest).close()
@@ -634,13 +663,18 @@ def open_captures(
             )
         return open_tracks[key].track
 
+    def close() -> None:
+        """Close every open track's decoder: cancel its queue, free its shared memory."""
+        while open_tracks:
+            open_tracks.popitem()[1].close()
+
     tape_detail = (
         ("source", source),
         ("captures", str(len(paths))),
         ("drive", f"vendor {first.drive_vendor_id}" if first.drive_vendor_id else "(unknown)"),
         ("tape format", first.tape_format.name),
     )
-    tape = Tape(source, "TWRF", numbers, load, tape_detail, passes=passes)
+    tape = Tape(source, "TWRF", numbers, load, tape_detail, passes=passes, on_close=close)
     return tape
 
 

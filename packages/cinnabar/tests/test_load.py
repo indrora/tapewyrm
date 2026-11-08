@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from tapewyrm_archive.progress import NULL_PROGRESS
 
@@ -464,3 +465,66 @@ def test_compressed_volume_decompresses_into_files(tmp_path: Path):
     )
     assert result.exit_code == 0, result.output
     assert "Directory Section" in result.output
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "reading",
+        "parsing flux stream",
+        "detecting the physical format",
+        "queueing",
+        "starting decode workers",  # the decoder exists by now: FluxTrack must close it
+    ],
+)
+def test_a_load_cancelled_at_any_stage_raises_and_leaves_no_shared_memory(
+    qic80_capture: Path, monkeypatch, stage: str
+):
+    from multiprocessing import shared_memory
+
+    from cinnabar.ui.progress import Cancellable, Cancelled
+
+    real = shared_memory.SharedMemory
+    made: list[str] = []
+
+    def recording(*args, **kwargs):
+        shm = real(*args, **kwargs)
+        made.append(shm.name)
+        return shm
+
+    monkeypatch.setattr(shared_memory, "SharedMemory", recording)
+
+    class CancelAt(Cancellable):
+        def task(self, description, total=None, unit=""):
+            if description.startswith(stage):
+                self.cancel()  # as the window's Stop would, between two reports
+            return super().task(description, total, unit)
+
+    tape = open_path(qic80_capture)
+    with pytest.raises(Cancelled):
+        tape.load(0, CancelAt(NULL_PROGRESS))
+    assert bool(made) == (stage == "starting decode workers")
+    for name in made:
+        with pytest.raises(FileNotFoundError):
+            real(name=name)
+    # Not a dead tape: the next load starts afresh.
+    track = tape.load(0, NULL_PROGRESS)
+    tape.close()
+    assert track.decoder.decoder.closed
+
+
+def test_loading_one_read_pauses_the_others_and_closing_the_tape_closes_all(
+    qic80_capture: Path, tmp_path: Path
+):
+    """One flux track decodes at a time: the pool is first come, first served."""
+    from tests.conftest import keep_all_dump
+
+    keep_all_dump(qic80_capture, tmp_path / "dump", passes=3, best=2)
+    tape = open_path(tmp_path / "dump")
+    first = tape.load(0, NULL_PROGRESS, 0)
+    second = tape.load(0, NULL_PROGRESS, 1)
+    assert first.decoder.paused and not second.decoder.paused
+    assert tape.load(0, NULL_PROGRESS, 0) is first  # cached, and resumed
+    assert not first.decoder.paused and second.decoder.paused
+    tape.close()
+    assert first.decoder.decoder.closed and second.decoder.decoder.closed

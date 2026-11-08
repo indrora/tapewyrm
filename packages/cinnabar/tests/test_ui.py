@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -51,7 +53,7 @@ class _Window:
 
     def settle(self):
         """Wait out the pending load; the track it landed."""
-        while self.main.track is None or self.main._pending is not None:
+        while self.main.track is None or self.main._job is not None:
             self.app.processEvents()
             self.main._pool.waitForDone(50)
         self.tracks.append(self.main.track)
@@ -317,3 +319,114 @@ def test_stack_reports_its_height_and_scrolls_on_drag(image_path: Path):
     _, vb, _ = stack._lanes[0]
     vb._scroll(-7)  # what a 7 px upward drag hands the window
     assert scrolled == [-7]
+
+
+def _slow_parse(monkeypatch, times: int = 1) -> threading.Event:
+    """Make the next ``times`` flux parses report progress for ten seconds first, like a huge capture.
+
+    Returns an Event set once one is under way, so a test can act mid-load
+    without racing the worker.
+    """
+    from cinnabar.load import flux
+
+    real = flux.parse_body
+    under_way = threading.Event()
+    left = [times]
+
+    def parse(blob, *, progress):
+        if left[0] > 0:
+            left[0] -= 1
+            with progress.task("parsing flux stream", total=1000) as bar:
+                under_way.set()
+                for i in range(1000):
+                    bar.update(i)
+                    time.sleep(0.01)
+        return real(blob, progress=progress)
+
+    monkeypatch.setattr(flux, "parse_body", parse)
+    return under_way
+
+
+def test_closing_mid_load_cancels_the_load_instead_of_outliving_the_window(
+    qic80_capture: Path, monkeypatch, caplog
+):
+    """The crash this guards against: closing during a load let it run on into interpreter exit.
+
+    It then emitted into QObjects PySide had deleted ("Signal source has
+    been deleted") and leaked its decoder's shared memory.
+    """
+    under_way = _slow_parse(monkeypatch)
+    with _Window(open_path(qic80_capture), 0) as win:
+        assert under_way.wait(10)
+        t0 = time.monotonic()
+        win.main.close()
+        # Stopped at its next report, not after its ten seconds of "parsing".
+        assert time.monotonic() - t0 < 8
+        assert win.main._pool.activeThreadCount() == 0
+    assert "failed to load" not in caplog.text
+
+
+def test_choosing_another_pass_mid_load_cancels_it_and_opens_that_pass(
+    qic80_capture: Path, tmp_path: Path, monkeypatch
+):
+    from tests.conftest import keep_all_dump
+
+    keep_all_dump(qic80_capture, tmp_path / "dump", passes=3, best=2)
+    under_way = _slow_parse(monkeypatch)  # the first load only
+    with _Window(open_path(tmp_path / "dump"), 0) as win:
+        assert under_way.wait(10)
+        t0 = time.monotonic()
+        win.main.open_track(0, 2)  # used to be ignored while a load was pending
+        track = win.settle()
+        assert time.monotonic() - t0 < 8
+        assert track.pass_index == 2 and win.main.pass_box.currentIndex() == 2
+    assert track.decoder.decoder.closed  # closing the window closed the tape's tracks
+
+
+def test_stop_cancels_a_load_in_flight(qic80_capture: Path, monkeypatch):
+    under_way = _slow_parse(monkeypatch)
+    with _Window(open_path(qic80_capture), 0) as win:
+        assert under_way.wait(10)
+        win.main.stop()
+        assert win.main._pool.waitForDone(8000)
+        win.app.processEvents()
+        assert win.main._job is None and win.main.track is None
+        assert win.main.statusBar().currentMessage() == "Stopped"
+
+
+def test_stop_turns_into_resume_while_the_shown_track_is_paused(image_path: Path):
+    class Decoding:
+        """Stands in for a capture's decoder, with segments left to decode."""
+
+        paused = False
+        left = 3
+
+        def pending(self) -> int:
+            return self.left
+
+        def pause(self) -> None:
+            self.paused = True
+
+        def resume(self, focus: int = 0) -> None:
+            self.paused = False
+
+        def focus(self, index: int) -> None:
+            pass
+
+    with _Window(open_path(image_path), 0) as win:
+        main, track = win.main, win.settle()
+        track.decoder = stub = Decoding()
+        try:
+            main._status()
+            assert main.act_stop.isVisible() and main.act_stop.isEnabled()
+            assert not main.act_resume.isVisible()
+            main.stop()
+            assert stub.paused and main.act_resume.isVisible() and not main.act_stop.isVisible()
+            assert main.progress.format() == "paused %v/%m"
+            main.resume()
+            assert not stub.paused and main.act_stop.isVisible()
+            stub.left = 0
+            main._status()
+            assert main.act_stop.isVisible() and not main.act_stop.isEnabled()
+        finally:
+            track.decoder = None  # the image loader caches this Track

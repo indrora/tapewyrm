@@ -11,17 +11,38 @@ through a signal). ``wait`` blocks until everything has landed and every
 listener has run, for ``--dump`` and the tests.
 
 One pool is shared by every decoder in the process (one per track being
-viewed), sized to the machine; the shared-memory blocks are unlinked when
-a decoder closes or the interpreter exits.
+viewed), sized to the machine, and it runs jobs first come, first served.
+So a decoder can be paused: ``pause`` cancels the segments it has queued
+and not started (the ones decoding finish and land), so another track's
+segments are not stuck behind them, and ``resume`` queues the rest again,
+nearest a focus first. The window pauses a track it leaves, and its Stop
+button pauses the track it shows.
+
+``close`` cancels for good and frees the shared memory. A
+:class:`weakref.finalize` frees it too when the decoder is garbage
+collected or the interpreter exits, whichever comes first. That is the
+standard library's tool for this: it runs once, however it is reached,
+and unlike an ``atexit.register(self.close)`` it does not keep the
+decoder alive. The atexit entry used to hold every decoder ever opened,
+with all its decoded segments, until exit. It also ran as soon as it was
+registered, half way through ``__init__``, when the window closed during
+a load. ``close`` then failed on a missing attribute and the block leaked
+(``resource_tracker: There appear to be 1 leaked shared_memory objects``).
+
+Once closed, a decoder calls no listener and queues nothing. A result that
+lands after ``close`` (its segment was already decoding) is dropped, so
+nothing is emitted to a window that is going away.
 """
 
 from __future__ import annotations
 
 import atexit
+import functools
 import logging
 import multiprocessing
 import os
 import threading
+import weakref
 from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 from multiprocessing import shared_memory
@@ -64,6 +85,15 @@ def warm_up() -> None:
         f.result()
 
 
+def _release(shm: shared_memory.SharedMemory) -> None:
+    """Free a decoder's shared memory: its :class:`weakref.finalize` callback, so it must not refer to the decoder."""
+    shm.close()
+    try:
+        shm.unlink()
+    except FileNotFoundError:  # already gone
+        pass
+
+
 class TrackDecoder:
     def __init__(
         self,
@@ -79,39 +109,68 @@ class TrackDecoder:
         self.sample_hz = sample_hz
         self.windows = windows
         self._count = len(intervals)
-        self._shm = shared_memory.SharedMemory(create=True, size=max(intervals.nbytes, 4))
-        np.ndarray(intervals.shape, dtype=np.int32, buffer=self._shm.buf)[:] = intervals
-        atexit.register(self.close)
-        # Interval index at each time: cumulative ticks, searched per window.
-        self._cum = np.cumsum(intervals.astype(np.int64))
+        # Every attribute close() and the callbacks touch is set before the
+        # shared memory exists, so there is never a half-built decoder
+        # holding a block that nothing will free (see the module docstring).
         self._futures: dict[int, Future] = {}
         self._results: dict[int, jobs.SegmentResult] = {}
         self._listeners: list[Callable[[jobs.SegmentResult], None]] = []
         self._lock = threading.Lock()
-        # Indexes every listener has finished with. A result is stored in
-        # ``_results`` before its listeners run, so "every result is in" is
-        # not "every segment has been handled": ``wait`` used to return on the
-        # first, and its caller then raced the pool's completion thread over
-        # the last few segments (the window identified the tape on the main
-        # thread while the header segment was still being annotated on the
-        # other, and that segment came up with no logical lanes).
-        self._delivered: set[int] = set()
-        self._delivered_cv = threading.Condition()
+        # Indexes whose job is over: landed and every listener has run with
+        # it, or failed. A result is stored in ``_results`` before its
+        # listeners run, so "every result is in" is not "every segment has
+        # been handled". ``wait`` used to return on the first, and its caller
+        # then raced the pool's completion thread over the last few segments.
+        # (The window identified the tape on the main thread while the header
+        # segment was still being annotated on the other, and that segment
+        # came up with no logical lanes.) The condition shares ``_lock``.
+        self._settled: set[int] = set()
+        self._settled_cv = threading.Condition(self._lock)
         self._closed = False
+        self._paused = False
+        # Interval index at each time: cumulative ticks, searched per window.
+        self._cum = np.cumsum(intervals.astype(np.int64))
+        self._shm = shared_memory.SharedMemory(create=True, size=max(intervals.nbytes, 4))
+        self._release = weakref.finalize(self, _release, self._shm)
+        np.ndarray(intervals.shape, dtype=np.int32, buffer=self._shm.buf)[:] = intervals
 
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for f in self._futures.values():
+        """Cancel every queued segment, free the shared memory, call no listener again. Idempotent."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            futures = list(self._futures.values())
+            self._settled_cv.notify_all()  # a wait() in progress returns
+        for f in futures:
             f.cancel()
-        try:
-            self._shm.close()
-            self._shm.unlink()
-        except FileNotFoundError:
-            pass
+        # A segment already decoding attached the block by name in its own
+        # process; unlinking here leaves that mapping valid (POSIX shm_unlink).
+        self._release()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def pause(self) -> None:
+        """Cancel the segments not yet started; the ones decoding finish and land. ``resume`` restarts."""
+        with self._lock:
+            self._paused = True
+            for i in [i for i, f in self._futures.items() if f.cancel()]:
+                del self._futures[i]
+            self._settled_cv.notify_all()  # a wait() no longer waits for those
+
+    def resume(self, focus: int = 0) -> None:
+        """Queue every segment that has not landed again, nearest ``focus`` first."""
+        with self._lock:
+            self._paused = False
+        self.submit_all(focus)
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     # -- jobs --------------------------------------------------------------
 
@@ -141,32 +200,39 @@ class TrackDecoder:
     def result(self, index: int) -> jobs.SegmentResult | None:
         return self._results.get(index)
 
-    def _done(self, fut: Future) -> None:
+    def _done(self, index: int, fut: Future) -> None:
         if fut.cancelled():
-            return
+            return  # focus or pause took it out of _futures; close does not care
+        res: jobs.SegmentResult | None = None
         try:
-            res: jobs.SegmentResult = fut.result()
+            res = fut.result()
         except Exception:  # noqa: BLE001 -- a broken pool; the segment stays pending
-            log.exception("decode job failed")
-            return
-        with self._lock:
-            self._results[res.index] = res
+            if not self._closed:  # after close, a vanished block is expected
+                log.exception("decode job for segment %d failed", index)
         try:
+            if res is None:
+                return
+            with self._lock:
+                if self._closed:
+                    return
+                self._results[index] = res
             for listener in self._listeners:
                 listener(res)
         finally:
-            with self._delivered_cv:
-                self._delivered.add(res.index)
-                self._delivered_cv.notify_all()
+            with self._lock:
+                self._settled.add(index)
+                self._settled_cv.notify_all()
 
     def submit_all(self, focus: int = 0) -> None:
         order = sorted(range(len(self.windows)), key=lambda i: abs(i - focus))
         with self._lock:
+            if self._closed or self._paused:
+                return
             for i in order:
                 if i in self._results or i in self._futures:
                     continue
                 fut = pool().submit(jobs.run, self._job(i))
-                fut.add_done_callback(self._done)
+                fut.add_done_callback(functools.partial(self._done, i))
                 self._futures[i] = fut
 
     def focus(self, index: int) -> None:
@@ -183,18 +249,14 @@ class TrackDecoder:
             return sum(1 for i in range(len(self.windows)) if i not in self._results)
 
     def wait(self) -> None:
-        """Block until every segment has landed and its listeners have run with it."""
-        while True:
-            with self._lock:
-                futs = [f for i, f in self._futures.items() if i not in self._results]
-            if not futs:
-                break
-            for f in futs:
-                try:
-                    f.result()
-                except Exception:  # noqa: BLE001 -- logged in _done
-                    pass
-        with self._lock:
-            landed = set(self._results)
-        with self._delivered_cv:
-            self._delivered_cv.wait_for(lambda: self._delivered >= landed)
+        """Block until every queued segment has been handled: landed with its listeners run, or failed.
+
+        Returns at once when closed. Segments a pause cancelled are not
+        waited for, since they are no longer queued. (This used to wait on
+        each future in turn and loop until every index had a result, which
+        spun for ever on a job that had failed.)
+        """
+        with self._settled_cv:
+            self._settled_cv.wait_for(
+                lambda: self._closed or all(i in self._settled for i in self._futures)
+            )

@@ -636,6 +636,15 @@ class Tape:
     # loader's: pass_id, then file name). A track absent here, or with one
     # read, has nothing to choose between.
     passes: dict[int, tuple[Pass, ...]] = field(default_factory=dict)
+    # Frees what the loader holds open (a flux tape: every cached track's
+    # decoder and its shared memory). The window calls it when it closes
+    # or opens another file. It need not be final: a later load opens
+    # afresh. None: nothing to free (an image).
+    on_close: Callable[[], None] | None = None
+
+    def close(self) -> None:
+        if self.on_close is not None:
+            self.on_close()
 
     def label(self, number: int) -> str:
         if number in self.labels:

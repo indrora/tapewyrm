@@ -17,10 +17,18 @@ the lanes only; the chrome stays the platform's.
 Keys: Left / Right step a segment, PageUp / PageDown change track,
 Home / End go to the track's ends, Cmd/Ctrl + and - zoom, 0 fits a
 segment, Shift+0 the track. The mouse wheel zooms and dragging pans
-(pyqtgraph's defaults). A track is loaded off the main thread, with a
-busy cursor and the status bar saying so; a capture's segments then land
-one by one (``Track.decoder``) and the lanes redraw a few times a second
-while the status bar's progress bar counts them.
+(pyqtgraph's defaults). A track is loaded off the main thread, with the
+status bar saying so; a capture's segments then land one by one
+(``Track.decoder``) and the lanes redraw a few times a second while the
+status bar's progress bar counts them.
+
+Stopping: Esc (or the toolbar's Stop) cancels the load in flight, and the
+window stays on the track it shows. It also pauses that track's decoding,
+and the button turns into Resume. Picking another track or pass while one
+is loading cancels that load and starts the new one: the latest request
+wins, and only one load runs at a time (see "background jobs" below).
+Closing the window cancels and waits for whatever is running before Qt
+deletes the objects the workers report to.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
@@ -53,14 +62,17 @@ from cinnabar.ui import palette
 from cinnabar.ui.details import DetailsPanel
 from cinnabar.ui.lanes import LaneStack, one_line
 from cinnabar.ui.overview import Overview
-from cinnabar.ui.progress import QtProgress
+from cinnabar.ui.progress import Cancellable, Cancelled, QtProgress
 
 log = logging.getLogger(__name__)
 
 
 class _LoadSignals(QObject):
+    # Every job emits exactly one of these; the window's handler for each
+    # starts with _job_ended (see MainWindow's "background jobs").
     done = Signal(object)  # Track
     failed = Signal(str)
+    cancelled = Signal()
 
 
 class _DecodeSignals(QObject):
@@ -70,21 +82,31 @@ class _DecodeSignals(QObject):
 
 
 class _Load(QRunnable):
-    """Loads one track (one of its passes; None: the default) off the main thread, reporting through ``progress``."""
+    """Loads one track (one of its passes; None: the default) off the main thread, reporting through ``progress``.
+
+    ``progress`` is the job's :class:`Cancellable`: cancelling it makes the
+    load raise :class:`Cancelled` at its next progress report.
+    """
 
     def __init__(
-        self, tape: Tape, number: int, pass_index: int | None, progress: QtProgress
+        self, tape: Tape, number: int, pass_index: int | None, progress: Cancellable
     ) -> None:
         super().__init__()
         self.tape, self.number, self.pass_index, self.progress = tape, number, pass_index, progress
         self.signals = _LoadSignals()
 
     def run(self) -> None:
+        # Cancelled is a BaseException, so it is caught by name, before Exception.
         try:
-            self.signals.done.emit(self.tape.load(self.number, self.progress, self.pass_index))
+            track = self.tape.load(self.number, self.progress, self.pass_index)
+        except Cancelled:
+            log.info("loading track %d cancelled", self.number)
+            self.signals.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 -- shown in the window, logged with trace
             log.exception("track %d failed to load", self.number)
             self.signals.failed.emit(f"track {self.number}: {exc}")
+        else:
+            self.signals.done.emit(track)
 
 
 class _WarmUp(QRunnable):
@@ -102,12 +124,13 @@ class _WarmUp(QRunnable):
 class _OpenSignals(QObject):
     done = Signal(object)  # Tape
     failed = Signal(str)
+    cancelled = Signal()
 
 
 class _Open(QRunnable):
     """Opens a file off the main thread (a TWTZ decompresses, a directory reads headers)."""
 
-    def __init__(self, path: Path, progress: QtProgress) -> None:
+    def __init__(self, path: Path, progress: Cancellable) -> None:
         super().__init__()
         self.path, self.progress = path, progress
         self.signals = _OpenSignals()
@@ -116,10 +139,15 @@ class _Open(QRunnable):
         from cinnabar.load import open_path
 
         try:
-            self.signals.done.emit(open_path(self.path, self.progress))
+            tape = open_path(self.path, self.progress)
+        except Cancelled:
+            log.info("opening %s cancelled", self.path)
+            self.signals.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 -- a bad file is a dialog, not a crash
             log.exception("%s failed to open", self.path)
             self.signals.failed.emit(f"{self.path}\n\n{exc}")
+        else:
+            self.signals.done.emit(tape)
 
 
 def _icon(theme_name: str, fallback: QStyle.StandardPixmap, style: QStyle) -> QIcon:
@@ -134,7 +162,13 @@ class MainWindow(QMainWindow):
         self.tape = tape
         self.track: Track | None = None
         self._pool = QThreadPool.globalInstance()
-        self._pending: int | None = None
+        # The background job in flight (an open or a track load), by its
+        # cancellation token; None when idle. See "background jobs".
+        self._job: Cancellable | None = None
+        self._next: Callable[[], None] | None = None  # the request waiting for it to wind down
+        self._opening = False  # the job in flight is an open: track requests wait for the new tape
+        self._wanted: int | None = None  # the track last asked for, for stepping while it loads
+        self._closing = False
         self._decode_signals = _DecodeSignals()
         self._decode_signals.landed.connect(self._segment_landed)
         self._dirty = False
@@ -223,6 +257,23 @@ class MainWindow(QMainWindow):
         self.act_quit = action(
             "&Quit", self.close, shortcut=sk.Quit, role=QAction.MenuRole.QuitRole
         )
+        # Stop and Resume share the toolbar slot: _status shows one or the
+        # other. Esc stops, as in a browser; Resume has no key, so a stray
+        # Esc never starts work.
+        self.act_stop = action(
+            "&Stop",
+            self.stop,
+            icon=_icon("process-stop", sp.SP_BrowserStop, st),
+            shortcut=QKeySequence(Qt.Key.Key_Escape),
+        )
+        self.act_stop.setToolTip("Stop loading, and pause decoding this track (Esc)")
+        self.act_resume = action(
+            "&Resume decoding",
+            self.resume,
+            icon=_icon("media-playback-start", sp.SP_MediaPlay, st),
+        )
+        self.act_resume.setToolTip("Resume decoding this track's segments")
+        self.act_resume.setVisible(False)
 
         self.act_zoom_in = action(
             "Zoom &in",
@@ -298,6 +349,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_quit)
 
         view = bar.addMenu("&View")
+        view.addAction(self.act_stop)
+        view.addAction(self.act_resume)
+        view.addSeparator()
         view.addAction(self.act_zoom_in)
         view.addAction(self.act_zoom_out)
         view.addAction(self.act_fit_segment)
@@ -342,6 +396,8 @@ class MainWindow(QMainWindow):
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.addToolBar(bar)
         bar.addAction(self.act_open)
+        bar.addAction(self.act_stop)
+        bar.addAction(self.act_resume)
         bar.addSeparator()
         bar.addAction(self.act_prev_segment)
         bar.addAction(self.act_next_segment)
@@ -465,19 +521,26 @@ class MainWindow(QMainWindow):
             "",
             "Tape captures and images (*.twrf *.twti *.twtz);;All files (*)",
         )
-        if not path or self._pending is not None:
+        if not path:
             return
-        self._pending = -1
         self.statusBar().showMessage(f"Opening {Path(path).name}...")
-        job = _Open(Path(path), self.progress_source)
+        self._request(lambda: self._start_open(Path(path)))
+
+    def _start_open(self, path: Path) -> None:
+        job = _Open(path, Cancellable(self.progress_source))
         job.signals.done.connect(self._opened)
         job.signals.failed.connect(self._failed)
-        self._pool.start(job)
+        job.signals.cancelled.connect(self._cancelled)
+        self._opening = True
+        self._run(job)
 
     @Slot(object)
     def _opened(self, tape: Tape) -> None:
-        self._pending = None
-        self.tape = tape
+        if self._job_ended() or self._closing:
+            tape.close()  # superseded by another open, or the window is going
+            return
+        old, self.tape = self.tape, tape
+        old.close()  # its decoders stop and free their shared memory
         self.track = None
         self.status_source.setText(Path(tape.source).name)
         self.setWindowTitle(f"{Path(tape.source).name} - cinnabar")
@@ -496,10 +559,15 @@ class MainWindow(QMainWindow):
     # -- tracks ----------------------------------------------------------
 
     def open_track(self, number: int, pass_index: int | None = None) -> None:
-        """Load ``number`` (its ``pass_index``-th read; None: Tape.default_pass) on a worker."""
-        if number not in self.tape.track_numbers or self._pending is not None:
+        """Load ``number`` (its ``pass_index``-th read; None: Tape.default_pass) on a worker.
+
+        A load already in flight is cancelled and this one starts once it
+        has wound down. While a file is opening, the request is dropped:
+        it would be for a track of the tape that is going away.
+        """
+        if self._closing or self._opening or number not in self.tape.track_numbers:
             return
-        self._pending = number
+        self._wanted = number
         # No wait cursor: on macOS that is the beachball, and the window is
         # not stuck, it is loading on a worker. The status bar says so.
         what = self.tape.label(number)
@@ -508,23 +576,26 @@ class MainWindow(QMainWindow):
             shown = pass_index if pass_index is not None else self.tape.default_pass(number)
             what += f", {labels[shown or 0]}"
         self.statusBar().showMessage(f"Loading {what}...")
-        job = _Load(self.tape, number, pass_index, self.progress_source)
+        self._request(lambda: self._start_load(number, pass_index))
+
+    def _start_load(self, number: int, pass_index: int | None) -> None:
+        job = _Load(self.tape, number, pass_index, Cancellable(self.progress_source))
         job.signals.done.connect(self._loaded)
         job.signals.failed.connect(self._failed)
-        self._pool.start(job)
+        job.signals.cancelled.connect(self._cancelled)
+        self._run(job)
 
     @Slot(object)
     def _loaded(self, track: Track) -> None:
-        self._pending = None
+        if self._job_ended() or self._closing:
+            # Superseded: a newer request is loading. The track stays in the
+            # tape's cache, and the flux loader pauses it when the next one
+            # starts, so it does not hold up the pool.
+            return
         self.track = track
         self.statusBar().clearMessage()
         self._fill_track_box()
-        idx = self.track_box.findData(track.number)
-        if idx >= 0:
-            self.track_box.blockSignals(True)
-            self.track_box.setCurrentIndex(idx)
-            self.track_box.blockSignals(False)
-        self._fill_pass_box()
+        self._sync_boxes()
         self.lanes.set_track(track)
         self.overview.set_track(track)
         self.details.set_overview(self.tape, track)
@@ -536,9 +607,110 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _failed(self, message: str) -> None:
-        self._pending = None
+        if self._job_ended() or self._closing:
+            return  # superseded: the user has moved on, no dialog for the old request
+        self._sync_boxes()
         self.statusBar().showMessage(message)
         QMessageBox.warning(self, "cinnabar", message)
+
+    @Slot()
+    def _cancelled(self) -> None:
+        if self._job_ended() or self._closing:
+            return  # cancelled to make way for a newer request, which is now loading
+        self._sync_boxes()
+        self.statusBar().showMessage("Stopped", 3000)
+
+    def _sync_boxes(self) -> None:
+        """Put the track and pass selectors back on the track that is showing."""
+        if self.track is None:
+            return
+        idx = self.track_box.findData(self.track.number)
+        if idx >= 0:
+            self.track_box.blockSignals(True)
+            self.track_box.setCurrentIndex(idx)
+            self.track_box.blockSignals(False)
+        self._fill_pass_box()
+
+    # -- background jobs -------------------------------------------------
+    #
+    # One job (an open or a track load) runs at a time. A request made while
+    # one runs cancels it (its Cancellable raises at the job's next progress
+    # report) and waits for it to wind down before starting. So the latest
+    # request wins: three quick PageDowns load one track, not three in
+    # turn. And two loads never run at once over the tape's track cache or
+    # the shared progress bar. Every job ends with exactly one of done,
+    # failed or cancelled, and each handler calls _job_ended first. When
+    # that started the waiting request, the handler's own result is stale
+    # and dropped.
+
+    def _request(self, start: Callable[[], None]) -> None:
+        """Run ``start`` now, or, with a job in flight, cancel that and run ``start`` when it has ended."""
+        if self._closing:
+            return
+        if self._job is None:
+            start()
+        else:
+            self._next = start
+            self._job.cancel()
+        self._status()
+
+    def _run(self, job: _Load | _Open) -> None:
+        self._job = job.progress
+        self._pool.start(job)
+        self._status()
+
+    def _job_ended(self) -> bool:
+        """The in-flight job is over: start the request waiting on it, if any. True if one started."""
+        self._job = None
+        self._opening = False
+        start, self._next = self._next, None
+        if start is not None and not self._closing:
+            start()
+            return True
+        self._wanted = None
+        self._status()
+        return False
+
+    def stop(self) -> None:
+        """Esc / Stop: cancel the job in flight, drop any request waiting on it, pause the shown track."""
+        self._next = None
+        if self._job is not None:
+            self._job.cancel()
+        if self.track is not None and self.track.decoder is not None:
+            self.track.decoder.pause()
+        self._status()
+
+    def resume(self) -> None:
+        """Resume decoding the shown track, from the segment in view outwards."""
+        if self.track is not None and self.track.decoder is not None:
+            self.track.decoder.resume(self.current_segment())
+        self._status()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 -- Qt's name
+        """Stop everything in the background before the window and its signal objects go away.
+
+        Closing used to return from ``app.exec()`` with a load still running
+        on the pool. The interpreter then shut down around it: exit handlers
+        ran while the load was building its decoder, and PySide deleted the
+        window's QObjects while the load was still emitting progress to
+        them ("Signal source has been deleted", and a leaked shared-memory
+        block). Now the load is cancelled and waited for (it stops at its
+        next progress report, a second or two at most), and every track's
+        decoder is closed, before the window goes.
+        """
+        self._closing = True
+        self._next = None
+        self._refresh_timer.stop()
+        if self._job is not None:
+            self._job.cancel()
+        self.hide()  # gone from the screen while the workers wind down
+        self._pool.clear()  # a job queued and not started never starts
+        if not self._pool.waitForDone(30_000):
+            log.warning("a background job did not stop within 30 s; closing anyway")
+        if self.track is not None and self.track.decoder is not None:
+            self.track.decoder.close()  # a volume's feeding track, or one not in a cache
+        self.tape.close()
+        super().closeEvent(event)
 
     def _track_chosen(self, index: int) -> None:
         number = self.track_box.itemData(index)
@@ -557,10 +729,17 @@ class MainWindow(QMainWindow):
             self.open_track(self.track.number, int(pass_index))
 
     def step_track(self, delta: int) -> None:
-        if self.track is None:
+        # From the track last asked for, so PageDown pressed three times
+        # while one loads lands three tracks on, not one.
+        current = (
+            self._wanted
+            if self._wanted is not None
+            else (self.track.number if self.track is not None else None)
+        )
+        if current is None:
             return
         numbers = self.tape.track_numbers
-        i = numbers.index(self.track.number) + delta
+        i = numbers.index(current) + delta
         if 0 <= i < len(numbers):
             self.open_track(numbers[i])
 
@@ -634,7 +813,7 @@ class MainWindow(QMainWindow):
         self._dirty = True
 
     def _refresh_if_dirty(self) -> None:
-        if not self._dirty or self.track is None:
+        if not self._dirty or self.track is None or self._closing:
             return
         self._dirty = False
         self.lanes.refresh()
@@ -645,16 +824,29 @@ class MainWindow(QMainWindow):
         self._status()
 
     def _status(self) -> None:
-        if self.track is None:
+        """The Stop / Resume buttons, and the decode count in the progress bar.
+
+        Stop is live while something is loading or the shown track is
+        decoding; it becomes Resume once that track is paused with segments
+        left. While a job runs, the progress bar is the job's (QtProgress),
+        so the decode count waits until it ends.
+        """
+        loading = self._job is not None
+        decoder = self.track.decoder if self.track is not None else None
+        left = decoder.pending() if decoder is not None else 0
+        paused = bool(left) and decoder.paused
+        self.act_resume.setVisible(paused and not loading)
+        self.act_stop.setVisible(not self.act_resume.isVisible())
+        self.act_stop.setEnabled(loading or (bool(left) and not paused))
+        if self.track is None or loading:
             return
         total = len(self.track.segments)
-        left = self.track.decoder.pending() if self.track.decoder is not None else 0
         if left:
-            self.progress.setFormat("decoding %v/%m")
+            self.progress.setFormat("paused %v/%m" if paused else "decoding %v/%m")
             self.progress.setRange(0, total)
             self.progress.setValue(total - left)
             self.progress.show()
-        elif self._pending is None:
+        else:
             self.progress.hide()
 
 
@@ -693,7 +885,7 @@ def screenshot(
     main = MainWindow(tape, first, pass_index)
     main.resize(*size)
     main.show()
-    while main.track is None or main._pending is not None:
+    while main.track is None or main._job is not None:
         app.processEvents()
         main._pool.waitForDone(50)
     main.show_segment(segment)

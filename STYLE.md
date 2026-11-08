@@ -194,6 +194,16 @@ edit it by hand; edit `protocol/protocol.toml` and run `just gen`.
   `Progress` with a `ProgressRelay`; the worker's log records cross the same
   queue through a stdlib `QueueHandler`. `tapewyrm.image.convert.decode_captures`
   is the pattern. A worker never sees `rich` either.
+- Progress reports are also where long work can be cancelled. Wrap a
+  `Progress` in `cinnabar.ui.progress.Cancellable` (a `threading.Event`);
+  once it is cancelled, the next `task`/`advance`/`update` raises `Cancelled`,
+  a `BaseException` like `asyncio.CancelledError`. So a long loop that reports
+  progress is cancellable for free, and must not swallow `BaseException`. Code
+  that takes hold of a resource partway through (shared memory, a decoder)
+  releases it and re-raises when the rest of the load fails or is cancelled
+  (`FluxTrack.__init__`). Something that only needs freeing at garbage
+  collection or exit uses `weakref.finalize`, never `atexit.register(obj.method)`,
+  which keeps the object alive until exit.
 - Library code never imports `rich` or `click`. Presentation lives in each
   CLI's `console.py` (rich log handler, progress bars) and its commands
   (`tapewyrm/cli/`, `qicsilver/cli.py`).
