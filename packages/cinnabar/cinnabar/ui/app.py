@@ -455,8 +455,11 @@ class MainWindow(QMainWindow):
         self.pass_box.blockSignals(True)
         self.pass_box.clear()
         number = self.track.number if self.track is not None else None
+        # Both guarded on number: pass_labels takes an int, and with no track
+        # showing there is nothing to list (mypy can't narrow through reads).
         reads = self.tape.passes.get(number, ()) if number is not None else ()
-        for i, (read, text) in enumerate(zip(reads, self.tape.pass_labels(number), strict=True)):
+        labels = self.tape.pass_labels(number) if number is not None else []
+        for i, (read, text) in enumerate(zip(reads, labels, strict=True)):
             self.pass_box.addItem(text, i)
             self.pass_box.setItemData(i, read.file, Qt.ItemDataRole.ToolTipRole)
         if not reads:
@@ -834,7 +837,8 @@ class MainWindow(QMainWindow):
         loading = self._job is not None
         decoder = self.track.decoder if self.track is not None else None
         left = decoder.pending() if decoder is not None else 0
-        paused = bool(left) and decoder.paused
+        # left > 0 already implies a decoder; the explicit None check is for mypy.
+        paused = decoder is not None and bool(left) and decoder.paused
         self.act_resume.setVisible(paused and not loading)
         self.act_stop.setVisible(not self.act_resume.isVisible())
         self.act_stop.setEnabled(loading or (bool(left) and not paused))

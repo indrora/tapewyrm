@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 
+import click
 from click.testing import CliRunner
 from qiclib import segment as seg_mod
 from qiclib.testing import bench_3m
@@ -127,7 +128,9 @@ def _assert_clean_error(result, *needles: str) -> None:
     assert "Traceback" not in result.output
     # rich-click wraps the message in a box at the terminal width, which can
     # break a long tmp path anywhere: compare with the box and spaces gone.
-    flat = re.sub(r"[\s\u2500-\u257f]+", "", result.output)
+    # ANSI escapes go first: rich-click forces colour under GITHUB_ACTIONS
+    # (see conftest.error_text), which would split highlighted needles.
+    flat = re.sub(r"[\s\u2500-\u257f]+", "", click.unstyle(result.output))
     for needle in needles:
         assert re.sub(r"\s+", "", needle) in flat
 

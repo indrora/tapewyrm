@@ -12,6 +12,7 @@ import re
 import struct
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import Result
 from qiclib import segment as seg_mod
@@ -176,7 +177,17 @@ def error_text(result: Result) -> str:
     and wraps it to the terminal width, so it is compared as one line of
     words. A traceback is never acceptable: every refusal is a click
     exception, so the run must have failed cleanly.
+
+    ANSI escapes are stripped first (``click.unstyle``). rich-click ignores
+    CliRunner's ``color=False`` and forces a colour terminal whenever
+    ``FORCE_COLOR``, ``PY_COLORS`` or ``GITHUB_ACTIONS`` is set
+    (``rich_click.rich_help_configuration.force_terminal_default``). Under
+    GitHub Actions its highlighter then wraps numbers and ``--options`` in
+    SGR codes -- ``\\x1b[1;36m3\\x1b[0m volumes``, ``-\\x1b[..m-volume`` -- and
+    a plain substring check like ``"3 volumes"`` misses. Locally (no such
+    env var, not a tty) the output is plain, so this only ever bit in CI.
     """
     assert result.exit_code != 0
     assert "Traceback" not in result.output, result.output
-    return " ".join(re.sub(r"[\u2500-\u257f]", " ", result.output).split())
+    plain = click.unstyle(result.output)
+    return " ".join(re.sub(r"[\u2500-\u257f]", " ", plain).split())
