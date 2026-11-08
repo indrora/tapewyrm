@@ -45,3 +45,6 @@ dump.jsonl
 
 # MkDocs output
 /site/
+
+# Ignore temporary directories (development stuff)
+/_**/

@@ -4,6 +4,9 @@
 
 set windows-shell := ["cmd.exe", "/c"]
 
+_default:
+    @just --list
+
 # regenerate protocol.h + protocol.py from the single source of truth
 gen:
     uv run protocol/generate.py
@@ -34,34 +37,34 @@ dfu bin="firmware/.pio/build/tapewyrm/firmware.bin":
 
 # one Python package: sync, lint, typecheck, test (no hardware). STYLE.md §2.
 check pkg module:
-    cd packages/{{pkg}} && uv sync --extra dev
-    cd packages/{{pkg}} && uv run ruff check .
-    cd packages/{{pkg}} && uv run ruff format --check .
-    cd packages/{{pkg}} && uv run mypy {{module}}
-    cd packages/{{pkg}} && uv run pytest
+    uv --project packages/{{pkg}} sync --extra dev
+    uv --project packages/{{pkg}} run ruff check .
+    uv --project packages/{{pkg}} run ruff format --check .
+    uv --project packages/{{pkg}} run mypy {{module}}
+    uv --project packages/{{pkg}} run pytest
 
 # every Python package, base first (the same set CI's packages.yml runs)
 host: (check "tapewyrm-archive" "tapewyrm_archive") (check "qiclib" "qiclib") (check "tapewyrm-cli" "tapewyrm") (check "qicsilver" "qicsilver") (check "cinnabar" "cinnabar")
 
 # just the tests of every package (fast loop)
 test:
-    cd packages/tapewyrm-archive && uv run pytest -q
-    cd packages/qiclib && uv run pytest -q
-    cd packages/tapewyrm-cli && uv run pytest -q
-    cd packages/qicsilver && uv run pytest -q
-    cd packages/cinnabar && uv run pytest -q
+    uv --project packages/tapewyrm-archive run pytest -q
+    uv --project packages/qiclib run pytest -q
+    uv --project packages/tapewyrm-cli run pytest -q
+    uv --project packages/qicsilver run pytest -q
+    uv --project packages/cinnabar run pytest -q
 
 # lint + typecheck every package without tests
 lint:
-    cd packages/tapewyrm-archive && uv run ruff check . && uv run mypy tapewyrm_archive
-    cd packages/qiclib && uv run ruff check . && uv run mypy qiclib
-    cd packages/tapewyrm-cli && uv run ruff check . && uv run mypy tapewyrm
-    cd packages/qicsilver && uv run ruff check . && uv run mypy qicsilver
-    cd packages/cinnabar && uv run ruff check . && uv run mypy cinnabar
+    uv --project packages/tapewyrm-archive run ruff check . && uv --project packages/tapewyrm-archive run mypy tapewyrm_archive
+    uv --project packages/qiclib run ruff check . && uv --project packages/qiclib run mypy qiclib
+    uv --project packages/tapewyrm-cli run ruff check . && uv --project packages/tapewyrm-cli run mypy tapewyrm
+    uv --project packages/qicsilver run ruff check . && uv --project packages/qicsilver run mypy qicsilver
+    uv --project packages/cinnabar run ruff check . && uv --project packages/cinnabar run mypy cinnabar
 
 # look at a capture or image in the viewer (cinnabar PATH [--track N] [--theme dark])
 cinnabar *args:
-    cd packages/cinnabar && uv run cinnabar {{args}}
+    uv --project packages/cinnabar run cinnabar {{args}}
 
 # remove build, package, and cache artifacts (keeps the uv venv)
 clean:
