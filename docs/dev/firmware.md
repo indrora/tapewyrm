@@ -60,7 +60,8 @@ Every hook site in GW code is marked with a `/* Tapewyrm: ... */` comment.
 | `CMD_QIC_BUILD_INFO` | `0x88` | The git commit the image was built from and a dirty flag (`tw info`). |
 
 The codes are the generated `TW_TXN_*` values from `inc/protocol.h`. They sit
-above GW's own range (0 to 22), so a stock `gw` host gets `ACK_BAD_COMMAND`.
+above GW's own range (0 to 22). Running `gw` against Tapewyrm firmware is not
+supported, and nothing in the application layer is kept for its sake.
 `0x85` (`SELECT`) and `0x86` (`ABORT`) are reserved but are not cases. Drive
 select uses GW's own `SELECT`, `DESELECT` and `MOTOR` commands, and a capture
 is stopped out of band through GW's clear-comms baud change. The request and
@@ -183,8 +184,9 @@ hard-code a value that exists in `protocol/protocol.toml`.
 Tapewyrm is a hard fork. GW is vendored complete and not tracked against
 upstream; mergeability is not a goal. What replaces upstream tracking is the
 vendor seam: a set of GW primitives kept pristine so that upstream fixes to
-them can still be cherry-picked by hand, and so that the board stays a dual
-citizen that flashes either stock GW or Tapewyrm.
+them can still be cherry-picked by hand, and so that the board can always be
+flashed back to stock GW. Interoperating with the `gw` host program is not a
+goal: `gw` talks to the board only through the bootloader, to revert it.
 
 The seam is not a header. It is the set of GW functions the graft may call,
 plus the boot and update layer it must not touch.
@@ -193,7 +195,7 @@ plus the boot and update layer it must not touch.
 |---|---|---|
 | Flux-capture engine | The timing-critical, hardest-to-get-right code. Tapewyrm only drives it free-running and brackets it with markers. | `floppy_read_prep`, `rdata_encode_flux`, `tim_rdata`/`dma_rdata`, `ST_read_flux`, `u_buf[]`, the `FLUXOP_*` / `0xFF` escape |
 | USB CDC-ACM stack | The real-time boundary. The QIC commands ride GW's command framing; a capture stops through GW's `BAUD_CLEAR_COMMS` path. | `src/usb/`, `usb_write`/`ep_tx_ready` via `floppy_read`, `floppy_configure` |
-| Bootloader and `gw update` protocol | Keeps the board a dual citizen. | Not touched by any QIC code |
+| Bootloader and `gw update` protocol | Keeps the way back to stock GW open. | Not touched by any QIC code |
 | AT32 clock and GPIO init, pin map, linker map, startup, watchdog | Board bring-up. | `src/mcu/at32f4/`, `src/board.c`, `write_pin`/`get_*`, `delay_us`, `time_now`, `watchdog_kick` |
 
 ### The invariant
@@ -212,13 +214,16 @@ numbers are separate from the update protocol and may change freely.
 
 Keeping the boot layer intact buys three things:
 
-1. **Instant revert to stock.** Flash stock GW to check the drive, cable and
-   board, then flash back, with no DFU jumper.
+1. **Revert to stock without a debug probe.** Fit the Update Jumper and run
+   `gw update`, or strap the DFU header as a fallback. Then check the drive,
+   cable and board with stock GW, and flash Tapewyrm back. The procedure is in
+   [Go back to stock Greaseweazle firmware](../guide/flash-greaseweazle.md#go-back-to-stock-greaseweazle-firmware).
 2. **A/B against a known-good flux engine.** Stock GW reading a real floppy is
    the reference. Because the tape capture is GW's read engine run
    free-running, the comparison is tight: if GW reads a floppy clean and the
    tape capture is garbage, the fault is in Tapewyrm.
-3. **The board keeps its value.** It is still a Greaseweazle afterwards.
+3. **The board keeps its value.** Flashed back to stock, it is a Greaseweazle
+   again.
 
 ### Cherry-pick an upstream fix
 

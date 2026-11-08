@@ -6,8 +6,15 @@ with it; `tw info` still describes it.
 
 The Greaseweazle keeps its own application bootloader. Tapewyrm replaces only
 the application above it, so the same board can go back to stock Greaseweazle
-firmware later. The board is described in
-[Greaseweazle v4.1](../hardware/greaseweazle.md).
+firmware later; see
+[Go back to stock Greaseweazle firmware](#go-back-to-stock-greaseweazle-firmware).
+The board is described in [Greaseweazle v4.1](../hardware/greaseweazle.md).
+
+!!! warning "Tapewyrm firmware does not support `gw`"
+    Tapewyrm is a hard fork of the Greaseweazle firmware and diverges from it
+    on purpose. Use `tw` with a board that runs Tapewyrm firmware. Greaseweazle's
+    own `gw` command is not supported against it, even where it happens to
+    work. To use the board as a Greaseweazle again, flash stock firmware back.
 
 ## Prerequisites
 
@@ -92,9 +99,66 @@ tw flash firmware/.pio/build/tapewyrm/firmware.bin
     flash. `tw flash --dfu IMAGE` takes the DFU path directly, with
     `dfu-util`'s defaults.
 
-The bootloader is Greaseweazle's own and speaks its update protocol, so the
-stock Greaseweazle `gw update` command is expected to accept the `.upd` file
-from `just fw-dist`. Tapewyrm does not need or test `gw`.
+Installing Tapewyrm firmware with `gw update` is not supported.
+
+## Go back to stock Greaseweazle firmware
+
+The bootloader is Greaseweazle's own code, so going back to stock goes through
+Greaseweazle's own update path. Do it with a strap fitted, so that `gw` talks
+only to the bootloader and never to the Tapewyrm firmware. Use the Update
+Jumper first, and the DFU header if that fails.
+
+### With the Update Jumper and `gw update`
+
+You need Greaseweazle's host tools (`gw`) installed.
+
+1. Unplug the Greaseweazle from USB.
+
+2. Fit a jumper across the `RXI` and `TXO` pins. This is Greaseweazle's
+   Update Jumper: with it fitted, the board starts in its bootloader instead
+   of the firmware.
+
+3. Plug the board into USB and run `gw update`.
+
+    ```sh
+    gw update
+    ```
+
+    `gw update` downloads the latest stock firmware release and writes it. To
+    install a release you have already downloaded, pass
+    `--file greaseweazle-VERSION.upd`.
+
+4. Unplug the board, remove the jumper, and plug it in again. `gw info`
+   should now report stock firmware.
+
+This replaces the application only. The bootloader stays the one Tapewyrm
+installed: Greaseweazle's bootloader code, built with Tapewyrm's USB name and
+serial number. For a board that is stock down to the bootloader, use the DFU
+header instead.
+
+!!! warning "Not yet run on a v4.1"
+    This route follows Greaseweazle's own update procedure, and the Tapewyrm
+    bootloader's update code is unchanged from Greaseweazle's, but nobody has
+    yet run it on a real board. If it fails, use the DFU header.
+
+### With the DFU header (fallback)
+
+The DFU header uses the AT32's ROM bootloader, like the
+[first flash](#flash-for-the-first-time). It does not depend on anything on
+the board, and it replaces the bootloader and the firmware together.
+
+1. Download `greaseweazle-firmware-VERSION.zip` from the
+   [Greaseweazle firmware releases](https://github.com/keirf/greaseweazle-firmware/releases).
+   It contains `hex/greaseweazle-at32f4-VERSION.hex`, the stock bootloader and
+   firmware merged.
+
+2. Unplug the board, strap the DFU header, and plug it in again.
+
+3. Flash `greaseweazle-at32f4-VERSION.hex` with Artery ISP. `dfu-util` does
+   not take Intel HEX: to use it instead, convert the file to a raw image
+   first and write it at `0x08000000`.
+
+4. Unplug the board, remove the strap, and plug it in again.
 
 ## Verify
 

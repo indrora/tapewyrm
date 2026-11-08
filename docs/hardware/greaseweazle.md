@@ -91,9 +91,10 @@ capture cleanly when its buffer overflows.
 
 The Tapewyrm firmware is the Greaseweazle v1.6 firmware, vendored in-tree,
 with QIC verbs added to its command loop. It reuses Greaseweazle's flux read
-engine for captures and its pin primitives for the command channel. A stock
-`gw` host still talks to the board, but sees the QIC verbs as unknown
-commands.
+engine for captures and its pin primitives for the command channel. It is a
+hard fork that diverges from Greaseweazle on purpose, so Greaseweazle's `gw`
+command is not supported with it; use `tw`. To use the board as a Greaseweazle
+again, [flash stock firmware back](../guide/flash-greaseweazle.md#go-back-to-stock-greaseweazle-firmware).
 
 | Verb | Number | Does |
 |---|---|---|
