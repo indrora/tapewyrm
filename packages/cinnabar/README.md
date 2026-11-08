@@ -61,6 +61,14 @@ file (a segment export offers the 29 data sectors, as an image holds them,
 or all 32 with the parity). The toolbar and menus step segments and
 tracks, zoom, fit, and switch themes (`--theme sketch|paper|dark|contrast`);
 the status bar shows what the cursor is on and how far decoding has got.
+A flux tape lists each track once, however many reads of it the directory
+holds (`tw dump --keep-all` keeps every pass as `track-NN.P.twrf`): the
+**Pass** selector beside the track selector picks the read, opening on the
+one `dump.jsonl` names (its entry reads `Pass 2 (best)`; pass numbers two
+reads share get the file name added). Opening any one capture of a dump
+opens all of them. Captures whose header names no track (probe captures,
+track -1) are the passes of one **Unknown track**. `--pass P` opens pass
+P of the `--track` (or `--pass best`, the default).
 Keys: Left / Right segment, PageUp / PageDown track, Home / End, Cmd/Ctrl +
 and - zoom, 0 fit segment, Shift+0 fit track; the wheel zooms, dragging
 pans.
@@ -70,6 +78,7 @@ pans.
 uv run --project packages/cinnabar cinnabar captures/NAME.twtz
 uv run --project packages/cinnabar cinnabar captures/NAME/            # a directory of TWRF captures
 uv run --project packages/cinnabar cinnabar captures/NAME.twtz --dump --track 2 --segment 5
+uv run --project packages/cinnabar cinnabar captures/NAME/ --track 5 --pass 3   # the third read of track 5
 uv run --project packages/cinnabar cinnabar captures/NAME.twtz --fileset-parser qic113-basic --vtbl-field source_label=102,16
 ```
 

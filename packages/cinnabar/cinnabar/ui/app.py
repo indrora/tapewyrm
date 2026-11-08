@@ -70,16 +70,18 @@ class _DecodeSignals(QObject):
 
 
 class _Load(QRunnable):
-    """Loads one track off the main thread, reporting through ``progress``."""
+    """Loads one track (one of its passes; None: the default) off the main thread, reporting through ``progress``."""
 
-    def __init__(self, tape: Tape, number: int, progress: QtProgress) -> None:
+    def __init__(
+        self, tape: Tape, number: int, pass_index: int | None, progress: QtProgress
+    ) -> None:
         super().__init__()
-        self.tape, self.number, self.progress = tape, number, progress
+        self.tape, self.number, self.pass_index, self.progress = tape, number, pass_index, progress
         self.signals = _LoadSignals()
 
     def run(self) -> None:
         try:
-            self.signals.done.emit(self.tape.load(self.number, self.progress))
+            self.signals.done.emit(self.tape.load(self.number, self.progress, self.pass_index))
         except Exception as exc:  # noqa: BLE001 -- shown in the window, logged with trace
             log.exception("track %d failed to load", self.number)
             self.signals.failed.emit(f"track {self.number}: {exc}")
@@ -127,7 +129,7 @@ def _icon(theme_name: str, fallback: QStyle.StandardPixmap, style: QStyle) -> QI
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, tape: Tape, first: int) -> None:
+    def __init__(self, tape: Tape, first: int, pass_index: int | None = None) -> None:
         super().__init__()
         self.tape = tape
         self.track: Track | None = None
@@ -188,7 +190,7 @@ class MainWindow(QMainWindow):
         self.lanes.hovered.connect(self._hovered)
         self.lanes.clicked.connect(self._clicked)
         self._pool.start(_WarmUp())
-        self.open_track(first)
+        self.open_track(first, pass_index)
 
     # -- actions, menus, toolbar, status bar ---------------------------------
 
@@ -357,6 +359,19 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.track_box)
         bar.addAction(self.act_prev_track)
         bar.addAction(self.act_next_track)
+        # Which read of the track is showing. Beside the track arrows rather
+        # than in the track list, so stepping tracks visits each track once
+        # whatever number of reads a --keep-all dump kept. Greyed out, not
+        # hidden, when there is one read (or an image): the toolbar does not
+        # shift as tracks change.
+        bar.addWidget(QLabel(" Pass "))
+        self.pass_box = QComboBox()
+        self.pass_box.setMinimumWidth(120)
+        self.pass_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.pass_box.setToolTip("Which read of this track to show")
+        self._fill_pass_box()
+        self.pass_box.currentIndexChanged.connect(self._pass_chosen)
+        bar.addWidget(self.pass_box)
         bar.addSeparator()
         bar.addAction(self.act_wide)
         bar.addWidget(QLabel(" Height "))
@@ -378,6 +393,22 @@ class MainWindow(QMainWindow):
         if current is not None and (i := self.track_box.findData(current)) >= 0:
             self.track_box.setCurrentIndex(i)
         self.track_box.blockSignals(False)
+
+    def _fill_pass_box(self) -> None:
+        """The pass selector lists the showing track's reads, each one's file name its tooltip."""
+        self.pass_box.blockSignals(True)
+        self.pass_box.clear()
+        number = self.track.number if self.track is not None else None
+        reads = self.tape.passes.get(number, ()) if number is not None else ()
+        for i, (read, text) in enumerate(zip(reads, self.tape.pass_labels(number), strict=True)):
+            self.pass_box.addItem(text, i)
+            self.pass_box.setItemData(i, read.file, Qt.ItemDataRole.ToolTipRole)
+        if not reads:
+            self.pass_box.addItem("-")  # an image's track, or a volume: nothing to choose
+        elif self.track is not None and self.track.pass_index is not None:
+            self.pass_box.setCurrentIndex(self.track.pass_index)
+        self.pass_box.setEnabled(len(reads) > 1)
+        self.pass_box.blockSignals(False)
 
     def _statusbar(self) -> None:
         sb = self.statusBar()
@@ -451,6 +482,7 @@ class MainWindow(QMainWindow):
         self.status_source.setText(Path(tape.source).name)
         self.setWindowTitle(f"{Path(tape.source).name} - cinnabar")
         self._fill_track_box()
+        self._fill_pass_box()  # empties it until the new tape's first track lands
         self.open_track(tape.track_numbers[0])
 
     def _about(self) -> None:
@@ -463,14 +495,20 @@ class MainWindow(QMainWindow):
 
     # -- tracks ----------------------------------------------------------
 
-    def open_track(self, number: int) -> None:
+    def open_track(self, number: int, pass_index: int | None = None) -> None:
+        """Load ``number`` (its ``pass_index``-th read; None: Tape.default_pass) on a worker."""
         if number not in self.tape.track_numbers or self._pending is not None:
             return
         self._pending = number
         # No wait cursor: on macOS that is the beachball, and the window is
         # not stuck, it is loading on a worker. The status bar says so.
-        self.statusBar().showMessage(f"Loading {self.tape.label(number)}...")
-        job = _Load(self.tape, number, self.progress_source)
+        what = self.tape.label(number)
+        labels = self.tape.pass_labels(number)
+        if len(labels) > 1:
+            shown = pass_index if pass_index is not None else self.tape.default_pass(number)
+            what += f", {labels[shown or 0]}"
+        self.statusBar().showMessage(f"Loading {what}...")
+        job = _Load(self.tape, number, pass_index, self.progress_source)
         job.signals.done.connect(self._loaded)
         job.signals.failed.connect(self._failed)
         self._pool.start(job)
@@ -486,6 +524,7 @@ class MainWindow(QMainWindow):
             self.track_box.blockSignals(True)
             self.track_box.setCurrentIndex(idx)
             self.track_box.blockSignals(False)
+        self._fill_pass_box()
         self.lanes.set_track(track)
         self.overview.set_track(track)
         self.details.set_overview(self.tape, track)
@@ -505,6 +544,17 @@ class MainWindow(QMainWindow):
         number = self.track_box.itemData(index)
         if number is not None and (self.track is None or number != self.track.number):
             self.open_track(int(number))
+
+    def _pass_chosen(self, index: int) -> None:
+        # A choice made while another load is pending is dropped by
+        # open_track; _loaded then puts the box back on what is showing.
+        pass_index = self.pass_box.itemData(index)
+        if (
+            self.track is not None
+            and pass_index is not None
+            and pass_index != self.track.pass_index
+        ):
+            self.open_track(self.track.number, int(pass_index))
 
     def step_track(self, delta: int) -> None:
         if self.track is None:
@@ -608,12 +658,12 @@ class MainWindow(QMainWindow):
             self.progress.hide()
 
 
-def run(tape: Tape, first: int, *, theme: str = "sketch") -> int:
+def run(tape: Tape, first: int, *, pass_index: int | None = None, theme: str = "sketch") -> int:
     palette.set_theme(theme)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("cinnabar")
     app.setOrganizationName("Tapewyrm")
-    window = MainWindow(tape, first)
+    window = MainWindow(tape, first, pass_index)
     window.show()
     return app.exec()
 
@@ -623,6 +673,7 @@ def screenshot(
     first: int,
     out: Path,
     *,
+    pass_index: int | None = None,
     segment: int = 0,
     size=(1500, 900),
     theme: str = "sketch",
@@ -631,6 +682,7 @@ def screenshot(
 ) -> None:
     """Render one track's window offscreen to ``out`` (PNG); what the tests and docs use.
 
+    ``pass_index`` picks the read of ``first`` to show (None: the default);
     ``window`` is an (x0, x1) view range in axis units to show instead of
     the whole of ``segment``; ``click`` fills the details panel with the
     record at that axis position.
@@ -638,7 +690,7 @@ def screenshot(
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     palette.set_theme(theme)
     app = QApplication.instance() or QApplication(sys.argv)
-    main = MainWindow(tape, first)
+    main = MainWindow(tape, first, pass_index)
     main.resize(*size)
     main.show()
     while main.track is None or main._pending is not None:

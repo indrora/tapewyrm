@@ -14,6 +14,8 @@ loaders see exactly what ``tw dump`` would have written.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import struct
 import sys
 from pathlib import Path
@@ -166,6 +168,39 @@ def capture_header(track: int) -> CaptureHeader:
         tape_format=TapeFormat.QIC80,
         device_serial="TEST",
     )
+
+
+def copy_capture(
+    src: Path, dst: Path, *, track: int | None = None, pass_id: int | None = None
+) -> Path:
+    """``src`` again at ``dst`` with its header's ``track`` / ``pass_id`` rewritten; the flux is the same.
+
+    The loaders group reads by the header's track and order them by its
+    pass_id (TWS-1 section 4.2), never the file name, so this is all it
+    takes to make one synthetic capture into several reads of a track, or
+    into a probe capture (track -1). The SESSION_START marker in the body
+    still says what ``write_capture`` wrote; nothing in cinnabar reads it.
+    """
+    cap = twrf.RawFluxCapture.load(src)
+    changes = {k: v for k, v in (("track", track), ("pass_id", pass_id)) if v is not None}
+    twrf.RawFluxCapture(header=dataclasses.replace(cap.header, **changes), flux=cap.flux).save(dst)
+    return dst
+
+
+def keep_all_dump(capture: Path, folder: Path, *, passes: int = 3, best: int = 2) -> list[Path]:
+    """``folder`` as ``tw dump --keep-all --passes N`` leaves one track: ``track-00.P.twrf``, P = 1..N.
+
+    ``dump.jsonl`` names pass ``best`` (TWS-1 appendix B: ``path`` and
+    ``kept`` name the pick; the path is relative to wherever tw dump ran).
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    reads = [
+        copy_capture(capture, folder / f"track-00.{p}.twrf", pass_id=p)
+        for p in range(1, passes + 1)
+    ]
+    line = {"track": 0, "path": f"dump/track-00.{best}.twrf", "attempts": passes, "kept": best}
+    (folder / "dump.jsonl").write_text(json.dumps(line) + "\n")
+    return reads
 
 
 def mfm_cells(data: bytes) -> bytearray:

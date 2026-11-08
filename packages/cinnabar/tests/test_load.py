@@ -275,7 +275,7 @@ def test_opening_one_capture_takes_its_dump_sidecar(qic80_capture: Path, tmp_pat
     import json
     import shutil
 
-    from cinnabar.load import sidecar_captures
+    from cinnabar.load import dump_captures, sidecar_listed
 
     folder = tmp_path / "dump"
     folder.mkdir()
@@ -290,11 +290,92 @@ def test_opening_one_capture_takes_its_dump_sidecar(qic80_capture: Path, tmp_pat
         {"track": 2, "path": "captures/dump/track-02.twrf"},
     ]
     (folder / "dump.jsonl").write_text("\n".join(json.dumps(e) for e in lines) + "\n")
-    assert sidecar_captures(t0) == [t1, t0]
+    assert sidecar_listed(folder) == [t1, t0]
+    assert dump_captures(t0) == ([t1, t0], [t1, t0])
     tape = open_path(t0)
-    # Both files carry track 0 in their header; the second becomes a numbered pass.
-    assert len(tape.track_numbers) == 2
-    assert sidecar_captures(qic80_capture) == [qic80_capture]  # no sidecar there
+    # Both files carry track 0 in their header, so they are two reads of
+    # track 0, not two tracks; both say pass 1, so their file names label
+    # them, and the later sidecar line (track-00.twrf) is the pick.
+    assert tape.track_numbers == [0]
+    assert tape.pass_labels(0) == ["Pass 1 - track-00.twrf (best)", "Pass 1 - track-01.twrf"]
+    assert dump_captures(qic80_capture) == ([qic80_capture], [])  # no sidecar there
+
+
+def test_keep_all_reads_are_the_passes_of_one_track(qic80_capture: Path, tmp_path: Path):
+    from tests.conftest import keep_all_dump
+
+    reads = keep_all_dump(qic80_capture, tmp_path / "dump", passes=3, best=2)
+    # Opened by a read the sidecar does not name: a pass that lost is still the dump's.
+    tape = open_path(reads[0])
+    assert tape.track_numbers == [0]
+    assert [r.file for r in tape.passes[0]] == [p.name for p in reads]
+    assert [r.pass_id for r in tape.passes[0]] == [1, 2, 3]
+    assert tape.default_pass(0) == 1
+    assert tape.pass_labels(0) == ["Pass 1", "Pass 2 (best)", "Pass 3"]
+    assert open_path(tmp_path / "dump").passes == tape.passes  # the directory reads the same
+    picked = tape.load(0, NULL_PROGRESS)
+    other = tape.load(0, NULL_PROGRESS, 2)
+    try:
+        assert picked.pass_index == 1 and dict(picked.detail)["file"] == "track-00.2.twrf"
+        assert other.pass_index == 2 and dict(other.detail)["pass"] == "3"
+        assert picked.label == other.label == "Track 0"
+        assert tape.load(0, NULL_PROGRESS, 2) is other  # each read is opened once
+    finally:
+        picked.decoder.close()
+        other.decoder.close()
+
+
+def test_a_later_sidecar_line_outranks_an_earlier_runs_pick(qic80_capture: Path, tmp_path: Path):
+    """dump.jsonl is a log: a rerun's pick wins, even when it names a file an earlier line did."""
+    import json
+
+    from cinnabar.load import sidecar_listed
+    from tests.conftest import keep_all_dump
+
+    folder = tmp_path / "dump"
+    a, b, _ = keep_all_dump(qic80_capture, folder, passes=3, best=1)
+    lines = [{"track": 0, "path": p.name} for p in (a, b, a)]
+    (folder / "dump.jsonl").write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+    assert sidecar_listed(folder) == [b, a]
+    assert open_path(folder).default_pass(0) == 0
+
+
+def test_captures_with_no_track_are_the_passes_of_one_unknown_track(
+    qic80_capture: Path, tmp_path: Path
+):
+    from cinnabar.model import UNKNOWN_TRACK
+    from tests.conftest import copy_capture
+
+    folder = tmp_path / "probes"
+    folder.mkdir()
+    copy_capture(qic80_capture, folder / "track-00.twrf")
+    for name in ("probe-b.twrf", "probe-a.twrf"):
+        copy_capture(qic80_capture, folder / name, track=-1, pass_id=0)
+    tape = open_path(folder)
+    assert tape.track_numbers == [0, UNKNOWN_TRACK]
+    assert tape.label(UNKNOWN_TRACK) == "Unknown track"
+    # Every probe is pass 0 (tw's fluxprobe), so the file names tell them apart.
+    assert tape.pass_labels(UNKNOWN_TRACK) == ["Pass 0 - probe-a.twrf", "Pass 0 - probe-b.twrf"]
+    assert tape.default_pass(UNKNOWN_TRACK) == 0
+    assert tape.pass_labels(0) == ["Pass 1"]
+
+
+def test_dump_takes_pass(qic80_capture: Path, tmp_path: Path, image_path: Path):
+    from tests.conftest import keep_all_dump
+
+    keep_all_dump(qic80_capture, tmp_path / "dump", passes=3, best=2)
+    runner = CliRunner()
+    base = [str(tmp_path / "dump"), "--dump", "--segment", "0"]
+    for choice, file in (("3", "track-00.3.twrf"), ("best", "track-00.2.twrf")):
+        result = runner.invoke(cli, [*base, "--pass", choice])
+        assert result.exit_code == 0, result.output
+        assert f"  file: {file}" in result.output
+    missing = runner.invoke(cli, [*base, "--pass", "9"])
+    assert missing.exit_code != 0 and "has no pass 9 (it has 1, 2, 3)" in missing.output
+    word = runner.invoke(cli, [*base, "--pass", "first"])
+    assert word.exit_code != 0 and "neither a pass_id nor 'best'" in word.output
+    image = runner.invoke(cli, [str(image_path), "--dump", "--pass", "1"])
+    assert image.exit_code != 0 and "has no passes to choose from" in image.output
 
 
 def _compressed_image(tmp_path: Path) -> Path:

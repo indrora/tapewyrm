@@ -55,20 +55,22 @@ from cinnabar.decode import jobs
 from cinnabar.decode.track import TrackDecoder
 from cinnabar.load.volumes import Layout, volume_track
 from cinnabar.model import (
-    PASS_BASE,
     SECTOR_BYTES,
     SEGMENT_BYTES,
+    UNKNOWN_TRACK,
     VOLUME_BASE,
     Axis,
     AxisKind,
     ByteMap,
     ByteRun,
     Flux,
+    Pass,
     Segment,
     Shape,
     Span,
     Tape,
     Track,
+    track_label,
 )
 
 log = logging.getLogger(__name__)
@@ -235,7 +237,13 @@ class FluxTrack:
     """One capture as a :class:`Track` that fills in as its segments decode."""
 
     def __init__(
-        self, path: Path, number: int, ident: _Identification, progress: Progress = NULL_PROGRESS
+        self,
+        path: Path,
+        number: int,
+        ident: _Identification,
+        progress: Progress = NULL_PROGRESS,
+        *,
+        pass_index: int | None = None,
     ) -> None:
         self.path = path
         self.number = number
@@ -283,6 +291,7 @@ class FluxTrack:
         self._annotate_lock = threading.Lock()  # see _reannotate
         self._base_detail = (
             ("file", path.name),
+            ("pass", str(hdr.pass_id)),
             ("track", str(hdr.track)),
             ("direction", hdr.direction.value),
             ("rate", f"{hdr.rate_kbps} kbit/s"),
@@ -291,7 +300,7 @@ class FluxTrack:
             ("index pulses", str(len(index_times))),
         )
         self.track = Track(
-            f"Track {number}" if number < PASS_BASE else f"Pass {number - PASS_BASE}",
+            track_label(number),
             number,
             Axis(AxisKind.TIME),
             _PHYSICAL_NAMES[self.physical],
@@ -300,6 +309,7 @@ class FluxTrack:
             self._track_detail(),
             self.flux,
             self,
+            pass_index=pass_index,
         )
         self.decoder.on_result(self._landed)
         with progress.task("starting decode workers", total=None):
@@ -520,10 +530,30 @@ class FluxTrack:
 def open_captures(
     paths: Sequence[Path],
     *,
+    best: Sequence[Path] = (),
     volume_profile: str = vp.GUESS,
     overrides: vp.Overrides | None = None,
 ) -> Tape:
-    """The captures as one :class:`Tape`; ``volume_profile`` and ``overrides`` are :func:`cinnabar.load.open_path`'s."""
+    """The captures as one :class:`Tape`, every read of a track one of its passes.
+
+    Captures are grouped by the track their *header* names (TWS-1 section
+    4.2), never by their file name; track -1, a probe capture that did not
+    seek, groups as :data:`cinnabar.model.UNKNOWN_TRACK`. A track's reads go
+    in pass_id order, then file name, which is the Pass selector's order.
+
+    ``best`` is the captures ``dump.jsonl`` names, in its line order
+    (:func:`cinnabar.load.sidecar_listed`). A track's best read, the one it
+    opens on, is the last of those that is one of its reads: the sidecar is
+    a log every run appends to (TWS-1 appendix B), so a later run's pick
+    outranks an earlier run's. A track none of them reads opens on its
+    first pass. ``volume_profile`` and ``overrides`` are
+    :func:`cinnabar.load.open_path`'s.
+
+    Before passes existed, a second capture of a track became a top-level
+    ``Pass N`` entry of its own, so a ``--keep-all`` dump's track list
+    repeated each track once per read, unlabelled; that is what grouping
+    replaces.
+    """
     if not paths:
         raise ValueError("no TWRF captures to open")
     if volume_profile != vp.GUESS:
@@ -532,15 +562,35 @@ def open_captures(
         log.debug("checking forced volume profile %r before the decode starts", volume_profile)
         vp.load(volume_profile)
     headers = {p: read_header(p)[0] for p in paths}
-    by_track: dict[int, Path] = {}
-    for i, p in enumerate(paths):
+    by_track: dict[int, list[Path]] = {}
+    for p in paths:
         t = headers[p].track
-        by_track[t if t >= 0 and t not in by_track else PASS_BASE + i] = p
+        by_track.setdefault(t if t >= 0 else UNKNOWN_TRACK, []).append(p)
+    # Resolved, so a sidecar's path and a directory listing's spelling of
+    # one file compare equal; a file listed twice keeps its later line.
+    rank = {p.resolve(): line for line, p in enumerate(best)}
+    passes: dict[int, tuple[Pass, ...]] = {}
+    for number, reads in by_track.items():
+        reads.sort(key=lambda p: (headers[p].pass_id, p.name))
+        listed = [i for i, p in enumerate(reads) if p.resolve() in rank]
+        pick = max(listed, key=lambda i: rank[reads[i].resolve()], default=None)
+        passes[number] = tuple(
+            Pass(headers[p].pass_id, p.name, best=i == pick) for i, p in enumerate(reads)
+        )
+        if len(reads) > 1:
+            log.info(
+                "%s: %d reads (%s)",
+                track_label(number),
+                len(reads),
+                ", ".join(p.name for p in reads),
+            )
     numbers = sorted(by_track)
-    first = headers[by_track[numbers[0]]]
+    first = headers[by_track[numbers[0]][0]]
     source = str(paths[0].parent if len(paths) > 1 else paths[0])
     ident = _Identification(volume_profile, overrides)
-    open_tracks: dict[int, FluxTrack] = {}
+    # Keyed by (track, pass index): two reads of one track are two
+    # FluxTracks, and flipping between them should not re-read either.
+    open_tracks: dict[tuple[int, int], FluxTrack] = {}
     labels: dict[int, str] = {}
 
     def identified(layout: Layout) -> None:
@@ -558,19 +608,31 @@ def open_captures(
 
     ident.on_identified.append(identified)
 
-    def load(number: int, progress: Progress = NULL_PROGRESS) -> Track:
+    def load(
+        number: int, progress: Progress = NULL_PROGRESS, pass_index: int | None = None
+    ) -> Track:
         if number >= VOLUME_BASE:
             if ident.layout is None:
                 raise ValueError("the tape has not been identified yet; decode track 0 first")
             vol = ident.layout.volumes[number - VOLUME_BASE]
             with progress.task(f"decompressing volume {number - VOLUME_BASE}", total=None):
                 return volume_track(vol, number, labels[number])
-        if number not in open_tracks:
+        reads = by_track[number]
+        if pass_index is None:
+            pass_index = tape.default_pass(number) or 0
+        if not 0 <= pass_index < len(reads):
+            raise ValueError(
+                f"{tape.label(number)} has {len(reads)} read(s); there is no pass index {pass_index}"
+            )
+        key = (number, pass_index)
+        if key not in open_tracks:
             if len(open_tracks) >= 2:  # a track's intervals are big; keep two
                 oldest = next(iter(open_tracks))
                 open_tracks.pop(oldest).close()
-            open_tracks[number] = FluxTrack(by_track[number], number, ident, progress)
-        return open_tracks[number].track
+            open_tracks[key] = FluxTrack(
+                reads[pass_index], number, ident, progress, pass_index=pass_index
+            )
+        return open_tracks[key].track
 
     tape_detail = (
         ("source", source),
@@ -578,15 +640,21 @@ def open_captures(
         ("drive", f"vendor {first.drive_vendor_id}" if first.drive_vendor_id else "(unknown)"),
         ("tape format", first.tape_format.name),
     )
-    tape = Tape(source, "TWRF", numbers, load, tape_detail)
+    tape = Tape(source, "TWRF", numbers, load, tape_detail, passes=passes)
     return tape
 
 
 def open_directory(
-    path: Path, *, volume_profile: str = vp.GUESS, overrides: vp.Overrides | None = None
+    path: Path,
+    *,
+    best: Sequence[Path] = (),
+    volume_profile: str = vp.GUESS,
+    overrides: vp.Overrides | None = None,
 ) -> Tape:
+    """Every ``.twrf`` in ``path``; ``best`` and the rest are :func:`open_captures`'s."""
     return open_captures(
         sorted(p for p in path.iterdir() if p.suffix == ".twrf"),
+        best=best,
         volume_profile=volume_profile,
         overrides=overrides,
     )

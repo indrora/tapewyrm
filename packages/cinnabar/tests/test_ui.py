@@ -34,6 +34,70 @@ def test_screenshot_of_capture_zoomed_to_bytes(qic80_capture: Path, tmp_path: Pa
     assert out.stat().st_size > 1000
 
 
+class _Window:
+    """A MainWindow on ``tape`` for a test: shown offscreen, taken down in Qt's order after.
+
+    The teardown is :func:`cinnabar.ui.app.screenshot`'s, for the reason
+    given there (PySide6 segfaults at interpreter exit otherwise).
+    """
+
+    def __init__(self, tape, first: int) -> None:
+        from cinnabar.ui.app import MainWindow
+
+        self.app = QApplication.instance() or QApplication([])
+        self.main = MainWindow(tape, first)
+        self.main.show()
+        self.tracks = []
+
+    def settle(self):
+        """Wait out the pending load; the track it landed."""
+        while self.main.track is None or self.main._pending is not None:
+            self.app.processEvents()
+            self.main._pool.waitForDone(50)
+        self.tracks.append(self.main.track)
+        return self.main.track
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        from PySide6.QtCore import QEvent
+
+        for track in self.tracks:
+            if track.decoder is not None:
+                track.decoder.close()
+        self.main._pool.waitForDone()
+        self.main.close()
+        self.main.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_pass_selector_lists_a_tracks_reads_and_opens_the_one_chosen(
+    qic80_capture: Path, tmp_path: Path
+):
+    from tests.conftest import keep_all_dump
+
+    keep_all_dump(qic80_capture, tmp_path / "dump", passes=3, best=2)
+    with _Window(open_path(tmp_path / "dump"), 0) as win:
+        box = win.main.pass_box
+        assert win.settle().pass_index == 1  # opens on dump.jsonl's pick
+        assert box.isEnabled() and box.count() == 3 and box.currentIndex() == 1
+        assert [box.itemText(i) for i in range(3)] == ["Pass 1", "Pass 2 (best)", "Pass 3"]
+        assert box.itemData(2, Qt.ItemDataRole.ToolTipRole) == "track-00.3.twrf"
+        assert win.main.track_box.count() == 1  # one track, however many reads
+        box.setCurrentIndex(2)
+        track = win.settle()
+        assert track.pass_index == 2 and dict(track.detail)["pass"] == "3"
+        assert box.currentIndex() == 2
+
+
+def test_pass_selector_is_greyed_out_for_an_image(image_path: Path):
+    with _Window(open_path(image_path), 0) as win:
+        assert win.settle().pass_index is None
+        box = win.main.pass_box
+        assert not box.isEnabled() and box.count() == 1 and box.itemText(0) == "-"
+
+
 def test_palette_roles_cover_every_style_the_annotators_emit():
     import re
 

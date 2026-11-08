@@ -131,7 +131,13 @@ def open_image(
         for k, v in enumerate(layout.volumes)
     }
 
-    def load(track: int, progress: Progress = NULL_PROGRESS) -> Track:
+    def load(
+        track: int, progress: Progress = NULL_PROGRESS, pass_index: int | None = None
+    ) -> Track:
+        # An image has merged its reads already (tw convert): one per track,
+        # so the only pass there is to ask for is the default.
+        if pass_index not in (None, 0):
+            raise ValueError(f"an image has one read of each track; there is no pass {pass_index}")
         if track >= VOLUME_BASE:
             vol = layout.volumes[track - VOLUME_BASE]
             with progress.task(f"decompressing volume {track - VOLUME_BASE}", total=None):

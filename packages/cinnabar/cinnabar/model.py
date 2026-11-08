@@ -40,6 +40,7 @@ Fields" lane is depth 1; the "Fields" lanes are depths 0, 1, 2... of
 from __future__ import annotations
 
 import bisect
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -535,6 +536,10 @@ class Track:
     # ``directory-damaged``...). The details panel shows them in warning
     # colour; see VolumeReading for where the names come from.
     warnings: tuple[str, ...] = ()
+    # Which read of the track this is: an index into Tape.passes[number]
+    # (the window's Pass selector). None for a track that has no passes to
+    # choose between in the first place: an image's rows and volume streams.
+    pass_index: int | None = None
 
     @property
     def start(self) -> float:
@@ -580,19 +585,44 @@ class Track:
         return out
 
 
+@dataclass(frozen=True)
+class Pass:
+    """One read of a track: a capture file, as the window's Pass selector lists it.
+
+    ``tw dump --keep-all`` keeps every pass over a track, each in its own
+    ``track-NN.P.twrf`` (TWS-1 section 8.1 rule 7), and ``dump.jsonl`` names
+    the one its rules picked (TWS-1 appendix B), which is ``best``. A
+    ``pass_id`` does not tell two reads apart on its own: a ``--retries``
+    run's ``track-05.twrf`` and a later ``--keep-all`` run's
+    ``track-05.5.twrf`` can both say pass 5, and every probe capture says
+    pass 0. The file name always does, as in ``tw convert``'s log.
+    """
+
+    pass_id: int  # the capture header's pass_id (TWS-1 section 4.2)
+    file: str  # the capture's file name
+    best: bool = False  # the read dump.jsonl names for its track (its latest line, if several)
+
+
 @dataclass
 class Tape:
     """A whole tape as the viewer sees it: which tracks exist and how to load each.
 
-    Tracks are loaded on demand (``load(number, progress)``) because a flux
-    track means reading and tokenizing tens of MB; the UI calls it off the
-    main thread and shows the progress it reports.
+    Tracks are loaded on demand (``load(number, progress, pass_index)``)
+    because a flux track means reading and tokenizing tens of MB; the UI
+    calls it off the main thread and shows the progress it reports.
+
+    A flux tape can hold several reads of one track; they are the track's
+    ``passes``, and ``pass_index`` picks one (None: :meth:`default_pass`).
+    The track list stays one entry per track, so stepping tracks never
+    walks through the same track three times over.
     """
 
     source: str
     kind: str  # "TWRF" | "TWTI"
     track_numbers: list[int]
-    load: Callable[[int, Any], Track]  # (track number, Progress) -> Track
+    # (track number, Progress, pass index or None) -> Track. A loader whose
+    # tracks have no passes (an image) takes and ignores the pass index.
+    load: Callable[..., Track]
     detail: tuple[tuple[str, str], ...] = ()
     # Display names for numbers that are not plain tape tracks: a volume's
     # decompressed stream is a "track" too (VOLUME_BASE + its table index),
@@ -602,16 +632,54 @@ class Tape:
     # Caveats on how the tape's volume table was read (VolumeReading.warnings),
     # shown in warning colour wherever the tape's rows are.
     warnings: tuple[str, ...] = ()
+    # Each track's reads, in the order the Pass selector lists them (a flux
+    # loader's: pass_id, then file name). A track absent here, or with one
+    # read, has nothing to choose between.
+    passes: dict[int, tuple[Pass, ...]] = field(default_factory=dict)
 
     def label(self, number: int) -> str:
         if number in self.labels:
             return self.labels[number]
-        if number >= PASS_BASE:
-            return f"Pass {number - PASS_BASE}"
-        return f"Track {number}"
+        return track_label(number)
+
+    def default_pass(self, number: int) -> int | None:
+        """The read a track opens on: the one dump.jsonl names, else the first; None without passes."""
+        reads = self.passes.get(number)
+        if not reads:
+            return None
+        return next((i for i, read in enumerate(reads) if read.best), 0)
+
+    def pass_labels(self, number: int) -> list[str]:
+        """The Pass selector's entries for a track: ``Pass 2 (best)``, ``Pass 5 - track-05.5.twrf``.
+
+        The file name is added only where the pass_id alone would be
+        ambiguous (two reads sharing one, see :class:`Pass`), and ``(best)``
+        only where there is something it was picked over; the selector's
+        tooltips carry every file name regardless.
+        """
+        reads = self.passes.get(number, ())
+        shared = Counter(read.pass_id for read in reads)
+        out: list[str] = []
+        for read in reads:
+            text = f"Pass {read.pass_id}"
+            if shared[read.pass_id] > 1:
+                text += f" - {read.file}"
+            if read.best and len(reads) > 1:
+                text += " (best)"
+            out.append(text)
+        return out
 
 
-PASS_BASE = 1000  # a capture whose header names no usable track
+def track_label(number: int) -> str:
+    """A tape track's name when nothing better is known: ``Track 9``, or ``Unknown track``."""
+    return "Unknown track" if number == UNKNOWN_TRACK else f"Track {number}"
+
+
+# The captures whose header names no track (track -1: a probe that did not
+# seek, TWS-1 section 4.2) are one track, each capture a pass of it. The
+# number only has to sort after every real track (a few dozen at most) and
+# before the volumes.
+UNKNOWN_TRACK = 1000
 VOLUME_BASE = 2000  # VOLUME_BASE + k: the decompressed stream of volume k
 
 

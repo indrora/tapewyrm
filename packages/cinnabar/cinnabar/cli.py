@@ -4,10 +4,13 @@
     cinnabar PATH --dump     print one track's lanes as text instead (no Qt)
 
 PATH is a TWRF flux capture, a directory of them (one per track), or a
-TWTI/TWTZ tape image. Output channels and flags follow ``tw`` (STYLE.md
-section 2, 2.5): ``--dump`` on stdout; logs and ``--progress`` bars on
-stderr through one rich console (:mod:`cinnabar.console`); ``-v`` / ``-q``
-move the log level. ``click`` here is ``rich_click``. Qt is imported only
+TWTI/TWTZ tape image. A flux tape's track can have several reads (``tw
+dump --keep-all``); ``--pass`` picks one by its pass_id, or ``best`` for
+the one ``dump.jsonl`` names, which is also what opens without it.
+
+Output channels and flags follow ``tw`` (STYLE.md section 2, 2.5):
+``--dump`` on stdout; logs and ``--progress`` bars on stderr through one
+rich console (:mod:`cinnabar.console`); ``-v`` / ``-q`` move the log level. ``click`` here is ``rich_click``. Qt is imported only
 when a window is actually opened, so ``--dump`` and ``--help`` stay quick.
 
 The volume-read flags (``--volume-profile`` and the hand-tuning flags) are
@@ -33,7 +36,7 @@ from tapewyrm_archive.progress import Progress
 
 from cinnabar.annotate import ordered_rows
 from cinnabar.console import make_console, progress_display, setup_logging
-from cinnabar.model import VOLUME_BASE, Track, in_row, rows_of
+from cinnabar.model import VOLUME_BASE, Tape, Track, in_row, rows_of
 
 if TYPE_CHECKING:
     from qiclib.volume.profile import Overrides
@@ -179,10 +182,69 @@ def dump_track(track: Track, *, segment: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def pass_index(tape: Tape, number: int, choice: str) -> int:
+    """``--pass``'s word as an index into ``tape.passes[number]``.
+
+    ``best`` is the read ``dump.jsonl`` names (:meth:`Tape.default_pass
+    <cinnabar.model.Tape.default_pass>`), or the first read, said at INFO,
+    when the sidecar names none of the track's. Anything else is a
+    pass_id. pass_ids need not be distinct (:class:`cinnabar.model.Pass`:
+    a ``--retries`` file and a ``--keep-all`` file can both be pass 5), so
+    a pass_id that several reads share opens the first of them in the
+    Pass selector's order, and the warning names the others; the window's
+    selector tells them apart by file name.
+    """
+    label = tape.label(number)
+    reads = tape.passes.get(number, ())
+    if not reads:
+        raise click.BadParameter(
+            f"{label} has no passes to choose from (only a flux capture's tracks do)",
+            param_hint="--pass",
+        )
+    if choice.strip().lower() == "best":
+        index = tape.default_pass(number) or 0
+        if not reads[index].best:
+            log.info("%s: dump.jsonl names none of its reads; opening the first", label)
+        return index
+    try:
+        wanted = int(choice)
+    except ValueError:
+        raise click.BadParameter(
+            f"{choice!r} is neither a pass_id nor 'best'", param_hint="--pass"
+        ) from None
+    hits = [i for i, read in enumerate(reads) if read.pass_id == wanted]
+    if not hits:
+        have = ", ".join(str(read.pass_id) for read in reads)
+        raise click.BadParameter(
+            f"{label} has no pass {wanted} (it has {have})", param_hint="--pass"
+        )
+    if len(hits) > 1:
+        log.warning(
+            "%s: %d reads are pass %d (%s); opening %s",
+            label,
+            len(hits),
+            wanted,
+            ", ".join(reads[i].file for i in hits),
+            reads[hits[0]].file,
+        )
+    return hits[0]
+
+
 @click.command()
 @click.version_option(package_name="cinnabar", prog_name="cinnabar")
 @click.argument("path", type=click.Path(exists=True, path_type=Path))
 @click.option("--track", "track_number", type=int, default=None, help="track to open first")
+@click.option(
+    "--pass",
+    "pass_choice",
+    type=str,
+    default=None,
+    metavar="P|best",
+    help=(
+        "which read of the track to open, when tw dump --keep-all kept several: its pass_id, "
+        "or best for the one dump.jsonl names (the default)"
+    ),
+)
 @click.option(
     "--volume",
     "volume_index",
@@ -225,6 +287,7 @@ def dump_track(track: Track, *, segment: int | None = None) -> str:
 def cli(
     path: Path,
     track_number: int | None,
+    pass_choice: str | None,
     volume_index: int | None,
     volume_profile: str,
     overrides: Overrides | None,
@@ -272,9 +335,10 @@ def cli(
                     track0.decoder.wait()
     if first not in tape.track_numbers:
         raise click.BadParameter(f"{tape.label(first)} is not in {path}", param_hint="--track")
+    chosen = pass_index(tape, first, pass_choice) if pass_choice is not None else None
     if dump:
         with app.progress() as prog:
-            track = tape.load(first, prog)
+            track = tape.load(first, prog, chosen)
             if track.decoder is not None:
                 track.decoder.wait()
         # The tape's rows first (a flux tape's are complete once track 0 has
@@ -290,9 +354,16 @@ def cli(
             a, b = window.split(":")
             rng = (float(a), float(b))
         render(
-            tape, first, screenshot, segment=segment or 0, theme=theme, window=rng, click=click_at
+            tape,
+            first,
+            screenshot,
+            pass_index=chosen,
+            segment=segment or 0,
+            theme=theme,
+            window=rng,
+            click=click_at,
         )
         return
     from cinnabar.ui.app import run
 
-    run(tape, first, theme=theme)
+    run(tape, first, pass_index=chosen, theme=theme)

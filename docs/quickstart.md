@@ -219,7 +219,9 @@ tw --profile colorado --progress dump captures/NAME
   pass of a track becomes `track-NN.P.twrf` (P is the pass number), and
   `dump.jsonl` still names the best one. A pass that loses as a whole can
   still hold a sector the winner lost, and `tw convert` uses every capture in
-  the directory. **`--passes N`** goes further and reads every track N times
+  the directory. `cinnabar` shows them as one track each, with a **Pass**
+  selector beside the track one (it opens on `dump.jsonl`'s pick; `--pass P`
+  opens pass P instead). **`--passes N`** goes further and reads every track N times
   whatever happens, keeping them all (`--retries` then adds more only if none
   of the N was clean). On a dying tape, `--passes 2 --retries 2` is the
   "never throw a read away" setting.
