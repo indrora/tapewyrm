@@ -74,7 +74,7 @@ root:
 | `just cinnabar ARGS` | `cinnabar ARGS` |
 | `just fw` | builds the firmware into `dist/` (needs PlatformIO) |
 | `just dfu [BIN]` | `tw dfu BIN` |
-| `just flash [IMAGE]` | `tw flash IMAGE` |
+| `just update [IMAGE]` | `tw update IMAGE` |
 | `just package` | builds the host wheels and the firmware into `dist/` |
 
 `just --list` shows every recipe. The development recipes (`just host`,
@@ -90,7 +90,7 @@ qicsilver --help
 ```
 
 You should see the list of subcommands. `tw --help` lists `convert`, `dfu`,
-`drive`, `dump`, `flash`, `info` and `inspect`.
+`drive`, `dump`, `update`, `info` and `inspect`.
 
 ## Next steps
 

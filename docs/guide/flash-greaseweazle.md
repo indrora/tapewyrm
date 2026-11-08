@@ -30,16 +30,16 @@ You need one of these files:
 
 | File | Contents | Use with |
 |---|---|---|
-| `tapewyrm-at32f4-VERSION.bin` | the application only | `tw dfu`, `tw flash` |
+| `tapewyrm-at32f4-VERSION.bin` | the application only | `tw dfu`, `tw update` |
 | `tapewyrm-at32f4-VERSION.hex` | the Greaseweazle-compatible bootloader and the application, merged | a flasher that takes Intel HEX (Artery ISP) |
-| `tapewyrm-VERSION.upd` | a Greaseweazle update file (`just fw-dist` only) | the bootloader's update protocol |
+| `tapewyrm-VERSION.upd` | a Greaseweazle update file (`just fw-dist` only) | `tw update` |
 
 Get them one of these ways:
 
 - **Build them.** With PlatformIO Core installed, run `just fw` from the
   repository root. The build leaves the files under `dist/`, and the raw
   application image at `firmware/.pio/build/tapewyrm/firmware.bin`, which is
-  the default image for `just dfu` and `just flash`. `just fw-dist` also
+  the default image for `just dfu` and `just update`. `just fw-dist` also
   writes the `.upd` file. The toolchain is pinned in `firmware/platformio.ini`
   and PlatformIO downloads it itself. Build details are in
   [Firmware](../dev/firmware.md).
@@ -70,7 +70,7 @@ whose application or bootloader is broken.
     `tw dfu` runs `dfu-util -a 0 -s :leave -D IMAGE`. You should see
     `dfu-util`'s progress, then `flashed IMAGE via DFU`. If `dfu-util` is not
     on your `PATH`, pass `--dfu-util PATH`. If more than one DFU device is
-    attached, pass `--device VID:PID`. See [tw dfu](../tw/flash.md#tw-dfu).
+    attached, pass `--device VID:PID`. See [tw dfu](../tw/update.md#tw-dfu).
 
 5. Unplug the board, remove the DFU strap, and plug it in again.
 
@@ -84,22 +84,26 @@ whose application or bootloader is broken.
 
 ## Update the firmware later
 
-Once the board runs Tapewyrm or stock Greaseweazle firmware, routine updates
-are meant to go through the board's application bootloader over USB, with no
-strap:
+Once the board runs Tapewyrm or stock Greaseweazle firmware, update it over
+USB through the board's application bootloader, with no strap:
 
 ```sh
-tw flash firmware/.pio/build/tapewyrm/firmware.bin
+tw update firmware/.pio/build/tapewyrm/firmware.bin
 ```
 
-!!! note "`tw flash` is not implemented yet"
-    The application-bootloader client in `tw` is not written yet. `tw flash`
-    checks that the image exists, then stops with an error that tells you to
-    use `tw dfu`. Until it is, update the firmware the same way as the first
-    flash. `tw flash --dfu IMAGE` takes the DFU path directly, with
-    `dfu-util`'s defaults.
+`tw update` reboots the board into its bootloader, writes and CRC-checks the
+new firmware, and reboots it into the new firmware. It takes the raw
+application `.bin` or the `.upd` file from `just fw-dist`. If it fails partway,
+the board is left in its bootloader: run `tw update` again. See
+[tw update](../tw/update.md#tw-update) for the details.
 
-Installing Tapewyrm firmware with `gw update` is not supported.
+!!! warning "Not yet run on a v4.1"
+    `tw update` is tested against the firmware's update code but has not yet
+    updated a real board. If it misbehaves, fall back to the first-flash
+    procedure above; `tw update --dfu IMAGE` takes the DFU path directly.
+
+Use `tw update` to install Tapewyrm firmware. Installing it with `gw update`
+is not supported.
 
 ## Go back to stock Greaseweazle firmware
 

@@ -1,6 +1,8 @@
-"""``tw flash`` and ``tw dfu``: Tapewyrm firmware updates (DESIGN.md §12.3).
+"""``tw update`` and ``tw dfu``: Tapewyrm firmware updates (DESIGN.md §12.3).
 
-tw owns flashing -- no dependency on the ``gw`` tool.
+tw owns flashing -- no dependency on the ``gw`` tool. ``tw update`` speaks the
+Greaseweazle-compatible application-bootloader protocol itself (the same bytes
+``gw update`` sends; see link/update.py); ``tw dfu`` is the recovery path.
 """
 
 from __future__ import annotations
@@ -15,27 +17,47 @@ log = logging.getLogger(__name__)
 
 
 @cli.command()
-@click.argument("image", type=click.Path(exists=True))
-@click.option("--dfu", "use_dfu", is_flag=True, help="flash via DFU instead of the app bootloader")
+@click.argument("image", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--bootloader",
+    is_flag=True,
+    help="rewrite the bootloader instead of the main firmware (needs a .upd; "
+    "if it goes wrong, recover with `tw dfu`)",
+)
+@click.option("--dfu", "use_dfu", is_flag=True, help="flash via DFU instead (same as `tw dfu`)")
 @click.pass_obj
-def flash(app: AppContext, image: str, use_dfu: bool) -> None:
-    """Update Tapewyrm firmware via the GW-compatible application bootloader.
+def update(app: AppContext, image: str, bootloader: bool, use_dfu: bool) -> None:
+    """Update the board's firmware over USB through its Greaseweazle-compatible bootloader.
 
-    Pass --dfu to route to the recovery DFU path instead (same as `tw dfu`).
+    IMAGE is a .upd update file (from `just fw-dist`) or the raw application
+    .bin that PlatformIO builds. The board is rebooted into its bootloader,
+    rewritten, verified by CRC and rebooted back into the new firmware.
     """
     from tapewyrm.link.update import FlashError, app_update, run_dfu  # noqa: PLC0415
 
     try:
         if use_dfu:
+            if bootloader:
+                log.debug("--dfu with --bootloader; refusing")
+                raise click.UsageError("--dfu flashes the application .bin; drop --bootloader")
             log.debug("flashing %s via DFU", image)
             run_dfu(image)
-        else:
-            log.debug("flashing %s via app bootloader on port %r", image, app.port)
-            app_update(image, port=app.port)
-        click.echo(f"flashed {image}")
+            click.echo(f"flashed {image} via DFU")
+            return
+        log.debug("updating from %s on port %r (bootloader=%s)", image, app.port, bootloader)
+        with app.progress() as prog:
+            result = app_update(image, port=app.port, bootloader=bootloader, progress=prog)
     except FlashError as exc:
-        log.debug("flash failed: %r", exc)
+        log.debug("update failed: %r", exc)
         raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"wrote {result.entry.describe()}")
+    if result.after is None:
+        click.echo("left in the bootloader: remove the update strap and power-cycle the board")
+    elif bootloader:
+        click.echo(f"bootloader updated; main firmware v{result.after.version} still running")
+    else:
+        click.echo(f"board now running main firmware v{result.after.version}")
 
 
 @cli.command()

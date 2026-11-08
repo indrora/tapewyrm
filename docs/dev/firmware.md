@@ -263,4 +263,4 @@ text, not its number.
 
 - [Device protocol](protocol.md)
 - [Greaseweazle v4.1](../hardware/greaseweazle.md)
-- [tw flash and tw dfu](../tw/flash.md)
+- [tw update and tw dfu](../tw/update.md)

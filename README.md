@@ -62,9 +62,10 @@ to read a tape. Continue with
 [Read a tape](docs/guide/read-a-tape.md).
 
 > [!NOTE]
-> The DFU path is the only flash method that works today; `tw flash` is not
-> implemented yet. See [Flash the Greaseweazle](docs/guide/flash-greaseweazle.md)
-> if `dfu-util` does not see the board.
+> The first flash goes through DFU. After that, `tw update` updates the
+> firmware over USB with no strap (not yet run on a real board). See
+> [Flash the Greaseweazle](docs/guide/flash-greaseweazle.md) if `dfu-util`
+> does not see the board.
 
 ## Documentation
 

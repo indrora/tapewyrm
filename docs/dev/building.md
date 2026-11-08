@@ -94,10 +94,10 @@ packages. Delete those by hand if you need to.
 
 | Recipe | Runs | Use it to |
 |---|---|---|
-| `just flash [image=...]` | `tw flash IMAGE` from `packages/tapewyrm-cli` | Update the board through the Greaseweazle-compatible application bootloader. The default image is `firmware/.pio/build/tapewyrm/firmware.bin`. |
+| `just update [image=...]` | `tw update IMAGE` from `packages/tapewyrm-cli` | Update the board through the Greaseweazle-compatible application bootloader. The default image is `firmware/.pio/build/tapewyrm/firmware.bin`. |
 | `just dfu [bin=...]` | `tw dfu BIN` from `packages/tapewyrm-cli` | First flash or recovery through the AT32 ROM bootloader with `dfu-util`. Same default image. |
 
-See [tw flash and tw dfu](../tw/flash.md) for what each path does to the
+See [tw update and tw dfu](../tw/update.md) for what each path does to the
 board.
 
 ### Running the tools

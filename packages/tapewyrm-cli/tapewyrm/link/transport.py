@@ -112,6 +112,13 @@ class Transport(Protocol):
     def read_exact(self, n: int) -> bytes:
         """Read exactly ``n`` more response bytes (variable-length tails)."""
 
+    def write(self, data: bytes) -> None:
+        """Write raw bytes that are not a command frame.
+
+        Only the firmware-update stream needs this: after ``CMD_UPDATE`` is
+        acked the device takes the image as a bare byte stream (link/update.py).
+        """
+
     def send_control(self, opcode: int, payload: bytes = b"") -> None:
         """Write an out-of-band control frame (e.g. ABORT) mid-capture.
 
@@ -273,6 +280,15 @@ class SerialTransport:
     def read_exact(self, n: int) -> bytes:
         return self._read_exact(n)
 
+    def write(self, data: bytes) -> None:
+        ser = self._require()
+        try:
+            ser.write(data)  # type: ignore[attr-defined]
+            ser.flush()  # type: ignore[attr-defined]
+        except Exception as exc:
+            log.debug("raw write of %d B failed: %s", len(data), exc)
+            raise TransportError(f"write failed: {exc}") from exc
+
     def read_stream(self, max_bytes: int = 65536) -> bytes:
         ser = self._require()
         try:
@@ -307,6 +323,7 @@ class FakeTransport:
         self._open = False
         self.sent_frames: list[tuple[int, bytes]] = []
         self.sent_control: list[tuple[int, bytes]] = []
+        self.sent_raw = bytearray()  # everything passed to write(), concatenated
         self._responses: deque[tuple[int, int, bytes]] = deque()
         self._stream: deque[bytes] = deque()
         self._tail = b""  # unread remainder of the last response (read_exact)
@@ -381,6 +398,10 @@ class FakeTransport:
             raise TransportError(f"short read: wanted {n}, have {len(self._tail)}")
         head, self._tail = self._tail[:n], self._tail[n:]
         return head
+
+    def write(self, data: bytes) -> None:
+        self._require()
+        self.sent_raw += data
 
     def read_stream(self, max_bytes: int = 65536) -> bytes:
         self._require()

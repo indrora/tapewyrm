@@ -36,7 +36,7 @@ running Tapewyrm firmware.
  NAME.tar + damage report
 ```
 
-Only `tw dump`, `tw info`, `tw drive`, `tw flash` and `tw dfu` need the
+Only `tw dump`, `tw info`, `tw drive`, `tw update` and `tw dfu` need the
 hardware. Every later step runs offline, on any machine.
 
 ## Where to start

@@ -68,5 +68,5 @@ or the board does not answer.
 ## See also
 
 - [Flash the Greaseweazle](../guide/flash-greaseweazle.md)
-- [tw flash and tw dfu](flash.md)
+- [tw update and tw dfu](update.md)
 - [Greaseweazle v4.1](../hardware/greaseweazle.md)

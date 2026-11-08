@@ -15,7 +15,7 @@ Tapewyrm supports this one board and needs no hardware changes to it.
 | USB | USB-C, Full-Speed (12 Mbit/s) | See [USB link limits](#usb-link-limits). |
 | Floppy outputs | Buffered, 40 mA | Strong enough for drive-side pull-ups. |
 | Power | 5 V header; USB 5 V isolation jumper | The 5 V header cannot run a tape drive's motor. |
-| Recovery | Hardware DFU header | Straps the AT32's ROM bootloader, so a broken flash is always recoverable. See [tw flash and tw dfu](../tw/flash.md). |
+| Recovery | Hardware DFU header | Straps the AT32's ROM bootloader, so a broken flash is always recoverable. See [tw update and tw dfu](../tw/update.md). |
 
 ## 34-pin lines used for QIC-117
 

@@ -77,7 +77,7 @@ nav:
           - tw dump: tw/dump.md
           - tw convert: tw/convert.md
           - tw inspect: tw/inspect.md
-          - tw flash and tw dfu: tw/flash.md
+          - tw update and tw dfu: tw/update.md
           - Drive profiles: tw/profiles.md
           - Configuration and logging: tw/config.md
       - qicsilver reference:

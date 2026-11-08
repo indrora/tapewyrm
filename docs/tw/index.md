@@ -45,8 +45,8 @@ profile name fails every command.
 | [`tw dump`](dump.md) | drive | Captures whole tracks to TWRF files, one Logical Forward pass each. |
 | [`tw convert`](convert.md) | nothing | Decodes TWRF captures into a TWTI or TWTZ tape image. |
 | [`tw inspect`](inspect.md) | nothing | Shows the header of a TWRF, TWTI/TWTZ or TWVL file. |
-| [`tw flash`](flash.md) | Greaseweazle | Updates the firmware through the application bootloader. Not implemented yet. |
-| [`tw dfu`](flash.md#tw-dfu) | Greaseweazle, DFU strap | First flash or recovery through the AT32 ROM bootloader, using `dfu-util`. |
+| [`tw update`](update.md) | Greaseweazle | Updates the firmware over USB through the application bootloader. |
+| [`tw dfu`](update.md#tw-dfu) | Greaseweazle, DFU strap | First flash or recovery through the AT32 ROM bootloader, using `dfu-util`. |
 
 ## Output
 

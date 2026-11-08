@@ -1,8 +1,9 @@
-# tw flash and tw dfu
+# tw update and tw dfu
 
-Write a firmware image to the Greaseweazle. `tw dfu` uses the AT32 ROM
-bootloader and is the path that works today. `tw flash` is the routine update
-path through the board's application bootloader, and is not implemented yet.
+Write a firmware image to the Greaseweazle. `tw update` is the routine path:
+over USB, through the board's Greaseweazle-compatible application bootloader,
+with no strap. `tw dfu` uses the AT32 ROM bootloader, for the first flash and
+for recovery.
 
 For the procedure, including where to get an image, see
 [Flash the Greaseweazle](../guide/flash-greaseweazle.md).
@@ -74,7 +75,7 @@ as the default.
 `0` and `flashed IMAGE via DFU` when `dfu-util` succeeded. `1` if the image is
 missing, `dfu-util` is not found, or `dfu-util` exits with an error.
 
-## tw flash
+## tw update
 
 Update the firmware through the Greaseweazle-compatible application
 bootloader, over USB, with no strap.
@@ -82,44 +83,84 @@ bootloader, over USB, with no strap.
 ### Synopsis
 
 ```text
-tw [GLOBAL OPTIONS] flash [--dfu] IMAGE
+tw [GLOBAL OPTIONS] update [--bootloader] [--dfu] IMAGE
 ```
 
 ### Description
 
 The board keeps Greaseweazle's own application bootloader, and Tapewyrm keeps
-its update protocol unchanged. `tw flash` is meant to speak that protocol
-itself, so no `gw` install is needed.
+its update protocol unchanged. `tw update` speaks that protocol itself, so no
+`gw` install is needed. An update goes like this:
 
-!!! note "Not implemented yet"
-    The bootloader client is not written. `tw flash IMAGE` checks that `IMAGE`
-    exists, then stops with an error that tells you to use `tw dfu`. Use
-    [tw dfu](#tw-dfu) for every flash until this changes.
+1. Ask the running firmware what it is (`GET_INFO`).
+2. If the main firmware is running, tell it to reboot into the bootloader,
+   then wait for the board to come back on USB. `tw` finds it again by its USB
+   serial number, so a renamed serial port does not matter.
+3. Send the image. The bootloader erases the old main firmware, writes the new
+   one and checks its CRC. If the CRC fails it erases the half-written image
+   and stays in the bootloader; run `tw update` again.
+4. Tell the bootloader to start the new firmware, reconnect, and print the
+   version it reports.
 
-With `--dfu`, `tw flash` takes the DFU path instead, exactly as `tw dfu IMAGE`
+`IMAGE` is either a `.upd` update file (from `just fw-dist`; `tw` picks the
+entry that matches the board's MCU) or the raw application `.bin`
+(`firmware/.pio/build/tapewyrm/firmware.bin`). A raw `.bin` has no version
+number, so the update is reported as v0.0. `tw` checks the image's vector
+table before it touches the board and refuses an image linked for the wrong
+slot, such as the bootloader's `.bin`. Intel HEX is refused; that format is
+for Artery ISP.
+
+If the board's update strap is fitted, the bootloader runs on every reset.
+`tw update` still writes the firmware, then tells you to remove the strap and
+power-cycle the board.
+
+`--bootloader` rewrites the bootloader itself instead, from the running main
+firmware. It needs a `.upd` file. The main firmware checks the whole image's
+CRC in RAM before it erases anything, but a power cut during the write leaves
+the board with no bootloader; [tw dfu](#tw-dfu) recovers it.
+
+With `--dfu`, `tw update` takes the DFU path instead, exactly as `tw dfu IMAGE`
 with its defaults. It does not take `tw dfu`'s options.
+
+!!! warning "Not yet run on a v4.1"
+    The client is tested against the firmware's update code and the
+    `mk_update.py` file format, but has not yet updated a real board. If an
+    update fails partway, the bootloader is still there: run `tw update`
+    again, or fall back to [tw dfu](#tw-dfu).
 
 ### Options
 
 | Option | Default | Description |
 |---|---|---|
-| `IMAGE` | | The firmware image. Must exist. |
+| `IMAGE` | | A `.upd` file or the raw application `.bin`. Must exist. |
+| `--bootloader` | off | Rewrite the bootloader instead of the main firmware. Needs a `.upd`. |
 | `--dfu` | off | Flash through DFU instead of the application bootloader. |
 
-The global `--port` selects the board.
+The global `--port` selects the board, and `--progress` shows a progress bar
+while the image is written.
 
 ### Examples
 
-Flash through DFU with the defaults:
+Update to the image `just fw` built:
 
 ```sh
-tw flash --dfu firmware/.pio/build/tapewyrm/firmware.bin
+tw update firmware/.pio/build/tapewyrm/firmware.bin
 ```
+
+Update from a release:
+
+```sh
+tw --progress update dist/tapewyrm-0.1.0/firmware/tapewyrm-1.6.upd
+```
+
+`just update [IMAGE]` runs `tw update` with
+`firmware/.pio/build/tapewyrm/firmware.bin` as the default.
 
 ### Exit status
 
-`1` without `--dfu`, until the bootloader client is written. With `--dfu`, as
-for `tw dfu`.
+`0` after a verified write, with `wrote ...` and the version the board now
+runs. `1` if the image is unusable, the board refuses the update, the CRC
+check fails, or the board does not come back on USB.
 
 ## See also
 

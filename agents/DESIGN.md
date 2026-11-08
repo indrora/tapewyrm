@@ -28,13 +28,13 @@ This captures *why* as much as *what*. Where a decision had a real alternative, 
 | Greaseweazle **v4.1 hardware** — no board respin | Firmware: QIC command verbs, bus arbiter, free-running flux capture + markers |
 | The GW **native flux transfer encoding** (referred to in discussion as *"greasepack"* — see note below) | Host: device-link stubs, QIC-117 drive layer, tape dump, QIC-80 physical decode, QIC layout + backup-format library (`qiclib`) |
 | GW flux engine, PLL (vendored into the host as `codec/gwpll.py`), bitcell recovery, **MFM framing** (the timing-critical primitives) | The file formats: **TWRF** flux captures, **TWTI/TWTZ** tape images, **TWVL** volumes (§7.1, §7.6, §7.7) + tape marker opcodes |
-| `gw pin set` / `gw pin get` (bench bring-up only), the bootloader / update **protocol** (kept wire-compatible), read/stop control semantics | The entire QIC-117 / QIC-80 / QIC-113 "brain" (host-side), **and the CLIs: `tw` (hardware, flux → image, flashing via `tw flash` / `tw dfu`) and `qicsilver` (image → files, offline); the `gw` executable is never required** |
+| `gw pin set` / `gw pin get` (bench bring-up only), the bootloader / update **protocol** (kept wire-compatible), read/stop control semantics | The entire QIC-117 / QIC-80 / QIC-113 "brain" (host-side), **and the CLIs: `tw` (hardware, flux → image, flashing via `tw update` / `tw dfu`) and `qicsilver` (image → files, offline); the `gw` executable is never required** |
 
 > **Fork posture — this is a hard fork, not a tracked branch.** Tapewyrm starts from Greaseweazle and diverges; mergeability with upstream is **not** a goal, and on the host side little if any GW *tooling* survives recognizably (GW's host code is built around `.scp`-style disk images and disk verbs — almost none of which maps onto a QIC-117 drive model + tape transport + linear-track-stack codec). What actually carries over is narrow: the flux-capture timing skeleton and USB/bootloader on the firmware, and the flux-codec / PLL / MFM primitives on the host. The discipline that *replaces* upstream-tracking is a **clean internal seam** isolating exactly those primitives, so (a) future upstream fixes to the flux engine can still be cherry-picked by hand, and (b) the bootloader/update protocol stays wire-compatible so it can be driven by `tw`'s own flashing client (and, incidentally, by stock `gw update` too — but `tw` never *requires* `gw`). Everything else is owned outright. (Mechanics in §12.5.)
 
 > **Terminology note.** "Greasepack" is not an official Greaseweazle term and could not be found in GW docs or firmware. What is meant is unambiguous: the GW on-wire flux byte stream (variable-length inter-transition intervals at a known sample clock, plus an opcode/escape channel). This document calls it the **GW flux encoding**.
 
-**Tooling posture — `tw` owns the hardware, `qicsilver` owns the files.** *Original decision (superseded in part):* all host functionality in a single executable, **`tw`**, with verbs `probe` / `capture` / `decode` / `recover` / `replay` and firmware flashing. *As built:* everything that touches the board — drive control, dumping, firmware flashing — and the flux → image step are still one executable, **`tw`** (`info`, `drive …`, `dump`, `convert`, `flash`, `dfu`; §6A.7). Everything after the tape image is the separate, hardware-free **`qicsilver`** (`identify`, `extract`, `tar`). The split follows the file formats: a TWTI image is the complete hand-off, so a user recovering files from someone else's image needs no USB stack, no drive profiles and no firmware tooling, and the backup-format code can change without touching the hardware package (§6A.1). The rest of the original posture stands: Tapewyrm deliberately does **not** reuse or require Greaseweazle's `gw` executable. The bootloader/update protocol is kept wire-compatible (§12.5) so the board stays a dual citizen — flashable by `tw`'s own client *and*, incidentally, by stock `gw update` — but a Tapewyrm install needs nothing from GW. (`gw pin` remains a handy bench aid during bring-up before firmware exists; that is not a runtime dependency.)
+**Tooling posture — `tw` owns the hardware, `qicsilver` owns the files.** *Original decision (superseded in part):* all host functionality in a single executable, **`tw`**, with verbs `probe` / `capture` / `decode` / `recover` / `replay` and firmware flashing. *As built:* everything that touches the board — drive control, dumping, firmware flashing — and the flux → image step are still one executable, **`tw`** (`info`, `drive …`, `dump`, `convert`, `update`, `dfu`; §6A.7). Everything after the tape image is the separate, hardware-free **`qicsilver`** (`identify`, `extract`, `tar`). The split follows the file formats: a TWTI image is the complete hand-off, so a user recovering files from someone else's image needs no USB stack, no drive profiles and no firmware tooling, and the backup-format code can change without touching the hardware package (§6A.1). The rest of the original posture stands: Tapewyrm deliberately does **not** reuse or require Greaseweazle's `gw` executable. The bootloader/update protocol is kept wire-compatible (§12.5) so the board stays a dual citizen — flashable by `tw`'s own client *and*, incidentally, by stock `gw update` — but a Tapewyrm install needs nothing from GW. (`gw pin` remains a handy bench aid during bring-up before firmware exists; that is not a runtime dependency.)
 
 **Non-goals (for now):**
 - Writing or formatting tapes (needs reference-burst/servo handling — out of scope; read-only is far simpler and is all recovery requires). *(But see Sometime goals — the Linux linear-device aim eventually pulls write into scope.)*
@@ -323,7 +323,7 @@ packages/
     cli/, console.py   # rich-click front end (one module per command group); rich logging + progress on stderr
     types.py           # DeviceInfo, TimingParams, SelectHint, StopCond, ErrorCode, DriveProfile, ...
     link/              # transport.py (serial + GW framing), device.py (DeviceLink),
-                       #   protocol.py (GENERATED), update.py (tw flash / tw dfu)
+                       #   protocol.py (GENERATED), update.py (tw update / tw dfu)
     qic117/            # commands.py (Rev J table), drive.py (Qic117Drive), status.py, profile.py
     tape/              # dump.py (tw dump), fluxprobe.py (tw drive flux)
     codec/             # gwstream.py (device stream), gwpll.py (vendored GW PLL), mfm.py (framing+CRC),
@@ -609,7 +609,7 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 | `tw decode` | `RawFluxCapture`(s) → `LogicalVolume` + recovery report (no hardware) | rawflux, codec |
 | `tw recover` | capture + decode + multi-pass retries on weak segments | all |
 | `tw replay` | re-decode saved flux with different PLL/RS options | rawflux, codec |
-| `tw flash` | update firmware via the GW-compatible application bootloader over USB | link/update |
+| `tw update` | update firmware via the GW-compatible application bootloader over USB | link/update |
 | `tw dfu` | recovery / first flash via the AT32 ROM bootloader (wraps `dfu-util`) | link/update |
 
 *As built*, the verbs follow the files instead of the layers (§4): each command reads one format and writes the next, so a step can be re-run without redoing the ones before it (a re-read of three bad tracks is a second `dump` directory handed to the same `convert`). Bring-up also needed hand control of the drive, which became `tw drive`. Two executables, both on **rich-click** (imported as `click`):
@@ -629,7 +629,7 @@ A truncated capture (no `END`) is *not* an error — it still decodes, because s
 | `tw dump DIR [TRACKS] [--check] [--retries N] [--no-clobber]` | one Logical Forward pass per track (TRACKS such as `0-27`; default: every track of the format the drive reports) → `DIR/track-NN.twrf` (+ `dump.jsonl`); health-checked (§6.3), a failed track re-read up to N more times (`--retries`), a stopped dump resumed in place (`--no-clobber`), every pass kept as `track-NN.P.twrf` (`--keep-all`; `--passes N` reads each track N times) |
 | `tw convert SOURCE… IMAGE [-j N] [--best G] [--rank R]` | TWRF dumps → TWTI image (`.twtz` suffix: zstd); several reads of one tape merge (§6A.5), by sector by default, or each segment or track whole from its best read (`--best segment\|track`, ranked by CRC-clean sectors or by segments that correct with spare parity agreeing, `--rank crc\|rs`, `qiclib.merge.select`); unless `--no-vote`, sectors no read got right are majority-voted and uncorrectable segments rescued RS column by column (`qiclib.vote`); logged per track (`qiclib.mergelog`); `-j N` decodes N captures at once in worker processes, `-j 0` as many as the cores and RAM allow |
 | `tw inspect FILE [--json]` | header of any TWRF / TWTI / TWTZ / TWVL file, identified by magic: decoded summary, or the stored JSON verbatim (`--json`); reads only the header and an image's segment table (`tapewyrm_archive.inspect`) |
-| `tw flash IMAGE [--dfu]` | firmware via the GW-compatible application bootloader (or DFU) |
+| `tw update IMAGE [--bootloader] [--dfu]` | firmware via the GW-compatible application bootloader (or DFU) |
 | `tw dfu IMAGE` | recovery / first flash via the AT32 ROM bootloader (wraps `dfu-util`) |
 
 **`qicsilver`** (`packages/qicsilver`) — offline, no hardware, no flux; reads TWTI or TWTZ (chosen by magic, not suffix):
@@ -978,11 +978,11 @@ All three are driven by **`tw`** (or, for the debug tier, a probe) — never by 
 
 | Tier | Mechanism | Driven by | Use it for | Needs |
 |---|---|---|---|---|
-| Routine | GW-compatible application bootloader, over USB | **`tw flash`** | normal firmware updates | nothing extra |
+| Routine | GW-compatible application bootloader, over USB | **`tw update`** | normal firmware updates | nothing extra |
 | **Recovery / un-brick** | **Hardware DFU header → AT32 built-in ROM bootloader** | **`tw dfu`** (wraps `dfu-util`) | flashing when the app bootloader is broken/half-flashed; first-flash | `dfu-util` (or Artery ISP/AT-Link if the AT32 ROM-DFU descriptor doesn't enumerate cleanly under stock `dfu-util`) |
 | Debug | SWD via ST-Link / Black Magic Probe + OpenOCD (`flash`/`ocd` make targets) | a debug probe | live debugging, breakpoints, single-stepping | a debug probe |
 
-The middle tier is the important one for this project: iterating on the arbiter and timing code risks bricking the application, and the DFU header guarantees an application-independent recovery path that needs no debug probe. Treat `tw dfu` (→ `dfu-util` / Artery's tool) as the always-works fallback and `tw flash` (the GW-compatible app-bootloader protocol, spoken by `tw` itself) as the convenience path. `tw` carries its own flashing client so it never shells out to `gw update`; the protocol staying wire-compatible means stock `gw update` *also* works on the same board, but Tapewyrm doesn't depend on it.
+The middle tier is the important one for this project: iterating on the arbiter and timing code risks bricking the application, and the DFU header guarantees an application-independent recovery path that needs no debug probe. Treat `tw dfu` (→ `dfu-util` / Artery's tool) as the always-works fallback and `tw update` (the GW-compatible app-bootloader protocol, spoken by `tw` itself) as the convenience path. `tw` carries its own flashing client so it never shells out to `gw update`; the protocol staying wire-compatible means stock `gw update` *also* works on the same board, but Tapewyrm doesn't depend on it.
 
 > **Open item:** confirm whether the AT32F403 ROM DFU enumerates under stock `dfu-util` or requires Artery's ISP/AT-Link tooling — settle this early, since it's the recovery path everything else leans on.
 
@@ -1020,14 +1020,14 @@ tapewyrm/
   .github/workflows/
 ```
 
-**Fork posture, stated plainly (see §1).** The firmware is a **hard fork** — GW's tree is **vendored**, not submoduled-to-upstream, because the arbiter / verbs / capture changes are structural and the hardware is fixed at v4.1, so tracking upstream buys nothing. The one discipline retained: keep the genuinely-reused GW primitives (flux-capture timing, USB, **bootloader/update protocol**) behind a clean seam so upstream fixes to them can still be cherry-picked by hand, and so `tw flash` (and, still, stock `gw update`) stays a valid flash path. On the host there is effectively **nothing to fork** — GW's tooling is disk-image-centric and does not survive; depend on (or vendor) only the flux-codec / PLL / MFM primitives and write the rest as Tapewyrm. If those primitives need patching, vendor that slice rather than carrying a fork of the whole GW host package.
+**Fork posture, stated plainly (see §1).** The firmware is a **hard fork** — GW's tree is **vendored**, not submoduled-to-upstream, because the arbiter / verbs / capture changes are structural and the hardware is fixed at v4.1, so tracking upstream buys nothing. The one discipline retained: keep the genuinely-reused GW primitives (flux-capture timing, USB, **bootloader/update protocol**) behind a clean seam so upstream fixes to them can still be cherry-picked by hand, and so `tw update` (and, still, stock `gw update`) stays a valid flash path. On the host there is effectively **nothing to fork** — GW's tooling is disk-image-centric and does not survive; depend on (or vendor) only the flux-codec / PLL / MFM primitives and write the rest as Tapewyrm. If those primitives need patching, vendor that slice rather than carrying a fork of the whole GW host package.
 
-**The bootloader is the neutral substrate — keep the board a dual citizen.** Leaving GW's bootloader and update protocol untouched means the *same board* flashes a stock Greaseweazle image **or** a Tapewyrm image with one flash each (`tw flash` for Tapewyrm; stock `gw update` still works too, since the protocol is wire-compatible); the application that lands decides what the board is that session. Worth protecting for three reasons beyond tidiness:
+**The bootloader is the neutral substrate — keep the board a dual citizen.** Leaving GW's bootloader and update protocol untouched means the *same board* flashes a stock Greaseweazle image **or** a Tapewyrm image with one flash each (`tw update` for Tapewyrm; stock `gw update` still works too, since the protocol is wire-compatible); the application that lands decides what the board is that session. Worth protecting for three reasons beyond tidiness:
 1. **Instant revert to stock** for bench debugging — rule out your own firmware by flashing GW, confirm the drive/cabling/hardware behaves, flash back. No DFU jumper, no ArteryISP, no un-brick ritual.
 2. **A/B against a known-good flux engine** — stock GW reading a *real floppy* is the reference for whether a capture fault is yours or the silicon's: same board, same USB, same flux primitives, firmware known-good. If GW reads a floppy clean and Tapewyrm's capture is garbage, the bug is yours.
 3. **The hardware keeps its resale/reuse value** — it is still a Greaseweazle when you are done, not a single-purpose brick.
 
-The protecting invariant is narrow: **do not touch the bootloader flash region, the application entry vector, the DFU strap, or the USB VID/PID + update-mode commands/protocol** — keep all of that wire-compatible with the GW bootloader (so both `tw flash` and stock `gw update` drive it; detection keys off the VID/PID). The human-readable USB *product string* is rebranded to `Tapewyrm` and the boot banner says Tapewyrm (both cosmetic — they don't affect wire-compat); the update-mode bootloader itself stays the GW substrate. Diverge as hard as you like *above* the application entry point; the boot/update layer is the one place the fork stays faithful.
+The protecting invariant is narrow: **do not touch the bootloader flash region, the application entry vector, the DFU strap, or the USB VID/PID + update-mode commands/protocol** — keep all of that wire-compatible with the GW bootloader (so both `tw update` and stock `gw update` drive it; detection keys off the VID/PID). The human-readable USB *product string* is rebranded to `Tapewyrm` and the boot banner says Tapewyrm (both cosmetic — they don't affect wire-compat); the update-mode bootloader itself stays the GW substrate. Diverge as hard as you like *above* the application entry point; the boot/update layer is the one place the fork stays faithful.
 
 ### 12.6 Task runner — `justfile`
 
@@ -1042,7 +1042,7 @@ automatically — no manual venv, no system `srecord`/`crcmod`/`zip`. The recipe
 | `just package` | the whole project as one package: host wheels + at32f4 firmware → `dist/` |
 | `just fw [mcus]` | firmware images only, via PlatformIO, pure-Python HEX merge |
 | `just fw-dist` | firmware release: every PlatformIO-wired MCU + a combined `.upd` (no host wheel) |
-| `just flash [image]` | `tw flash` via the GW-compatible application bootloader (default `firmware/.pio/build/tapewyrm/firmware.bin`) |
+| `just update [image]` | `tw update` via the GW-compatible application bootloader (default `firmware/.pio/build/tapewyrm/firmware.bin`) |
 | `just dfu [bin]` | `tw dfu`: recovery flash via the DFU header + AT32 ROM bootloader |
 | `just check PKG MODULE` | one package: `uv sync --extra dev`, ruff check, ruff format --check, mypy, pytest |
 | `just host` | `check` for all four packages, base first (archive → qiclib → cli → qicsilver) |
@@ -1222,7 +1222,7 @@ Layered on GW's USB CDC-ACM transport and **GW's own command packets** (the verb
 | `link/transport.py` | `SerialTransport` (pyserial) + `FakeTransport`; GW command-packet framing |
 | `link/protocol.py` | **generated**: opcode/marker enums, version |
 | `link/device.py` | `DeviceLink` typed RPC (§13.3), capability gate, `LinkError` tree |
-| `link/update.py` | `tw flash` (app bootloader) / `tw dfu` (`dfu-util`) |
+| `link/update.py` | `tw update` (app bootloader; `.upd` parsing) / `tw dfu` (`dfu-util`) |
 | `qic117/commands.py` | command table (§13.1) as `Cmd` records; N+2 arg encoder |
 | `qic117/drive.py` | `Qic117Drive` (§6A.3): dispatch by kind, Ready polling, reports, wake, write-path refusal |
 | `qic117/status.py` | error classification (fatal/benign); re-exports the archive's report decoders |

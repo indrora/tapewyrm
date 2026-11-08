@@ -25,8 +25,8 @@ fw-dist:
     uv run tools/package.py --dist --skip-host
 
 # convenience flash via the GW-compatible application bootloader (tw owns this, not gw)
-flash image="firmware/.pio/build/tapewyrm/firmware.bin":
-    cd packages/tapewyrm-cli && uv run tw flash ../../{{image}}
+update image="firmware/.pio/build/tapewyrm/firmware.bin":
+    cd packages/tapewyrm-cli && uv run tw update ../../{{image}}
 
 # recovery flash via the hardware DFU header + AT32 ROM bootloader (tw -> dfu-util)
 dfu bin="firmware/.pio/build/tapewyrm/firmware.bin":

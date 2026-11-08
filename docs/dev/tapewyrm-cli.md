@@ -36,7 +36,7 @@ tests with no hardware and no compiled wheels.
 | `tapewyrm.cli.convert` | `tw convert`. |
 | `tapewyrm.cli.info` | `tw info`: host and firmware builds, and the board. |
 | `tapewyrm.cli.inspect` | `tw inspect`: the header of any Tapewyrm file. |
-| `tapewyrm.cli.firmware` | `tw flash` and `tw dfu`. |
+| `tapewyrm.cli.firmware` | `tw update` and `tw dfu`. |
 | `tapewyrm.console` | Rich console, log handler and progress bars. Kept identical to `qicsilver.console` and `cinnabar.console` by hand. |
 | `tapewyrm.link.transport` | `Transport` protocol, `SerialTransport` (pyserial) and `FakeTransport` (scriptable, for tests); Greaseweazle command-packet framing. |
 | `tapewyrm.link.device` | `DeviceLink`: typed calls for each device transaction, the capability gate and the `LinkError` tree. No QIC semantics. |

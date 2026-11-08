@@ -6,7 +6,7 @@ step and continue later on another machine.
 
 | Tool | Stage | Reads | Writes | Needs hardware |
 |---|---|---|---|---|
-| [`tw`](tw/index.md) | Capture and convert | The drive, through the Greaseweazle; TWRF captures | TWRF captures; TWTI/TWTZ tape images | `dump`, `info`, `drive`, `flash`, `dfu` only |
+| [`tw`](tw/index.md) | Capture and convert | The drive, through the Greaseweazle; TWRF captures | TWRF captures; TWTI/TWTZ tape images | `dump`, `info`, `drive`, `update`, `dfu` only |
 | [`qicsilver`](qicsilver/index.md) | Recover | TWTI/TWTZ tape images | TWVL volumes; tar files and damage reports | No |
 | [`cinnabar`](cinnabar/index.md) | Inspect | TWRF captures; TWTI/TWTZ tape images | Nothing (a viewer); optional screenshots | No |
 

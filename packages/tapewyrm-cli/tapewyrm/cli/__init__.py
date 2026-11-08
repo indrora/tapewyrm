@@ -17,7 +17,7 @@ plus the tools around them:
     inspect  show the header of any TWRF, TWTI/TWTZ or TWVL file (no hardware)
     info     host + firmware build identity, board, port and USB serial
     drive    poke the drive by hand: select, status, reports, motion, scope
-    flash    update Tapewyrm firmware (app bootloader over USB)
+    update   update Tapewyrm firmware (app bootloader over USB)
     dfu      recovery/first flash via the AT32 ROM bootloader (dfu-util)
 
 Package layout, one module per command group (STYLE.md §2.2):
@@ -32,7 +32,7 @@ Package layout, one module per command group (STYLE.md §2.2):
     convert.py   ``tw convert``
     info.py      ``tw info``
     inspect.py   ``tw inspect`` (any TWRF/TWTI/TWTZ/TWVL header)
-    firmware.py  ``tw flash`` and ``tw dfu``
+    firmware.py  ``tw update`` and ``tw dfu``
 
 Registration without import cycles: ``cli`` is defined in app.py, which
 imports no command module. Each command module imports ``cli`` from app.py and
