@@ -30,6 +30,13 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Sync
         run: uv sync --extra dev
+      # PySide6's QtGui links libEGL / libGL / libxkbcommon at import time,
+      # even under the offscreen platform plugin (which only avoids needing
+      # an X server). ubuntu-latest doesn't ship them, so cinnabar's tests die
+      # at collection with "libEGL.so.1: cannot open shared object file".
+      - name: Qt system libraries
+        if: matrix.package == 'cinnabar'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0
       - name: Qt offscreen
         run: echo "QT_QPA_PLATFORM=offscreen" >> "$GITHUB_ENV"
       - name: Ruff lint
