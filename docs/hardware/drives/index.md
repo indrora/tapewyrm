@@ -5,6 +5,14 @@ which of them have been on the bench, and what each one reads. Pick the drive
 profile here, then pass it to `tw` with `--profile`. How profiles are written
 and resolved is in [Drive profiles](../../tw/profiles.md).
 
+!!! info "Most `ftape` supported drives should work"
+    if `ftape` supported your drive, it's probably going to work here either with some minor tweaking of a profile.
+
+!!! note "Irwin drives"
+    Most Irwin AccuTrack (A120, etc.) drives do *not* speak QIC-117 and are not supported by Tapewyrm.
+    If you have backups built with irwin-specific formatting, we suggest using a real tape controller in a period machine.
+
+
 ## Drive table
 
 | Drive | Profile | Status | Formats | Data rates seen | Page |

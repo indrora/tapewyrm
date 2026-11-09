@@ -97,10 +97,11 @@ nav:
       - Tested drives: hardware/drives/index.md
       - Cartridges: hardware/cartridges.md
       - Drives:
+          - Overview: hardware/drives/index.md
           - Colorado Jumbo 350: hardware/drives/colorado-350.md
           - Colorado 1400: hardware/drives/colorado-1400.md
           - TEAC FT-3010: hardware/drives/teac-ft3010.md
-          - Conner and Iomega: hardware/drives/untested.md
+          - Other Untested: hardware/drives/untested.md
   - Formats:
       - QIC standards: formats/index.md
       - Vendor extensions: formats/vendor/index.md

@@ -4,6 +4,11 @@ The HP/Colorado 1400 is a QIC-3010-class floppy-tape drive. Tapewyrm can
 select it and read its reports, but the bench unit has not referenced any
 tape, so no tape has been dumped on it.
 
+!!! note "Hardware likely bad"
+    The only tested Colorado 1400 might well be bad, as it won't cleanly reference
+    any tape that is presented to it. YMMV, I don't have another one to test with.
+
+
 ## Identification
 
 Values as reported by a bench unit:

@@ -9,6 +9,13 @@ a tape with it. The board is described in
     Tapewyrm is a hard fork of the Greaseweazle firmware. Use `tw` with a board
     that runs it; `gw` is only for putting stock firmware back.
 
+!!! danger "Board Support"
+    Tapewyrm specifically supports the Greaseweazle 4.1 built from the Artery AT32.
+    If you are unsure what version of the Greaseweazle you have, give your board a peek.
+    While the 4.1 hardware is almost universally built from the Artery AT32, it is technically
+    pin compatible with the STM32 of similar part numbering.
+
+
 ## Get the firmware
 
 Use a release package if you have one. Otherwise build it from the repository

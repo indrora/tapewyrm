@@ -1,4 +1,4 @@
-# Conner and Iomega
+# Untested & Unknown
 
 This page covers the drive families Tapewyrm has a profile for but has never
 run on hardware: Conner (and Archive) drives and the Iomega Ditto. Treat

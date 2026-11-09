@@ -52,10 +52,15 @@ the command interface (Step, Track Zero and Index); the
 [QIC-117 page](../formats/qic-117.md) describes how they are used.
 
 !!! note
-    Tapewyrm is a recovery tool. It never asserts Write Enable, and the host
-    refuses every QIC-117 command that writes or formats tape.
+    Currently, Tapewyrm has no write capabilities, and does not assert Write Enable in software.
+    As an act of caution, you should always verify the Greaseweazle's Write Enable header.
 
 ## USB link limits
+
+!!! note
+    Share the USB bus as little as you can during a capture. The throughput
+    figures above were measured with nothing else busy on the bus; a hub or a
+    busy device on the same controller reduces the margin.
 
 The AT32F403A's USB controller is Full-Speed only. The firmware reports this
 at runtime, and `tw info` shows it.
@@ -82,10 +87,6 @@ things do not fit through the link: a 2 Mbit/s drive mode (about 1.3 MB/s by
 scaling), and flux during high-speed physical motion. The firmware ends a
 capture cleanly when its buffer overflows.
 
-!!! note
-    Share the USB bus as little as you can during a capture. The throughput
-    figures above were measured with nothing else busy on the bus; a hub or a
-    busy device on the same controller reduces the margin.
 
 ## What the Tapewyrm firmware adds
 
