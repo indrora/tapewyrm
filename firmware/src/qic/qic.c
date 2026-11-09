@@ -514,6 +514,19 @@ static uint8_t qic_capture_check_motion(void)
     if (qic_cap.flux_count != qic_cap.seen_count) {
         qic_cap.seen_count = qic_cap.flux_count;
         qic_cap.last_flux_at = time_now();
+        /* Flux is arriving, so the read is progressing: defer GW's command
+         * watchdog. GW kicks it only on INDEX (rdata_encode_flux), which suits a
+         * floppy (INDEX every revolution) but not tape, where INDEX comes once
+         * per segment the DRIVE manages to read. A drive with a failing read
+         * channel stops pulsing INDEX while flux keeps flowing, and 10 s later
+         * the watchdog ran floppy_configure() mid-pass: tape stopped, buffer
+         * zeroed, no END and no terminator. On a Colorado Jumbo 250 that cut
+         * every pass at 16.7 s of tape (INDEX stopped at ~6.7 s; bench
+         * 2026-11-09). The capture's own rules still end it (END(EOT) after
+         * QIC_IDLE_END_MS without flux, the no-start watchdog, the byte budget,
+         * host abort), and a hung pump stops kicking, so the watchdog remains
+         * the backstop it is meant to be. */
+        watchdog_kick();
     }
     if (!qic_cap.segment_seen) {
         /* No segment found yet: only the no-start watchdog can end the run.

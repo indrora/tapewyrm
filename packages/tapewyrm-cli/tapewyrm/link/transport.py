@@ -235,17 +235,20 @@ class SerialTransport:
         abort goes out-of-band as a clear-comms baud change, then the stale
         flux still in flight is drained.
 
-        The drain alone does not guarantee a clean next response. On macOS
-        (bench, 2026-11-09) about 4 KB of flux the host had already received
-        before the abort is held by the CDC driver past reset_input_buffer()
-        and delivered only after the NEXT host write: 0 B arrived in 3 s of
-        reads, then one write released it all at once, ahead of that write's
-        reply. It is not the device: GW flux status after the abort is OKAY
-        (no overflow), u_buf is zeroed, and the AT32F403A's usbd peripheral
-        buffers only a couple of 64 B packets. So DeviceLink.resync() runs
-        after every abort and proves the stream is back in step with a real
-        exchange (its write flushes the held data out, its next drain discards
-        it); this method only pulls the plug.
+        The drain alone does not guarantee a clean next response. A USB bulk
+        read on macOS completes only when its buffer fills or a SHORT packet
+        arrives, and GW streams nothing but full 64 B packets. A stream that
+        stops dead (clear-comms, or the firmware dropping out of a read) leaves
+        the host's read pending with the tail inside it: on the bench
+        (2026-11-09) 4-6 KB sat there for seconds, invisible to read() and
+        untouched by reset_input_buffer(), until the next command's reply (a
+        short packet) completed the transfer and delivered it all, ahead of
+        that reply. It is not the device: GW flux status after the abort is
+        OKAY, u_buf is zeroed, and the AT32F403A's usbd peripheral buffers
+        only a couple of packets. So DeviceLink.resync() runs after every
+        abort and proves the stream is back in step with a real exchange (its
+        reply flushes the held tail out, its next drain discards it); this
+        method only pulls the plug.
         """
         ser = self._require()
         log.debug("abort: clear-comms baud change on %s", self.port)
