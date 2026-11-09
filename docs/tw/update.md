@@ -94,8 +94,11 @@ its update protocol unchanged. `tw update` speaks that protocol itself, so no
 
 1. Ask the running firmware what it is (`GET_INFO`).
 2. If the main firmware is running, tell it to reboot into the bootloader,
-   then wait for the board to come back on USB. `tw` finds it again by its USB
-   serial number, so a renamed serial port does not matter.
+   then wait for the board to come back on USB. `tw` finds it again by the
+   MCU unique ID in its USB serial number, so a renamed serial port does not
+   matter. The serial's two-letter prefix is ignored: Tapewyrm application
+   images say `TW`, while the bootloader (which `tw update` never rewrites)
+   and older images say `GW`, so one update crosses both.
 3. Send the image. The bootloader erases the old main firmware, writes the new
    one and checks its CRC. If the CRC fails it erases the half-written image
    and stays in the bootloader; run `tw update` again.
@@ -122,11 +125,14 @@ the board with no bootloader; [tw dfu](#tw-dfu) recovers it.
 With `--dfu`, `tw update` takes the DFU path instead, exactly as `tw dfu IMAGE`
 with its defaults. It does not take `tw dfu`'s options.
 
-!!! warning "Not yet run on a v4.1"
-    The client is tested against the firmware's update code and the
-    `mk_update.py` file format, but has not yet updated a real board. If an
-    update fails partway, the bootloader is still there: run `tw update`
-    again, or fall back to [tw dfu](#tw-dfu).
+!!! note "Confirmed on a v4.1, main firmware only"
+    A main-firmware update from a raw `.bin` was first run on a real V4.1 on
+    2026-11-09. `--bootloader` and `.upd` files are tested only against the
+    firmware's update code and the `mk_update.py` format so far. If an update
+    fails partway, the bootloader is still there: run `tw update` again, or
+    fall back to [tw dfu](#tw-dfu). The step-by-step routine for flashing your
+    own build is in
+    [Update from your source tree](../guide/flash-greaseweazle.md#update-from-your-source-tree).
 
 ### Options
 

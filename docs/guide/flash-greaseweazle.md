@@ -97,10 +97,76 @@ application `.bin` or the `.upd` file from `just fw-dist`. If it fails partway,
 the board is left in its bootloader: run `tw update` again. See
 [tw update](../tw/update.md#tw-update) for the details.
 
-!!! warning "Not yet run on a v4.1"
-    `tw update` is tested against the firmware's update code but has not yet
-    updated a real board. If it misbehaves, fall back to the first-flash
-    procedure above; `tw update --dfu IMAGE` takes the DFU path directly.
+!!! note "Confirmed on a v4.1"
+    `tw update` with a raw `.bin` first updated a real V4.1 on 2026-11-09,
+    from October firmware to the current tree. Rewriting the bootloader
+    (`tw update --bootloader`) has not been run on a real board yet.
+
+### Update from your source tree
+
+Do this after pulling changes to `firmware/` or `protocol/`, or whenever
+`tw info` prints `tw and firmware were built from different commits`. Run it
+from the repository root, with nothing reading the tape: an update reboots the
+board, which ends any capture.
+
+1. **Commit first.** The build stamps the firmware with the current commit and
+   a dirty flag (`tw info` and `BUILD_INFO` report both). A board running a
+   `+dirty` build can't be traced back to the exact source.
+2. **Build.**
+
+    ```sh
+    just fw
+    ```
+
+    This builds the bootloader and the application and leaves the application
+    image at `firmware/.pio/build/tapewyrm/firmware.bin`. PlatformIO builds
+    incrementally, so a build that takes under a second is normal.
+3. **Check the image is the one you meant to build.** The commit is a plain
+   string inside the image:
+
+    ```sh
+    strings firmware/.pio/build/tapewyrm/firmware.bin | grep -E '^[0-9a-f]{40}$'
+    git rev-parse HEAD
+    ```
+
+    The two lines must match.
+4. **Flash.**
+
+    ```sh
+    just update
+    ```
+
+    This runs `tw update` on the image from step 2. It prints
+    `board now running main firmware v1.6` when it is done. The image is
+    reported as `v0.0` because a raw `.bin` carries no version number; that is
+    expected.
+5. **Verify.**
+
+    ```sh
+    tw info
+    ```
+
+    The `firmware` line must show the commit from step 3, with no `+dirty`,
+    and the `note : ... different commits` line must be gone.
+6. **Smoke-test a capture.** With a drive wired up and a known-good tape in it,
+   read a few seconds of track 0:
+
+    ```sh
+    tw drive load-point
+    tw drive track 0
+    tw drive flux --motion logical --seconds 5
+    ```
+
+    The report ends with `sectors : N found at <rate> kbps (N CRC-clean)`; on
+    a healthy drive almost all of them are clean. If the tape is at EOT,
+    Logical Forward has nowhere to go and the probe reports `0 transitions`;
+    that is why `load-point` comes first.
+
+If step 4 fails with `board did not come back on USB`, the image is usually
+already written: run `tw info` before anything else. If `tw info` can't find
+the board, run `tw update` again (the bootloader is still there), and if that
+fails too, use the DFU header as in
+[Flash for the first time](#flash-for-the-first-time).
 
 Use `tw update` to install Tapewyrm firmware. Installing it with `gw update`
 is not supported.
