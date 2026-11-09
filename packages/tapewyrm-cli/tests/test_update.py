@@ -345,3 +345,37 @@ def test_cli_update_turns_flash_errors_into_messages(tmp_path):
     res = CliRunner().invoke(cli, ["update", "--dfu", "--bootloader", str(img)])
     assert res.exit_code != 0
     assert "drop --bootloader" in res.output
+
+
+def test_board_id_ignores_gw_tw_prefix():
+    # Regression (2026-11-09): the bootloader enumerates as GW..., the new app as
+    # TW...; matching the whole serial lost the board after the reboot.
+    uid = "053C112228470000077CA413"
+    assert update.board_id("GW" + uid) == update.board_id("TW" + uid) == uid
+    assert update.board_id("XY" + uid) == "XY" + uid  # not ours: unchanged
+    assert update.board_id("GW1234") == "GW1234"  # wrong length: unchanged
+    assert update.board_id("") == ""
+
+
+def test_serial_connector_finds_board_after_prefix_change(monkeypatch):
+    from serial.tools import list_ports
+
+    from tapewyrm.link.device import GW_USB_PID, GW_USB_VID
+
+    uid = "053C112228470000077CA413"
+    port = types.SimpleNamespace(
+        vid=GW_USB_VID, pid=GW_USB_PID, device="/dev/cu.fake1", serial_number="TW" + uid
+    )
+    monkeypatch.setattr(list_ports, "comports", lambda: [port])
+    opened = []
+
+    class _Transport:
+        def __init__(self, dev):
+            self.dev = dev
+
+        def open(self):
+            opened.append(self.dev)
+
+    monkeypatch.setattr(update, "SerialTransport", _Transport)
+    t = update.serial_connector(None)("GW" + uid)  # started from a GW-prefixed app
+    assert t.dev == "/dev/cu.fake1" and opened == ["/dev/cu.fake1"]

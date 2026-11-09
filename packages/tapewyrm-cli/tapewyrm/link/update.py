@@ -394,6 +394,28 @@ class UpdateResult:
 # uses it to find the same board again after it re-enumerates.
 Connector = Callable[[str], Transport]
 
+# USB serial = two-letter prefix + the MCU's 96-bit unique ID as 24 hex digits
+# (firmware/src/usb/core.c: "TW%08X%08X%08X"). The prefix is NOT stable across
+# an update: Tapewyrm application images say "TW", but the bootloader, which
+# `tw update` never rewrites, and older application images say "GW" (stock
+# Greaseweazle's). One update therefore crosses the prefix both ways (app TW ->
+# bootloader GW -> app TW). Matching the whole string lost the board on the
+# first real-board update (2026-11-09, from a GW-prefixed app). Boards are told
+# apart by the unique ID alone.
+_SERIAL_PREFIXES = ("GW", "TW")
+_SERIAL_ID_LEN = 24
+
+
+def board_id(serial_number: str) -> str:
+    """The prefix-free MCU unique ID in a GW/Tapewyrm USB serial.
+
+    Any other serial (a different firmware, an unusual length) is returned
+    unchanged, so it can still only match itself.
+    """
+    if len(serial_number) == 2 + _SERIAL_ID_LEN and serial_number[:2] in _SERIAL_PREFIXES:
+        return serial_number[2:]
+    return serial_number
+
 
 def get_state(t: Transport) -> BoardState:
     """GET_INFO, which both the main firmware and the bootloader answer."""
@@ -463,9 +485,10 @@ def serial_connector(port: str | None) -> Connector:
         while True:
             gws = [p for p in list_ports.comports() if (p.vid, p.pid) == (GW_USB_VID, GW_USB_PID)]
             if serial_number:
-                # After a reset the board's node may be renamed; its USB serial
-                # (from the MCU unique ID, firmware/src/usb/config.c) is not.
-                devs = [p.device for p in gws if p.serial_number == serial_number]
+                # After a reset the board's node may be renamed, and its serial
+                # prefix may change (board_id); its MCU unique ID does not.
+                want = board_id(serial_number)
+                devs = [p.device for p in gws if board_id(p.serial_number or "") == want]
             elif port is not None:
                 devs = [p.device for p in gws if p.device == port] or [port]
             else:
