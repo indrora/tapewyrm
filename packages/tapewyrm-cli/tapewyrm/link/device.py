@@ -759,8 +759,9 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
             log.debug("abort failed: %s", exc)
             raise LinkError(f"abort failed: {exc}") from exc
         if self._resync is not None:
-            # The drain inside send_control is not enough on its own: stale
-            # flux was seen arriving after it (transport.py send_control).
+            # The drain inside send_control is not enough on its own: macOS
+            # holds pre-abort flux until the next write (transport.py
+            # send_control has the bench evidence).
             self._resync()
 
     def __exit__(
