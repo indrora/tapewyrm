@@ -130,9 +130,8 @@ with its defaults. It does not take `tw dfu`'s options.
     2026-11-09. `--bootloader` and `.upd` files are tested only against the
     firmware's update code and the `mk_update.py` format so far. If an update
     fails partway, the bootloader is still there: run `tw update` again, or
-    fall back to [tw dfu](#tw-dfu). The step-by-step routine for flashing your
-    own build is in
-    [Update from your source tree](../guide/flash-greaseweazle.md#update-from-your-source-tree).
+    fall back to [tw dfu](#tw-dfu). Which command fits which board is in
+    [Flash the Greaseweazle](../guide/flash-greaseweazle.md#which-command).
 
 ### Options
 

@@ -94,7 +94,7 @@ with QIC verbs added to its command loop. It reuses Greaseweazle's flux read
 engine for captures and its pin primitives for the command channel. It is a
 hard fork that diverges from Greaseweazle on purpose, so Greaseweazle's `gw`
 command is not supported with it; use `tw`. To use the board as a Greaseweazle
-again, [flash stock firmware back](../guide/flash-greaseweazle.md#go-back-to-stock-greaseweazle-firmware).
+again, [flash stock firmware back](../guide/flash-greaseweazle.md#which-command).
 
 | Verb | Number | Does |
 |---|---|---|

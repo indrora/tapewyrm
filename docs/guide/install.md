@@ -15,7 +15,7 @@ environment per package and fetches the dependencies on first use.
   repository's `justfile` wraps the common commands.
 - **[PlatformIO Core](https://platformio.org/install/cli)** (optional). Only
   if you build the firmware yourself. See
-  [Get a firmware image](flash-greaseweazle.md#get-a-firmware-image).
+  [Get the firmware](flash-greaseweazle.md#get-the-firmware).
 
 ## Install
 

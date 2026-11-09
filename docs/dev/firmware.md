@@ -217,7 +217,7 @@ Keeping the boot layer intact buys three things:
 1. **Revert to stock without a debug probe.** Fit the Update Jumper and run
    `gw update`, or strap the DFU header as a fallback. Then check the drive,
    cable and board with stock GW, and flash Tapewyrm back. The procedure is in
-   [Go back to stock Greaseweazle firmware](../guide/flash-greaseweazle.md#go-back-to-stock-greaseweazle-firmware).
+   [Go back to stock Greaseweazle firmware](../guide/flash-greaseweazle.md#which-command).
 2. **A/B against a known-good flux engine.** Stock GW reading a real floppy is
    the reference. Because the tape capture is GW's read engine run
    free-running, the comparison is tight: if GW reads a floppy clean and the
