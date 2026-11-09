@@ -60,6 +60,13 @@ class TransportError(Exception):
     """Low-level transport failure (port/IO/framing). DeviceLink maps these to LinkError."""
 
 
+class TransportDesync(TransportError):
+    """A response header did not echo the request: the stream is out of step.
+
+    Its own type so DeviceLink can resync before reporting it (link/device.py).
+    """
+
+
 class TransportClosed(TransportError):
     """Operation attempted on a transport that is not open."""
 
@@ -130,7 +137,16 @@ class Transport(Protocol):
     def read_stream(self, max_bytes: int = 65536) -> bytes:
         """Read raw bytes from the capture stream (may be shorter than max_bytes).
 
-        Returns ``b""`` when the stream is exhausted / the session is done.
+        Returns ``b""`` when nothing arrived within the read timeout. That is
+        NOT proof the session is over: a stream can pause. Only the
+        end-of-stream byte ends a capture (see link/streamend.py).
+        """
+
+    def drain(self, quiet_s: float = 0.2) -> int:
+        """Discard input until the line has been quiet for ``quiet_s``.
+
+        Returns how many bytes were thrown away. Used to get the response
+        stream back in step after an abort or a desync (DeviceLink.resync).
         """
 
 
@@ -217,29 +233,45 @@ class SerialTransport:
         A frame written mid-read is never parsed: GW's read loop only pumps
         flux out and doesn't look at incoming data until the read ends. So the
         abort goes out-of-band as a clear-comms baud change, then the stale
-        flux still in flight is drained so the next response starts clean.
+        flux still in flight is drained.
+
+        The drain alone does not guarantee a clean next response. On the bench
+        (T1000 and Jumbo 250, macOS, 2026-11-09) it saw 0 B, and stale flux
+        still turned up as the header of the next command's response,
+        presumably a packet already armed in the device's IN endpoint. So
+        DeviceLink.resync() runs after every abort and proves the stream is
+        back in step with a real exchange; this method only pulls the plug.
         """
         ser = self._require()
         log.debug("abort: clear-comms baud change on %s", self.port)
-        drained = 0
         try:
             ser.baudrate = self.BAUD_CLEAR_COMMS  # type: ignore[attr-defined]
             ser.baudrate = self.baud  # type: ignore[attr-defined]
+        except Exception as exc:
+            log.debug("clear-comms baud change failed: %s", exc)
+            raise TransportError(f"clear-comms abort failed: {exc}") from exc
+        drained = self.drain(self._DRAIN_QUIET_S)
+        log.debug("abort: drained %d B of stale stream", drained)
+
+    def drain(self, quiet_s: float = 0.2) -> int:
+        ser = self._require()
+        drained = 0
+        try:
             old_timeout = ser.timeout  # type: ignore[attr-defined]
-            ser.timeout = self._DRAIN_QUIET_S  # type: ignore[attr-defined]
+            ser.timeout = quiet_s  # type: ignore[attr-defined]
             try:
-                # Discard until the line has been quiet for a moment. The byte
-                # count is kept only for the debug line below: a big number
-                # means a lot of flux was still in flight when we pulled the plug.
+                # Discard until the line has been quiet for quiet_s. The count
+                # is only for debug logs: a big number means a lot of flux
+                # was still in flight.
                 while chunk := ser.read(65536):  # type: ignore[attr-defined]
                     drained += len(chunk)
             finally:
                 ser.timeout = old_timeout  # type: ignore[attr-defined]
             ser.reset_input_buffer()  # type: ignore[attr-defined]
         except Exception as exc:
-            log.debug("clear-comms abort failed after draining %d B: %s", drained, exc)
-            raise TransportError(f"clear-comms abort failed: {exc}") from exc
-        log.debug("abort: drained %d B of stale stream", drained)
+            log.debug("drain failed after discarding %d B: %s", drained, exc)
+            raise TransportError(f"drain failed: {exc}") from exc
+        return drained
 
     def _read_exact(self, n: int) -> bytes:
         ser = self._require()
@@ -271,7 +303,7 @@ class SerialTransport:
             # The stream is out of step with our requests (leftover flux, a
             # missed response); everything after this on the link is suspect.
             log.debug("desync: response echo 0x%02x != request 0x%02x", echo, opcode)
-            raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
+            raise TransportDesync(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
         if ack != ACK_OKAY:
             log.debug("0x%02x -> ACK_%s", opcode, ACK_NAMES.get(ack, ack))
             return ack, b""
@@ -327,6 +359,7 @@ class FakeTransport:
         self._responses: deque[tuple[int, int, bytes]] = deque()
         self._stream: deque[bytes] = deque()
         self._tail = b""  # unread remainder of the last response (read_exact)
+        self.drains = 0  # how many times drain() ran (resync tests)
 
     # --- scripting API ---
 
@@ -381,7 +414,7 @@ class FakeTransport:
         echo, ack, payload = self._responses.popleft()
         if echo != opcode:
             log.debug("fake: desync, echo 0x%02x != request 0x%02x", echo, opcode)
-            raise TransportError(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
+            raise TransportDesync(f"response echo 0x{echo:02x} != request 0x{opcode:02x}")
         if ack != ACK_OKAY:
             log.debug("fake: 0x%02x -> ACK_%s", opcode, ACK_NAMES.get(ack, ack))
             return ack, b""
@@ -414,6 +447,14 @@ class FakeTransport:
         head, tail = chunk[:max_bytes], chunk[max_bytes:]
         self._stream.appendleft(tail)
         return head
+
+    def drain(self, quiet_s: float = 0.2) -> int:
+        """Throw away the unread tail of the last response (the only buffered
+        input a fake has; queued responses model *future* device output)."""
+        self._require()
+        self.drains += 1
+        dropped, self._tail = len(self._tail), b""
+        return dropped
 
     def iter_stream(self) -> Iterator[bytes]:
         """Convenience drain of all remaining stream chunks (test helper)."""

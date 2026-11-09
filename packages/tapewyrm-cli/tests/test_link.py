@@ -10,6 +10,7 @@ import struct
 import pytest
 
 from tapewyrm.link.device import (
+    CaptureStalled,
     DeviceLink,
     LinkClosed,
     LinkError,
@@ -267,11 +268,11 @@ def test_scope_parses_edge_log():
 def test_capture_sends_binary_request_then_streams():
     link, t = _good_link()
     t.queue_response(Txn.CAPTURE, b"")
-    t.queue_stream(b"\x01\x02", b"\x03")
+    t.queue_stream(b"\x01\x02", b"\x03\x00")  # 00 = end of stream
     chunks = []
     with link.capture(10, StopCond(byte_budget=100), pass_id=7) as cap:
         chunks.extend(cap.chunks())
-    assert b"".join(chunks) == b"\x01\x02\x03"
+    assert b"".join(chunks) == b"\x01\x02\x03\x00"
     assert t.sent_frames[-1] == (
         int(Txn.CAPTURE),
         struct.pack("<BHHBHI", 10, 0, 0, 0, 7, 100),
@@ -282,10 +283,60 @@ def test_capture_abort_sends_control():
     link, t = _good_link()
     t.queue_response(Txn.CAPTURE, b"")
     t.queue_stream(b"\xaa")
+    t.queue_response(GW_GET_INFO, _gw_info())  # the resync after the abort
     cap = link.capture(10, StopCond())
     cap.abort()
     assert t.sent_control[-1][0] == int(Txn.ABORT)
+    assert t.sent_frames[-1][0] == GW_GET_INFO and t.drains == 1
     cap.__exit__(None, None, None)
+
+
+def test_capture_pause_is_not_the_end():
+    # Regression, Colorado Jumbo 250 (2026-11-08): one empty read used to end
+    # the pass, and the next command was answered by flux still streaming.
+    link, t = _good_link()
+    t.queue_response(Txn.CAPTURE, b"")
+    t.queue_stream(b"\x40", b"", b"", b"\x41\x00")  # pauses, then the real end
+    with link.capture(10, StopCond(), stall_s=60.0) as cap:
+        got = b"".join(cap.chunks())
+    assert got == b"\x40\x41\x00"
+    assert t.sent_control == []  # ended by the device: no abort
+
+
+def test_capture_end_inside_marker_payload_is_not_the_end():
+    # A 00 inside a marker payload, split across chunks, must not end the pass.
+    link, t = _good_link()
+    t.queue_response(Txn.CAPTURE, b"")
+    marker = bytes([0xFF, 0xF2, 0x01, 0x00])  # EVENT, 1-byte payload of 00
+    t.queue_stream(marker[:3], marker[3:] + b"\x40", b"\x00")
+    with link.capture(10, StopCond(), stall_s=60.0) as cap:
+        got = b"".join(cap.chunks())
+    assert got == marker + b"\x40\x00"
+
+
+def test_capture_stall_aborts_resyncs_and_raises():
+    link, t = _good_link()
+    t.queue_response(Txn.CAPTURE, b"")
+    t.queue_stream(b"\x40")  # then silence forever (FakeTransport returns b"")
+    t.queue_response(GW_GET_INFO, _gw_info())  # the resync after the abort
+    with pytest.raises(CaptureStalled):
+        with link.capture(10, StopCond(), stall_s=0.05) as cap:
+            for _ in cap.chunks():
+                pass
+    assert t.sent_control == [(int(Txn.ABORT), b"")]
+    assert t.sent_frames[-1][0] == GW_GET_INFO
+
+
+def test_desync_resyncs_then_still_fails():
+    # Junk answers the command; resync skips a junk round, then gets in step.
+    link, t = _good_link()
+    t.queue_response(0x98, b"")  # stale flux read back as a header
+    t.queue_response(0x0B, b"")  # resync round 1: more junk
+    t.queue_response(GW_GET_INFO, _gw_info())  # resync round 2: in step
+    with pytest.raises(LinkError, match="echo 0x98"):
+        link.wait_ready(1000)
+    assert t.drains == 2
+    assert [op for op, _ in t.sent_frames] == [int(Txn.WAIT_READY), GW_GET_INFO, GW_GET_INFO]
 
 
 def test_timed_capture_maps_transport_closed_to_link_closed():

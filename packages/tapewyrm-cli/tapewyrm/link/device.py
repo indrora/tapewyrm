@@ -41,18 +41,20 @@ from __future__ import annotations
 import logging
 import struct
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from types import TracebackType
 
 from tapewyrm.link.protocol import CAPS, PROTO_VERSION, Txn
+from tapewyrm.link.streamend import StreamEndScanner
 from tapewyrm.link.transport import (
     ACK_NAMES,
     ACK_OKAY,
     SerialTransport,
     Transport,
     TransportClosed,
+    TransportDesync,
     TransportError,
 )
 from tapewyrm.types import DeviceInfo, SelectHint, StopCond, TimingParams
@@ -164,6 +166,29 @@ class LinkVersionError(LinkError):
 
 class LinkClosed(LinkError):
     """An operation was attempted on a link that is not open."""
+
+
+class CaptureStalled(LinkError):
+    """A capture stream went silent for too long without its end-of-stream byte.
+
+    The session has been aborted (tape stopped) and the link resynced by the
+    time this is raised, so the caller may retry the pass.
+    """
+
+
+# How long a capture may send nothing before the host gives up on it. Must be
+# longer than the firmware's own ways of ending a pass, or the host would cut
+# off passes the device was about to end cleanly: QIC_NO_START_MS (15 s: no
+# segment seen yet) and QIC_IDLE_END_MS (1 s without flux, firmware/src/qic/
+# qic.c). A pass that outlives this has a drive feeding sparse noise (seen on a
+# Colorado Jumbo 250), which the firmware's transition-based idle check cannot
+# tell from data.
+CAPTURE_STALL_S = 20.0
+
+# DeviceLink.resync(): drain-then-probe rounds before giving up, and the quiet
+# window each drain waits for.
+_RESYNC_ROUNDS = 5
+_RESYNC_QUIET_S = 0.3
 
 
 def _u16le(b: int) -> bytes:
@@ -297,7 +322,46 @@ class DeviceLink:
             raise LinkClosed(str(exc)) from exc
         except TransportError as exc:
             log.debug("0x%02x: exchange failed: %s", opcode, exc)
+            if isinstance(exc, TransportDesync):
+                # Put the stream back in step for whoever talks next. This
+                # command still fails: it went out, so it may have acted (a
+                # COMMAND_TXN pulses STEP), and retrying it here could act twice.
+                self._resync_quietly()
             raise LinkError(f"command 0x{opcode:02x} failed: {exc}") from exc
+
+    def resync(self) -> None:
+        """Get the response stream back in step with our requests.
+
+        Each round drains the input until it is quiet, then does a GW GET_INFO
+        (harmless, answerable in any state) and checks its echo. Junk left in
+        flight (an IN packet the device had already armed when a capture was
+        aborted, or the rest of a response we stopped reading) is finite, so a
+        few rounds always outlast it on a live device. Raises LinkError if the
+        device never answers in step.
+        """
+        t = self._txn()
+        for round_no in range(1, _RESYNC_ROUNDS + 1):
+            try:
+                dropped = t.drain(_RESYNC_QUIET_S)
+                t.send_frame(_GW_GET_INFO, bytes([_GETINFO_FIRMWARE]))
+                ack, _ = t.recv_frame(_GW_GET_INFO, _GW_INFO_LEN)
+            except TransportClosed as exc:
+                raise LinkClosed(str(exc)) from exc
+            except TransportError as exc:
+                log.debug("resync round %d: %s; draining again", round_no, exc)
+                continue
+            if ack == ACK_OKAY:
+                log.debug("resync: in step after %d round(s), %d B dropped", round_no, dropped)
+                return
+            log.debug("resync round %d: GET_INFO ACK_%s", round_no, ACK_NAMES.get(ack, ack))
+        raise LinkError(f"link would not resync after {_RESYNC_ROUNDS} rounds")
+
+    def _resync_quietly(self) -> None:
+        """resync() for error paths: log a failure instead of masking the error."""
+        try:
+            self.resync()
+        except LinkError as exc:
+            log.warning("could not resync the device link: %s", exc)
 
     def _request(self, opcode: int, payload: bytes = b"", resp_len: int = 0) -> bytes:
         """One request/response that must be ACK_OKAY; returns the payload."""
@@ -547,6 +611,7 @@ class DeviceLink:
         tpt: int = 0,
         direction: int = 0,
         pass_id: int = 0,
+        stall_s: float = CAPTURE_STALL_S,
     ) -> CaptureStream:
         """Open a capture session (device issues motion, then streams flux).
 
@@ -566,7 +631,7 @@ class DeviceLink:
             motion_cmd, rate, tpt, direction, pass_id, stop.byte_budget or "free-run",
         )  # fmt: skip
         self._request(int(Txn.CAPTURE), payload)
-        return CaptureStream(self._txn())
+        return CaptureStream(self._txn(), resync=self.resync, stall_s=stall_s)
 
 
 class CaptureStream(AbstractContextManager["CaptureStream"]):
@@ -577,8 +642,19 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
     guarantees the device session is torn down (issues abort if still active).
     """
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        *,
+        resync: Callable[[], None] | None = None,
+        stall_s: float = CAPTURE_STALL_S,
+    ) -> None:
+        # ``resync`` (DeviceLink.resync) runs after every abort, so the next
+        # command after an aborted pass is never answered by stale flux. None
+        # only for bare streams in tests that have no DeviceLink.
         self._transport = transport
+        self._resync = resync
+        self._stall_s = stall_s
         self._closed = False
         self._aborted = False
 
@@ -600,17 +676,39 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
             raise LinkError(f"capture stream read failed: {exc}") from exc
 
     def chunks(self) -> Iterator[bytes]:
-        """Yield raw flux byte chunks until the stream is exhausted (END / abort)."""
+        """Yield raw flux byte chunks until the device ends the stream.
+
+        The end is GW's end-of-stream ``00`` token, found by StreamEndScanner;
+        the chunk that carries it is yielded whole (TWRF keeps the terminator).
+        An empty read is just a pause. Only ``stall_s`` of continuous silence
+        gives up: the session is then aborted (tape stopped), the link resynced,
+        and CaptureStalled raised. Before 2026-11-09 one empty read (the 2 s
+        serial timeout) counted as the end, which sent the next command into
+        a still-live stream on a drive feeding sparse noise (link/streamend.py).
+        """
+        scanner = StreamEndScanner()
+        quiet_since: float | None = None
         while not self._closed:
             data = self._read()
             if not data:
-                # The device drained the stream (END + NUL, then silence). Mark
-                # the session closed so __exit__ doesn't send ABORT -- which no
-                # firmware verb implements -- into an idle command channel.
-                log.debug("capture stream drained")
-                self._closed = True
-                break
+                now = time.monotonic()
+                quiet_since = now if quiet_since is None else quiet_since
+                if now - quiet_since < self._stall_s:
+                    continue
+                log.debug("capture stalled: %.1f s silent, no end-of-stream", now - quiet_since)
+                self.abort()  # stops the tape, then resyncs
+                raise CaptureStalled(
+                    f"capture stream silent for {self._stall_s:.0f} s without its end "
+                    "(drive feeding noise, or a stuck device); aborted"
+                )
+            quiet_since = None
+            ended = scanner.feed(data)
             yield data
+            if ended:
+                # The device has ended the stream itself. Mark the session
+                # closed so __exit__ doesn't send ABORT into an idle channel.
+                log.debug("capture stream ended (00 at byte %s)", scanner.end_offset)
+                self._closed = True
 
     def chunks_for(self, seconds: float) -> Iterator[bytes]:
         """Yield flux chunks for ``seconds`` of wall time, then abort the session.
@@ -660,6 +758,10 @@ class CaptureStream(AbstractContextManager["CaptureStream"]):
         except TransportError as exc:
             log.debug("abort failed: %s", exc)
             raise LinkError(f"abort failed: {exc}") from exc
+        if self._resync is not None:
+            # The drain inside send_control is not enough on its own: stale
+            # flux was seen arriving after it (transport.py send_control).
+            self._resync()
 
     def __exit__(
         self,
