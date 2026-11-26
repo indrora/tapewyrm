@@ -5,7 +5,8 @@
 
 version: 2
 updates:
-  - package-ecosystem: "uv" # See documentation for possible values
-    directory: "/packages/*/" # Location of package manifests
+  - package-ecosystem: "uv"
+    directories:
+      - "/packages/*"
     schedule:
       interval: "weekly"
